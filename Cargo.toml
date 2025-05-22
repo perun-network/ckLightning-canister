@@ -1,0 +1,24 @@
+[package]
+name = "ckLightning_canister"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lazy_static = "1"
+ic-cdk-macros = "0.18.2"
+candid = "=0.10.13"
+ic-cdk = "=0.16.1"
+ic-ledger-types = "0.14.0"
+candid_parser = "0.1.4"
+serde = "=1.0.219"
+serde_bytes = "=0.11.17"
+secp = "0.5.0"
+bitcoin = { version = "0.29.2", features = ["rand"] }
+async-trait = "0"
+digest = "0.9.0"
+ed25519-dalek = "1.0.1"
+hex = "0.4.3"
+getrandom = { version = "0.2", features = ["js"] }
+
+
+
