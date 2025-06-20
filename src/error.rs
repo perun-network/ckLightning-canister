@@ -15,7 +15,7 @@
 // use ic_cdk::export::candid::{CandidType, Deserialize};
 pub use candid::{
     CandidType, Deserialize, Int, Nat,
-    types::{Serializer, Type, TypeInner, TypeInner::Nat8},
+    types::{Serializer, Type},
 };
 #[macro_export]
 macro_rules! require {
@@ -40,13 +40,13 @@ pub enum Error {
     /// A non-finalized state was registered when a finalized state was
     /// expected.
     NotFinalized,
-    /// A channel has been concluded or disputed after conclusion.
+    /// A deposit or withdrawal has been disputed after conclusion.
     AlreadyConcluded,
     /// In some way, the input was invalid.
     InvalidInput,
-    /// When trying get more funds out of a channel than have been put into it.
+    /// When trying get more funds out of a pool than have been put into it.
     InsufficientFunding,
-    /// When there is not enough liquidity in the channel to perform a withdrawal of ckBTC
+    /// When there is not enough liquidity in the pool to perform a withdrawal of ckBTC
     InsufficientLiquidity,
     /// When a state that is registered for dispute is older than the previously
     /// registered state.
@@ -54,7 +54,9 @@ pub enum Error {
     /// Error while interaction with the ledger.
     LedgerError,
     /// Error receiving ICP tokens.
-    ReceiverError(crate::icp::ICPReceiverError),
+    ReceiverError(crate::receiver::ICPReceiverError),
+    /// Error confirming tx
+    ConfirmationError,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

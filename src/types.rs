@@ -11,24 +11,22 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
+use crate::require;
 use digest::{FixedOutputDirty, Update};
+use ed25519_dalek::Sha512 as Hasher;
 
-use crate::{
-    error::{Error, Result as CanisterResult},
-    require,
-};
-use ed25519_dalek::{PublicKey, Sha512 as Hasher, Signature};
+use bitcoin::secp256k1::PublicKey as SecpPublicKey;
 
-use bitcoin::{
-    hashes::hex::ToHex,
-    secp256k1::{self, PublicKey as SecpPublicKey, Secp256k1},
-};
-use candid::Encode;
-pub use candid::{
-    types::{Serializer, Type, TypeInner, TypeInner::Nat8},
-    Deserialize, Int, Nat,
-};
+#[derive(PartialEq, Debug, Clone, Eq)]
+pub struct L2Account(pub SecpPublicKey);
+
 use candid::{CandidType, Principal};
+pub use candid::{
+    Deserialize, Int, Nat,
+    types::{Serializer, Type},
+    types::{TypeInner, TypeInner::Nat8},
+};
+
 use core::cmp::*;
 use core::convert::*;
 
@@ -37,9 +35,6 @@ use serde_bytes::ByteBuf;
 
 // Type definitions start here.
 
-/// A layer-2 account identifier.
-#[derive(PartialEq, Debug, Clone, Eq, Hash)]
-pub struct L2Account(pub SecpPublicKey);
 #[derive(PartialEq, Debug, Eq, PartialOrd, Ord, Default, Clone)]
 /// A hash as used by the signature scheme.
 pub struct Hash(pub digest::Output<Hasher>);
@@ -56,6 +51,15 @@ pub struct Funding {
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+/// Identifies the funds belonging to a certain layer 2 identity within a
+/// certain channel.
+pub struct NotifyArgs {
+    pub block_height: u64,
+    pub amount: u64,
+    pub funding: Funding,
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 pub struct PoolFunding {
     /// The funds' owner's layer-2 identity within the channel.
     pub participant: L2Account,
@@ -69,15 +73,15 @@ pub type Amount = Nat;
 pub type Duration = u64;
 /// Timestamp in nanoseconds (same as ICP timestamps).
 pub type Timestamp = u64;
-/// Unique Perun channel identifier.
-#[derive(PartialEq, Eq, Ord, PartialOrd, Hash)] //Hash
+/// Unique channel identifier.
+#[derive(PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct ChannelId(pub [u8; 32]);
 
-#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Deserialize, CandidType)] //Hash,
+#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Deserialize, CandidType)]
 pub struct L1Account(pub Principal);
 
 /// A channel's unique nonce.
-#[derive(PartialEq, Eq, Ord, PartialOrd)] //Hash,
+#[derive(PartialEq, Eq, Ord, PartialOrd)]
 
 pub struct Nonce(pub [u8; 32]);
 
@@ -96,7 +100,7 @@ pub struct Params {
 }
 
 #[derive(Deserialize, CandidType, Default, Clone)]
-/// The mutable parameters and state of a Perun channel. Contains
+/// The mutable parameters and state of a channel.
 pub struct State {
     /// The cannel's unique identifier.
     pub channel: ChannelId,
@@ -176,9 +180,7 @@ impl<'de> Deserialize<'de> for Nonce {
 
 impl CandidType for Hash {
     fn _ty() -> Type {
-        Type::from(TypeInner::Vec(
-            Type::from(TypeInner::Nat8), // Inner type: nat8
-        ))
+        Type::from(TypeInner::Vec(Type::from(TypeInner::Nat8)))
     }
 
     fn idl_serialize<S>(&self, serializer: S) -> Result<(), S::Error>
@@ -197,6 +199,12 @@ impl std::fmt::Display for Hash {
     }
 }
 
+impl std::hash::Hash for L2Account {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.serialize().hash(state);
+    }
+}
+
 impl std::hash::Hash for Hash {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.as_slice().hash(state);
@@ -212,8 +220,6 @@ impl Hash {
         out
     }
 }
-
-// L2Account
 
 impl<'de> Deserialize<'de> for L2Account {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -275,7 +281,6 @@ impl Default for ChannelId {
 
 impl Default for L2Account {
     fn default() -> Self {
-        // Create a zero-initialized public key (use with caution!)
         let zero_pk =
             SecpPublicKey::from_slice(&[0u8; 33]).expect("Hardcoded valid zero public key");
         L2Account(zero_pk)
@@ -355,8 +360,7 @@ impl Funding {
     pub fn memo(&self) -> u64 {
         let mut data = Vec::new();
         data.extend_from_slice(&self.channel.0);
-        data.extend_from_slice(&self.participant.0.serialize()); //.to_bytes());
-
+        data.extend_from_slice(&self.participant.0.serialize());
         let h = Hash::digest(&data);
         let arr: [u8; 8] = [
             h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],

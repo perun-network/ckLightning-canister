@@ -15,7 +15,7 @@
 use crate::types::*;
 use async_trait::async_trait;
 use candid::CandidType;
-use candid::{Nat, Principal, candid_method, export_service};
+use candid::{Principal, candid_method};
 use ic_cdk::query;
 use ic_cdk::update;
 use lazy_static::lazy_static;
@@ -34,7 +34,6 @@ async fn register_event(ch: ChannelId, time: Timestamp, e: Event) {
 
 #[update]
 #[candid_method(update)]
-//async fn register_event_isolated(ch: ChannelId, time: Timestamp, e: Event) {
 async fn register_event_isolated(regev: RegEvent) {
     // test event handling using this method
     let time = regev.time;

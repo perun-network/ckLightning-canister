@@ -14,32 +14,40 @@
 
 pub mod error;
 pub mod events;
+use crate::events::ChannelTime;
 use crate::events::Event;
-use crate::events::EventRegisterer;
+use crate::events::RegEvent;
 use candid::{Principal, candid_method};
 use ic_cdk::query;
 use ic_cdk::update;
-pub mod icp;
+pub mod receiver;
 pub mod types;
+use candid::export_service;
 use error::*;
-
-// #[cfg(not(target_family = "wasm"))]
 use ic_cdk::api::time as blocktime;
 
 use ic_ledger_types::{
     AccountIdentifier, DEFAULT_FEE, DEFAULT_SUBACCOUNT, Memo, Tokens, TransferArgs,
 };
 
+use receiver::DEVNET_CKBTC_LEDGER;
+
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use types::*;
 
+#[query(name = "__get_candid_interface_tmp_hack")]
+fn export_candid() -> String {
+    export_service!();
+    __export_service()
+}
+
 lazy_static! {
-    static ref STATE: RwLock<CanisterState<icp::CanisterTXQuerier>> =
+    static ref STATE: RwLock<CanisterState<receiver::CanisterTXQuerier>> =
         RwLock::new(CanisterState::new(
-            icp::CanisterTXQuerier::new(
-                Principal::from_text("bkyz2-fmaaa-aaaaa-qaaaq-cai").expect("parsing principal")
+            receiver::CanisterTXQuerier::new(
+                Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal") // //bkyz2-fmaaa-aaaaa-qaaaq-cai
             ),
             ic_cdk::id(),
         ));
@@ -47,8 +55,8 @@ lazy_static! {
 
 /// The canister's state. Contains all currently registered channels, as well as
 /// all deposits and withdrawable balances.
-pub struct CanisterState<Q: icp::TXQuerier> {
-    icp_receiver: icp::Receiver<Q>,
+pub struct CanisterState<Q: receiver::TXQuerier> {
+    icrc_receiver: receiver::Receiver<Q>,
     /// Tracks all deposits for unregistered channels. For registered channels,
     /// tracks withdrawable balances instead.
     user_holdings: HashMap<Funding, Amount>,
@@ -58,12 +66,20 @@ pub struct CanisterState<Q: icp::TXQuerier> {
     liq_pool_holdings: HashMap<L1Account, Amount>,
 }
 
-// #[candid::candid_method]
+#[update]
 #[candid_method(update)]
 
 /// The user needs to call this with his transaction.
-async fn transaction_notification(block_height: u64) -> Option<Amount> {
-    STATE.write().unwrap().process_icp_tx(block_height).await
+async fn transaction_notification(notify_args: NotifyArgs) -> Option<Amount> {
+    STATE
+        .write()
+        .unwrap()
+        .process_icrc_tx(
+            notify_args.block_height,
+            notify_args.amount,
+            notify_args.funding,
+        )
+        .await
 }
 
 #[query]
@@ -74,15 +90,6 @@ async fn transaction_notification(block_height: u64) -> Option<Amount> {
 /// deposited their owed funds into a channel to ensure it is fully funded.
 fn query_funding_only(funding: Funding) -> Option<Funding> {
     Some(funding.clone())
-}
-
-#[query]
-#[candid::candid_method(query)]
-/// Returns only the memo specific for a channel.
-/// this function should be used to check whether all participants have
-/// deposited their owed funds into a channel to ensure it is fully funded.
-fn query_memo(mem: i32) -> Option<i32> {
-    Some(mem)
 }
 
 #[query]
@@ -101,17 +108,9 @@ async fn deposit(funding: Funding) -> Option<Error> {
     STATE
         .write()
         .unwrap()
-        .deposit_icp(blocktime(), funding)
+        .deposit_icrc(blocktime(), funding)
         .await
         .err()
-}
-
-#[update]
-#[candid_method(update)]
-
-/// Only used for tests.
-fn deposit_mocked(funding: Funding, amount: Amount) -> Option<Error> {
-    STATE.write().unwrap().deposit(funding, amount).err()
 }
 
 #[query]
@@ -124,11 +123,11 @@ fn query_state(id: ChannelId) -> Option<RegisteredState> {
 
 impl<Q> CanisterState<Q>
 where
-    Q: icp::TXQuerier,
+    Q: receiver::TXQuerier,
 {
     pub fn new(q: Q, my_principal: Principal) -> Self {
         Self {
-            icp_receiver: icp::Receiver::new(q, my_principal),
+            icrc_receiver: receiver::Receiver::new(q, my_principal),
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool_holdings: Default::default(),
@@ -144,7 +143,7 @@ where
 
     pub fn deposit_liq_pool(
         &mut self,
-        funding: PoolFunding,
+        funding: u64, //PoolFunding,
         amount: Amount,
         depositor: L1Account,
     ) -> Result<()> {
@@ -155,31 +154,34 @@ where
         Ok(())
     }
 
-    /// Call this to access funds deposited and previously registered.
-    pub async fn deposit_icp(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
+    pub async fn deposit_icrc(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
         let memo = funding.memo();
-        let amount = self.icp_receiver.drain(memo);
+        let amount = self.icrc_receiver.drain(memo);
+
         self.deposit(funding.clone(), amount)?;
-        events::STATE
-            .write()
-            .unwrap()
-            .register_event(
-                time,
-                funding.channel.clone(),
-                Event::Funded {
-                    who: funding.participant.clone(),
-                    total: self.user_holdings.get(&funding).cloned().unwrap(),
-                    timestamp: time,
-                },
-            )
-            .await;
+        // events::STATE
+        //     .write()
+        //     .unwrap()
+        //     .register_event(
+        //         time,
+        //         funding.channel.clone(),
+        //         Event::Funded {
+        //             who: funding.participant.clone(),
+        //             total: self.user_holdings.get(&funding).cloned().unwrap(),
+        //             timestamp: time,
+        //         },
+        //     )
+        //     .await;
         Ok(())
     }
 
-    /// Call this to process an ICP transaction and register the funds for
-    /// further use.
-    pub async fn process_icp_tx(&mut self, tx: icp::BlockHeight) -> Option<Amount> {
-        match self.icp_receiver.verify(tx).await {
+    pub async fn process_icrc_tx(
+        &mut self,
+        tx: receiver::BlockHeight,
+        amount: u64,
+        funding: Funding,
+    ) -> Option<Nat> {
+        match self.icrc_receiver.verify_icrc(tx, amount, funding).await {
             Ok(v) => Some(v),
             Err(_e) => None, //Err(Error::ReceiverError(e)),
         }

@@ -11,12 +11,12 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-
 use crate::types::Amount;
+use crate::types::Funding;
 use async_trait::async_trait;
 pub use candid::{
     CandidType, Deserialize, Int, Nat, Principal,
-    types::{Serializer, Type, TypeInner, TypeInner::Nat8},
+    types::{Serializer, Type},
 };
 use ic_ledger_types::{
     AccountIdentifier, Block, DEFAULT_SUBACCOUNT, GetBlocksArgs, Operation, Transaction,
@@ -61,6 +61,12 @@ pub trait TXQuerier {
         &self,
         block_height: BlockHeight,
     ) -> Result<TransactionNotification, ICPReceiverError>;
+
+    async fn query_icrc_tx(
+        &self,
+        block_height: BlockHeight,
+        amount: u64,
+    ) -> Result<u64, ICPReceiverError>;
 }
 
 /// Mocked ICP transaction querier for simulation and testing purposes.
@@ -69,25 +75,22 @@ pub struct MockTXQuerier {
     txs: BTreeMap<BlockHeight, TransactionNotification>,
 }
 
-#[async_trait]
-impl TXQuerier for MockTXQuerier {
-    async fn query_tx(
-        &self,
-        block_height: BlockHeight,
-    ) -> Result<TransactionNotification, ICPReceiverError> {
-        self.txs
-            .get(&block_height)
-            .cloned()
-            .ok_or(ICPReceiverError::FailedToQuery)
-    }
-}
+// #[async_trait]
+// impl TXQuerier for MockTXQuerier {
+//     async fn query_tx(&self, block_height: BlockHeight) -> Result<TransactionNotification, u64> {
+//         self.txs
+//             .get(&block_height)
+//             .cloned()
+//             .ok_or(ICPReceiverError::FailedToQuery)
+//     }
+// }
 
-impl MockTXQuerier {
-    /// Inserts a transaction so that it can be read via query_tx().
-    pub fn register_tx(&mut self, block_height: BlockHeight, tx: TransactionNotification) {
-        self.txs.insert(block_height, tx);
-    }
-}
+// impl MockTXQuerier {
+//     /// Inserts a transaction so that it can be read via query_tx().
+//     pub fn register_tx(&mut self, block_height: BlockHeight, tx: TransactionNotification) {
+//         self.txs.insert(block_height, tx);
+//     }
+// }
 
 /// Real ICP transaction querier using inter-canister calls to the ICP ledger.
 pub struct CanisterTXQuerier {
@@ -108,6 +111,14 @@ impl TXQuerier for CanisterTXQuerier {
             }
         }
         Err(ICPReceiverError::FailedToQuery)
+    }
+
+    async fn query_icrc_tx(
+        &self,
+        block_height: BlockHeight,
+        amount: u64,
+    ) -> Result<u64, ICPReceiverError> {
+        Ok(amount)
     }
 }
 
@@ -168,6 +179,32 @@ where
 
     /// Verifies a transaction, and if it's valid and new, tracks its funds and
     /// returns its amount.
+    pub async fn verify_icrc(
+        &mut self,
+        block_height: BlockHeight,
+        amount: u64,
+        funding: Funding,
+    ) -> std::result::Result<Amount, ICPReceiverError> {
+        if self.known_txs.contains(&block_height) {
+            return Err(ICPReceiverError::DuplicateTransaction);
+        }
+
+        match self.tx_querier.query_icrc_tx(block_height, amount).await {
+            Ok(tx) => {
+                if !self.known_txs.insert(block_height) {
+                    return Err(ICPReceiverError::DuplicateTransaction);
+                }
+                // if tx.to != self.my_account {
+                //     return Err(ICPReceiverError::Recipient);
+                // }
+                *self.unspent.entry(funding.memo()).or_insert(0u64.into()) += amount;
+
+                Ok(Amount::from(amount)) // Return the argument amount as Amount
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn verify(
         &mut self,
         block_height: BlockHeight,
