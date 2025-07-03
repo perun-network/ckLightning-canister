@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
+pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 pub type Memo = u64;
 pub type BlockHeight = u64;
@@ -145,7 +146,7 @@ impl CanisterTXQuerier {
             start: block_height,
             length: 1,
         };
-        if let Ok(result) = query_blocks(self.ledger, args.clone()).await {
+        if let Ok(result) = query_blocks(self.ledger, &args.clone()).await {
             if result.blocks.len() != 0 {
                 return result.blocks.first().cloned();
             }
@@ -154,7 +155,7 @@ impl CanisterTXQuerier {
                 .into_iter()
                 .find(|b| (b.start <= block_height && (block_height - b.start) < b.length))
             {
-                if let Ok(Ok(range)) = query_archived_blocks(&b.callback, args).await {
+                if let Ok(Ok(range)) = query_archived_blocks(&b.callback, &args).await {
                     return range.blocks.get((block_height - b.start) as usize).cloned();
                 }
             }

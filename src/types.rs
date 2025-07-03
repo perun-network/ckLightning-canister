@@ -135,15 +135,13 @@ pub struct RegisteredState {
 #[derive(Deserialize, CandidType, Clone)]
 // / Contains the payload of a request to withdraw a participant's funds from a
 // / registered channel. Does not contain the authorization signature.
-pub struct WithdrawalRequest {
+pub struct WithdrawalReq {
     /// The funds to be withdrawn.
-    pub funding: Funding,
-    pub amount: Amount,
+    pub channel: ChannelId,
     pub participant: L2Account,
-    pub time: Timestamp,
-
+    pub amount: Nat,
     /// The layer-1 identity to send the funds to.
-    pub receiver: L1Account,
+    pub receiver: Principal,
 }
 
 impl<'de> Deserialize<'de> for ChannelId {

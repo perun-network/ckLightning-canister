@@ -12,12 +12,17 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
+pub mod bus;
+use crate::receiver::DEFAULT_CKBTC_FEE;
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::TransferArg;
 pub mod error;
 pub mod events;
 use crate::events::ChannelTime;
 use crate::events::Event;
 use crate::events::RegEvent;
 use candid::{Principal, candid_method};
+use ic_cdk::api::call::CallResult;
 use ic_cdk::query;
 use ic_cdk::update;
 pub mod receiver;
@@ -26,9 +31,7 @@ use candid::export_service;
 use error::*;
 use ic_cdk::api::time as blocktime;
 
-use ic_ledger_types::{
-    AccountIdentifier, DEFAULT_FEE, DEFAULT_SUBACCOUNT, Memo, Tokens, TransferArgs,
-};
+use ic_ledger_types::{AccountIdentifier, DEFAULT_SUBACCOUNT, Tokens};
 
 use receiver::DEVNET_CKBTC_LEDGER;
 
@@ -121,6 +124,89 @@ fn query_state(id: ChannelId) -> Option<RegisteredState> {
     STATE.read().unwrap().state(&id)
 }
 
+#[update]
+#[candid::candid_method]
+async fn simple_withdraw(req: WithdrawalReq) -> Nat {
+    let receiver = req.receiver;
+    let amount_nat = req.amount;
+
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: receiver,
+            subaccount: None,
+        },
+        amount: amount_nat.clone(),
+        fee: Some(Nat(1000u64.into())), // ckBTC fee
+        memo: None,
+        created_at_time: None,
+    };
+
+    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+    let call_result: CallResult<(
+        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_height) => Nat::from(block_height),
+            Err(e) => match e {
+                icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee } => {
+                    ic_cdk::println!("BadFee: expected_fee = {:?}", expected_fee);
+                    Nat::from(111u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::BadBurn { min_burn_amount } => {
+                    ic_cdk::println!("BadBurn: min_burn_amount = {:?}", min_burn_amount);
+                    Nat::from(112u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::InsufficientFunds {
+                    balance,
+                } => {
+                    ic_cdk::println!("InsufficientFunds: balance = {:?}", balance);
+                    Nat::from(222u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::TooOld => Nat::from(333u32),
+                icrc_ledger_types::icrc1::transfer::TransferError::CreatedInFuture {
+                    ledger_time,
+                } => {
+                    ic_cdk::println!("CreatedInFuture: ledger_time = {:?}", ledger_time);
+                    Nat::from(444u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable => {
+                    ic_cdk::println!("TemporarilyUnavailable");
+                    Nat::from(666u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::Duplicate { duplicate_of } => {
+                    ic_cdk::println!("Duplicate: duplicate_of = {:?}", duplicate_of);
+                    Nat::from(555u32)
+                }
+                icrc_ledger_types::icrc1::transfer::TransferError::GenericError {
+                    error_code,
+                    message,
+                } => {
+                    ic_cdk::println!(
+                        "GenericError: code = {:?}, message = {}",
+                        error_code,
+                        message
+                    );
+                    Nat::from(777u32)
+                }
+            },
+        },
+        Err(e) => {
+            ic_cdk::println!("CallResult error: {:?}", e);
+            Nat::from(999u32) // Generic call error
+        }
+    }
+}
+
+#[update]
+#[candid::candid_method]
+async fn trigger_withdraw(req: WithdrawalReq) -> std::result::Result<candid::Nat, error::Error> {
+    STATE.write().unwrap().withdraw_from_liq_pool(req).await
+}
+
 impl<Q> CanisterState<Q>
 where
     Q: receiver::TXQuerier,
@@ -183,7 +269,7 @@ where
     ) -> Option<Nat> {
         match self.icrc_receiver.verify_icrc(tx, amount, funding).await {
             Ok(v) => Some(v),
-            Err(_e) => None, //Err(Error::ReceiverError(e)),
+            Err(_e) => None,
         }
     }
 
@@ -249,30 +335,37 @@ where
 
     pub async fn withdraw_from_liq_pool(
         &mut self,
-        req: WithdrawalRequest,
-        l1_acc: L1Account,
-        amount: Amount,
-    ) -> Result<Amount> {
-        // Phase 1: Calculate required deductions (without modifying state)
-        let (total_deducted, to_deduct) = self.calculate_required_deductions(&amount)?;
+        req: WithdrawalReq,
+    ) -> std::result::Result<Nat, Error> {
+        let amount = req.amount.clone();
 
-        // Phase 2: Execute ledger transfer
-        self.execute_ledger_transfer(&req, total_deducted).await?;
+        let (total_deducted, to_deduct) = match self.calculate_required_deductions(&amount) {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(Error::InsufficientLiquidity);
+            }
+        };
 
-        // Phase 3: Apply successful deductions to state
-        self.apply_deductions(to_deduct);
+        let transfer_result = self.execute_ledger_transfer(&req, total_deducted).await;
 
-        Ok(amount)
+        match transfer_result {
+            Ok(block_height) => {
+                self.apply_deductions(to_deduct);
+                Ok(block_height)
+            }
+            Err(error_msg) => Err(error_msg),
+        }
     }
 
-    // Helper 1: Calculate required deductions
-    fn calculate_required_deductions(&self, amount: &Nat) -> Result<(u64, Vec<(L1Account, Nat)>)> {
+    fn calculate_required_deductions(
+        &self,
+        amount: &Nat,
+    ) -> std::result::Result<(u64, Vec<(Funding, Nat)>), Error> {
         let mut needed = amount.clone();
         let mut to_deduct = Vec::new();
         let zero = Nat::from(0u32);
 
-        // Collect deduction plan
-        for (acc, available) in &self.liq_pool_holdings {
+        for (acc, available) in &self.user_holdings {
             if needed == zero {
                 break;
             }
@@ -288,66 +381,61 @@ where
             return Err(Error::InsufficientLiquidity);
         }
 
-        // Convert total to u64 for ledger
         let total = amount.clone() - needed;
-        let total_u64 = total.0.to_u64_digits()[0]; //.ok_or(Error::AmountTooLarge)?;
-
+        let total_u64 = total.0.to_u64_digits()[0];
         Ok((total_u64, to_deduct))
     }
 
-    // Helper 2: Execute ledger transfer
     async fn execute_ledger_transfer(
         &self,
-        req: &WithdrawalRequest,
+        req: &WithdrawalReq,
         amount_u64: u64,
-    ) -> Result<()> {
-        let receiver = req.receiver.clone();
-        let prince = receiver.0;
+    ) -> std::result::Result<Nat, Error> {
+        let receiver = req.receiver;
 
-        let transfer_result = ic_ledger_types::transfer(
-            prince,
-            TransferArgs {
-                memo: Memo(0),
-                amount: Tokens::from_e8s(amount_u64),
-                fee: DEFAULT_FEE,
-                from_subaccount: None,
-                to: AccountIdentifier::new(&prince, &DEFAULT_SUBACCOUNT),
-                created_at_time: None,
+        let transfer_arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: receiver,
+                subaccount: None,
             },
-        )
-        .await;
+            amount: Nat(amount_u64.into()),
+            fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+            memo: None,
+            created_at_time: None,
+        };
 
-        match transfer_result {
-            Ok(Ok(_block)) => Ok(()),
-            _ => Err(Error::LedgerError),
+        let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+        let call_result: CallResult<(
+            std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+        )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+
+        match call_result {
+            Ok((inner_result,)) => match inner_result {
+                Ok(block_height) => Ok(block_height),
+                Err(_e) => Err(Error::LedgerError),
+            },
+            Err((_code, _msg)) => Err(Error::LedgerError),
         }
     }
 
-    // Helper 3: Apply deductions after successful transfer
-    fn apply_deductions(&mut self, to_deduct: Vec<(L1Account, Nat)>) {
-        let zero = Nat::from(0u32);
+    fn apply_deductions(&mut self, to_deduct: Vec<(Funding, Nat)>) {
+        let zero = Nat(0u64.into());
 
         for (acc, take) in to_deduct {
-            if let Some(entry) = self.liq_pool_holdings.get_mut(&acc) {
+            if let Some(entry) = self.user_holdings.get_mut(&acc) {
                 *entry -= take;
                 if *entry == zero {
-                    self.liq_pool_holdings.remove(&acc);
+                    self.user_holdings.remove(&acc);
                 }
             }
         }
     }
+}
 
-    pub fn withdraw(&mut self, req: WithdrawalRequest, l1_acc: L1Account) -> Result<Amount> {
-        // let auth = req.signature.clone();
-        let now = req.time.clone();
-        // req.validate_sig(&auth)?;
-        let funding = Funding::new(req.funding.channel.clone(), req.participant.clone());
-        match self.state(&req.funding.channel) {
-            None => Err(Error::NotFinalized),
-            Some(state) => {
-                require!(state.settled(now), NotFinalized);
-                Ok(self.user_holdings.remove(&funding).unwrap_or_default())
-            }
-        }
-    }
+#[derive(CandidType)]
+pub struct ckAccount {
+    pub owner: Principal,
+    pub subaccount: Option<Vec<u8>>,
 }
