@@ -24,9 +24,11 @@ use ic_ledger_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+pub const MAINNET_ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
-pub const DEFAULT_CKBTC_FEE: u64 = 1000;
+pub const MAINNET_CKTESTBTC_LEDGER: &str = "mc6ru-gyaaa-aaaar-qaaaq-cai";
+
+pub const DEFAULT_CKTESTBTC_FEE: u64 = 10;
 
 pub type Memo = u64;
 pub type BlockHeight = u64;
@@ -76,23 +78,6 @@ pub struct MockTXQuerier {
     txs: BTreeMap<BlockHeight, TransactionNotification>,
 }
 
-// #[async_trait]
-// impl TXQuerier for MockTXQuerier {
-//     async fn query_tx(&self, block_height: BlockHeight) -> Result<TransactionNotification, u64> {
-//         self.txs
-//             .get(&block_height)
-//             .cloned()
-//             .ok_or(ICPReceiverError::FailedToQuery)
-//     }
-// }
-
-// impl MockTXQuerier {
-//     /// Inserts a transaction so that it can be read via query_tx().
-//     pub fn register_tx(&mut self, block_height: BlockHeight, tx: TransactionNotification) {
-//         self.txs.insert(block_height, tx);
-//     }
-// }
-
 /// Real ICP transaction querier using inter-canister calls to the ICP ledger.
 pub struct CanisterTXQuerier {
     ledger: Principal,
@@ -137,6 +122,12 @@ impl CanisterTXQuerier {
     pub fn for_ckbtc_devnet() -> Self {
         Self {
             ledger: Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap(),
+        }
+    }
+
+    pub fn for_cktestbtc_mainnet() -> Self {
+        Self {
+            ledger: Principal::from_text(MAINNET_CKTESTBTC_LEDGER).unwrap(),
         }
     }
 

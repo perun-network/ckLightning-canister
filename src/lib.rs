@@ -11,18 +11,21 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-
-pub mod bus;
-use crate::receiver::DEFAULT_CKBTC_FEE;
+use crate::receiver::DEFAULT_CKTESTBTC_FEE;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
+pub mod deq;
 pub mod error;
 pub mod events;
 use crate::events::ChannelTime;
 use crate::events::Event;
 use crate::events::RegEvent;
 use candid::{Principal, candid_method};
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
+use ic_cdk::call::CallPerformFailed;
+use ic_cdk::call::CallResult;
+use icrc_ledger_types::icrc1::transfer::TransferError;
+
 use ic_cdk::query;
 use ic_cdk::update;
 pub mod receiver;
@@ -142,11 +145,19 @@ async fn simple_withdraw(req: WithdrawalReq) -> Nat {
         created_at_time: None,
     };
 
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal"); //
 
-    let call_result: CallResult<(
-        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+    let call_response: std::result::Result<ic_cdk::call::Response, ic_cdk::call::CallFailed> =
+        Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+            .with_arg(transfer_arg)
+            .await;
+
+    let call_result: CallResult<(std::result::Result<Nat, TransferError>,)> = match call_response {
+        Ok(response) => response
+            .candid::<(std::result::Result<Nat, TransferError>,)>()
+            .map_err(|e| ic_cdk::call::Error::CallPerformFailed(CallPerformFailed)),
+        Err(e) => Err(ic_cdk::call::Error::CallPerformFailed(CallPerformFailed)),
+    };
 
     match call_result {
         Ok((inner_result,)) => match inner_result {
@@ -229,7 +240,7 @@ where
 
     pub fn deposit_liq_pool(
         &mut self,
-        funding: u64, //PoolFunding,
+        funding: u64,
         amount: Amount,
         depositor: L1Account,
     ) -> Result<()> {
@@ -400,23 +411,31 @@ where
                 subaccount: None,
             },
             amount: Nat(amount_u64.into()),
-            fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+            fee: Some(Nat(DEFAULT_CKTESTBTC_FEE.into())),
             memo: None,
             created_at_time: None,
         };
 
         let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
 
-        let call_result: CallResult<(
-            std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-        )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+        let call_response: std::result::Result<ic_cdk::call::Response, ic_cdk::call::CallFailed> =
+            Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+                .with_arg(transfer_arg)
+                .await;
+        let call_result: CallResult<(std::result::Result<Nat, TransferError>,)> =
+            match call_response {
+                Ok(response) => response
+                    .candid::<(std::result::Result<Nat, TransferError>,)>()
+                    .map_err(|e| ic_cdk::call::Error::CallPerformFailed(CallPerformFailed)),
+                Err(e) => Err(ic_cdk::call::Error::CallPerformFailed(CallPerformFailed)),
+            };
 
         match call_result {
             Ok((inner_result,)) => match inner_result {
                 Ok(block_height) => Ok(block_height),
                 Err(_e) => Err(Error::LedgerError),
             },
-            Err((_code, _msg)) => Err(Error::LedgerError),
+            Err(_e) => Err(Error::LedgerError),
         }
     }
 
@@ -438,4 +457,23 @@ where
 pub struct ckAccount {
     pub owner: Principal,
     pub subaccount: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deq::Deq;
+
+    #[test]
+    fn test_deq() {
+        let mut q = Deq::new();
+        assert_eq!(q.size(), 0);
+
+        q.enqueue("msg1".to_string());
+        assert_eq!(q.size(), 1);
+        assert_eq!(q.peek(), Some(&"msg1".to_string()));
+
+        assert_eq!(q.dequeue(), Some("msg1".to_string()));
+        assert_eq!(q.size(), 0);
+        assert_eq!(q.dequeue(), None);
+    }
 }
