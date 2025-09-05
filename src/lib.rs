@@ -12,12 +12,13 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-pub mod bus;
 use crate::receiver::DEFAULT_CKBTC_FEE;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
+pub mod deq;
 pub mod error;
 pub mod events;
+pub mod msg;
 use crate::events::ChannelTime;
 use crate::events::Event;
 use crate::events::RegEvent;

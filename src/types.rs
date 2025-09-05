@@ -14,8 +14,9 @@
 use crate::require;
 use digest::{FixedOutputDirty, Update};
 use ed25519_dalek::Sha512 as Hasher;
-
-use bitcoin::secp256k1::PublicKey as SecpPublicKey;
+use k256::EncodedPoint;
+use k256::PublicKey as SecpPublicKey;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
@@ -199,10 +200,10 @@ impl std::fmt::Display for Hash {
 
 impl std::hash::Hash for L2Account {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.serialize().hash(state);
+        let encoded_point: EncodedPoint = self.0.to_encoded_point(false); // false for uncompressed
+        encoded_point.as_bytes().hash(state);
     }
 }
-
 impl std::hash::Hash for Hash {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.as_slice().hash(state);
@@ -225,9 +226,9 @@ impl<'de> Deserialize<'de> for L2Account {
         D: Deserializer<'de>,
     {
         let bytes = ByteBuf::deserialize(deserializer)?;
-        let pk = SecpPublicKey::from_slice(bytes.as_slice())
-            .ok()
-            .ok_or(D::Error::invalid_length(bytes.len(), &"public key"))?;
+        let pk = SecpPublicKey::from_sec1_bytes(bytes.as_slice()).map_err(|_| {
+            D::Error::invalid_length(bytes.len(), &"valid secp256k1 public key bytes")
+        })?;
         Ok(L2Account(pk))
     }
 }
@@ -241,7 +242,8 @@ impl CandidType for L2Account {
     where
         S: Serializer,
     {
-        serializer.serialize_blob(&self.0.serialize())
+        let encoded = self.0.to_encoded_point(false); // false for uncompressed
+        serializer.serialize_blob(encoded.as_bytes())
     }
 }
 
@@ -279,8 +281,10 @@ impl Default for ChannelId {
 
 impl Default for L2Account {
     fn default() -> Self {
-        let zero_pk =
-            SecpPublicKey::from_slice(&[0u8; 33]).expect("Hardcoded valid zero public key");
+        // 33-byte compressed public key of all zeros
+        let zero_pk_bytes = [0u8; 33];
+        let zero_pk = SecpPublicKey::from_sec1_bytes(&zero_pk_bytes)
+            .expect("Hardcoded valid zero public key");
         L2Account(zero_pk)
     }
 }
@@ -324,7 +328,8 @@ impl Params {
         params_bytes.extend_from_slice(&self.nonce.0);
 
         for participant in &self.participants {
-            params_bytes.extend_from_slice(&participant.0.serialize()); //.to_bytes());
+            // Serialize using to_encoded_point and get bytes
+            params_bytes.extend_from_slice(participant.0.to_encoded_point(false).as_bytes());
         }
 
         let challenge_duration_bytes = self.challenge_duration.to_le_bytes();
@@ -358,7 +363,7 @@ impl Funding {
     pub fn memo(&self) -> u64 {
         let mut data = Vec::new();
         data.extend_from_slice(&self.channel.0);
-        data.extend_from_slice(&self.participant.0.serialize());
+        data.extend_from_slice(self.participant.0.to_encoded_point(false).as_bytes());
         let h = Hash::digest(&data);
         let arr: [u8; 8] = [
             h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
