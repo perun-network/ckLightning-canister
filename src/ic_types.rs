@@ -18,6 +18,10 @@ use k256::EncodedPoint;
 use k256::PublicKey as SecpPublicKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 
+pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
+pub const DEFAULT_CKBTC_FEE: u64 = 1000;
+
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
 
@@ -131,6 +135,12 @@ pub struct RegisteredState {
     /// The challenge timeout after which the currently registered state becomes
     /// available for withdrawing. Ignored for finalized channels.
     pub timeout: Timestamp,
+}
+
+#[derive(CandidType)]
+pub struct ckAccount {
+    pub owner: Principal,
+    pub subaccount: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize, CandidType, Clone)]

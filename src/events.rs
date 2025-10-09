@@ -12,7 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-use crate::types::*;
+use crate::ic_types::*;
 use async_trait::async_trait;
 use candid::CandidType;
 use candid::{Principal, candid_method};

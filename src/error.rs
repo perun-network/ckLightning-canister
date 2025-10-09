@@ -12,29 +12,15 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-// use ic_cdk::export::candid::{CandidType, Deserialize};
 pub use candid::{
     CandidType, Deserialize, Int, Nat,
     types::{Serializer, Type},
 };
-#[macro_export]
-macro_rules! require {
-    ($cond:expr, $err:ident) => {
-        if !($cond) {
-            return Err(Error::$err);
-        }
-    };
-    ($cond:expr, $err:expr) => {
-        if !($cond) {
-            return Err($err);
-        }
-    };
-}
 
 #[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
 /// Contains all errors that can occur during an operation on the Perun
 /// canister.
-pub enum Error {
+pub enum CklError {
     /// Any kind of signature mismatch.
     Authentication,
     /// A non-finalized state was registered when a finalized state was
@@ -58,10 +44,23 @@ pub enum Error {
     /// Error confirming tx
     ConfirmationError,
 }
-impl std::fmt::Display for Error {
+impl std::fmt::Display for CklError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
 }
 /// Canister operation result type.
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, CklError>;
+#[macro_export]
+macro_rules! require {
+    ($cond:expr, $err:ident) => {
+        if !($cond) {
+            return Err($err);
+        }
+    };
+    ($cond:expr, $err:expr) => {
+        if !($cond) {
+            return Err($err);
+        }
+    };
+}
