@@ -26,5 +26,14 @@ getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 base64 = "0.21"
 k256 = "0.13.4"
 lightning-invoice = "0.33.2"
-bitcoin = "0.32.7"
+bitcoin = { version = "0.32", features = ["rand"] }
 num-traits = "0.2.19"
+rand = "0.8"
+
+[dependencies.ic-agent]
+version = "0.39.3"
+features = ["wasm-bindgen"]
+
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
