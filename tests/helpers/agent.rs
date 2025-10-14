@@ -484,13 +484,13 @@ struct ApproveIcrc2 {
 }
 
 #[derive(CandidType)]
-struct TransferIcrc1 {
-    from: Account,
-    to: Account,
-    amount: Nat,
-    fee: Option<u64>,
-    memo: u64, //Option<Vec<u8>>,
-    created_at_time: Option<u64>,
+pub struct TransferIcrc1 {
+    pub from: Account,
+    pub to: Account,
+    pub amount: Nat,
+    pub fee: Option<u64>,
+    pub memo: u64,
+    pub created_at_time: Option<u64>,
 }
 
 #[cfg(test)]

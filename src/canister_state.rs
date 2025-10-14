@@ -12,12 +12,12 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::error::CklError;
-use ic_cdk::api::time as blocktime;
-
 use crate::ic_types::{
     Amount, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, RegisteredState, WithdrawalReq,
 };
+use crate::receiver::ICPReceiverError;
 use ic_cdk::api::call::CallResult;
+use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
 
 use icrc_ledger_types::icrc1::transfer::TransferArg;
@@ -55,7 +55,9 @@ where
     liq_pool_holdings: HashMap<L1Account, Amount>,
 }
 
-pub async fn transaction_notification_impl(notify_args: NotifyArgs) -> Option<Amount> {
+pub async fn transaction_notification_impl(
+    notify_args: NotifyArgs,
+) -> std::result::Result<Amount, ICPReceiverError> {
     let mut state = STATE.write().unwrap();
     state
         .process_icrc_tx(
@@ -145,11 +147,8 @@ where
         tx: receiver::BlockHeight,
         amount: u64,
         funding: Funding,
-    ) -> Option<Nat> {
-        match self.icrc_receiver.verify_icrc(tx, amount, funding).await {
-            Ok(v) => Some(v),
-            Err(_e) => None,
-        }
+    ) -> std::result::Result<Amount, ICPReceiverError> {
+        self.icrc_receiver.verify_icrc(tx, amount, funding).await
     }
 
     pub fn query_holdings(&self, funding: Funding) -> Option<Amount> {

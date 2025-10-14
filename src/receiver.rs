@@ -42,6 +42,7 @@ type TxIndex = Nat;
 #[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
 pub enum ICPReceiverError {
     TransactionType,
+    TxNotFound,
     Recipient,
     DuplicateTransaction,
     FailedToQuery,
@@ -160,7 +161,7 @@ impl TXQuerier for CanisterTXQuerier {
                                 return Err(ICPReceiverError::TransactionType);
                             }
                         }
-                        Err(_) => return Err(ICPReceiverError::TransactionType),
+                        Err(_) => return Err(ICPReceiverError::TxNotFound),
                     }
                 }
             }
@@ -287,12 +288,12 @@ where
                 if !self.known_txs.insert(block_height) {
                     return Err(ICPReceiverError::DuplicateTransaction);
                 }
-                // if tx.to != self.my_account {
-                //     return Err(ICPReceiverError::Recipient);
-                // }
+                if tx.to != self.my_account {
+                    return Err(ICPReceiverError::Recipient);
+                }
                 *self.unspent.entry(funding.memo()).or_insert(0u64.into()) += amount;
 
-                Ok(Amount::from(amount)) // Return the argument amount as Amount
+                Ok(Amount::from(amount))
             }
             Err(e) => Err(e),
         }

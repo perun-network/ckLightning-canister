@@ -18,6 +18,7 @@ type Event = variant {
 };
 type Funding = record { participant : blob; channel : blob };
 type ICPReceiverError = variant {
+  TxNotFound;
   TransactionType;
   FailedToQuery;
   DuplicateTransaction;
@@ -30,7 +31,8 @@ type NotifyArgs = record {
 };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisteredState = record { state : State; timeout : nat64 };
-type Result = variant { Ok : nat; Err : CklError };
+type Result = variant { Ok : nat; Err : ICPReceiverError };
+type Result_1 = variant { Ok : nat; Err : CklError };
 type State = record {
   version : nat64;
   finalized : bool;
@@ -58,8 +60,8 @@ service : {
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
-  __candid_method_transaction_notification : (NotifyArgs) -> (opt nat);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result);
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_1);
   clear : () -> ();
   deposit : (Funding) -> (opt CklError);
   dequeue : () -> (opt text);
@@ -79,6 +81,6 @@ service : {
   register_event_isolated : (RegEvent) -> ();
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
-  transaction_notification : (NotifyArgs) -> (opt nat);
-  trigger_withdraw : (WithdrawalReq) -> (Result);
+  transaction_notification : (NotifyArgs) -> (Result);
+  trigger_withdraw : (WithdrawalReq) -> (Result_1);
 }
