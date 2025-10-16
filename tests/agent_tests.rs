@@ -1,20 +1,38 @@
+//  Copyright 2025 PolyCrypt GmbH
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writiing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
 use crate::helpers::id::create_identity;
 pub use candid::{
     Deserialize, Int, Nat, Principal,
     types::{Serializer, Type, TypeInner, TypeInner::Nat8},
 };
+use cklightning::receiver::icrc3value_map_to_transaction;
 use ic_agent::AgentError;
+use ic_ledger_types::{AccountIdentifier, Subaccount};
+use num_traits::cast::ToPrimitive;
 mod helpers;
 use crate::helpers::agent::ChannelId;
 use crate::helpers::agent::Funding;
 use crate::helpers::agent::L2Account;
 use candid::{Decode, Encode};
-use helpers::agent::{Account, ICAgent, TransferIcrc1};
+use helpers::agent::{ICAgent, TransferIcrc1};
 use helpers::id::{
     BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, CKLIGHTNING_LEDGER_ID, PEM_NODE_ACC_PATH,
     PEM_USER_ACC_PATH, create_keypair, str_home_from_path,
 };
 use ic_agent::Identity;
+use icrc_ledger_types::icrc::generic_value::ICRC3Value;
+use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferError;
 
 #[tokio::test]
@@ -111,7 +129,7 @@ async fn test_ckbtc_balance_lnpd_l1() -> Result<(), AgentError> {
         },
         amount: nat_amount,
         fee: 10u64.into(),
-        memo: 1u64, //Some(0u64.to_be_bytes().to_vec()),
+        memo: 0u64.to_be_bytes().to_vec(),
         created_at_time: None,
     };
 
@@ -216,7 +234,7 @@ async fn test_ckbtc_balance_cklightning_l1() -> Result<(), AgentError> {
         },
         amount: nat_amount,
         fee: 1000u64.into(),
-        memo: 1u64, //Some(0u64.to_be_bytes().to_vec()),
+        memo: 0u64.to_be_bytes().to_vec(),
         created_at_time: None,
     };
 
@@ -263,12 +281,17 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
     client.fetch_root_key().await?;
 
     let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID).unwrap();
-
+    println!("\nckLightning Ledger Canister ID: {:?}", can_ckl_id);
     let str_user = str_home_from_path(PEM_USER_ACC_PATH);
     let usr_user_id = create_identity(Some(&str_user));
 
-    // let usr_user_id = id::create_identity(Some(&id::str_home_from_path(PEM_USER_ACC_PATH)));
     let usr_user_pr = usr_user_id.sender().unwrap();
+    println!("\nUser Principal: {:?}", usr_user_pr);
+
+    let zero_subaccount = Subaccount([0; 32]);
+
+    let usr_acc_id = AccountIdentifier::new(&usr_user_pr, &zero_subaccount);
+    println!("\nUser Account ID: {:?}", usr_acc_id);
 
     // Query user's ckBTC balance
 
@@ -299,8 +322,12 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
 
     let memo_transfer = funding.memo();
 
+    let memo_bytes = memo_transfer.clone().to_be_bytes().to_vec();
+
+    println!("\nMemo for transfer: {:?}", memo_bytes.clone());
+
     let transfer_some_tx_decoded = client
-        .tx_icrc1_transfer(can_ckl_id, usr_user_pr, amount_u64.clone(), memo_transfer)
+        .tx_icrc1_transfer(can_ckl_id, usr_user_pr, amount_u64.clone(), memo_bytes)
         .await
         .map_err(|e| format!("Failed to get user balance: {}", e));
 
@@ -310,12 +337,53 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
         nat_amount.clone()
     );
 
+    let block_idx = transfer_some_tx_decoded.clone().unwrap();
+
     let resp_contract_balance_result2 = client.icrc1_balance_of(can_ckl_id).await;
     let resp_contract_balance2 = resp_contract_balance_result2.unwrap();
     println!(
         "\nContract ckBTC Balance after transfer: {:?}",
         resp_contract_balance2
     );
+
+    //query blocks
+
+    let query_block_result = client
+        .query_block(&BTC_LEDGER_ID, block_idx)
+        .await
+        .map_err(|e| format!("Failed to query block: {}", e));
+
+    println!(
+        "\nQueried Block ID from BTC Ledger: {:?}",
+        query_block_result
+    );
+    if let Ok(blocks_result) = query_block_result {
+        if let Some(first_block) = blocks_result.blocks.first() {
+            let block_candid = &first_block.block;
+            if let ICRC3Value::Map(block_map) = block_candid {
+                // Extract the timestamp at the block map level as Option<u64>
+                let timestamp_opt = match block_map.get("ts") {
+                    Some(ICRC3Value::Nat(nat)) => Some(nat.0.to_u64().unwrap_or_default()),
+                    _ => None,
+                };
+
+                if let Some(ICRC3Value::Map(tx_map)) = block_map.get("tx") {
+                    match icrc3value_map_to_transaction(tx_map, timestamp_opt) {
+                        Ok(tx) => println!("Decoded transaction: {:?}", tx),
+                        Err(e) => eprintln!("Failed to decode transaction: {:?}", e),
+                    }
+                } else {
+                    eprintln!("No 'tx' field found in block map");
+                }
+            } else {
+                eprintln!("Block candid value is not a Map");
+            }
+        } else {
+            eprintln!("No blocks found in query result");
+        }
+    } else {
+        eprintln!("Failed to query blocks: {:?}", query_block_result);
+    }
 
     // Notify contract of receipt
     let block = transfer_some_tx_decoded.clone().unwrap();
@@ -333,11 +401,6 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
             println!("Notification error: {:?}", e); // <-- THIS IS THE ERR
         }
     }
-
-    // println!(
-    //     "\nNotification Result of User Deposit to Contract: {:?}",
-    //     tx_notification_result.unwrap()
-    // );
 
     let resp_contract_deposit = client.deposit(funding.clone()).await;
 

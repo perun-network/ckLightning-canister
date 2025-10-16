@@ -11,7 +11,7 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::receiver::ICPReceiverError;
+use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use ic_cdk::api::call::CallResult;
 
 use icrc_ledger_types::icrc1::account::Account;
@@ -32,7 +32,9 @@ use ic_cdk::update;
 
 #[update]
 #[candid_method(update)]
-async fn transaction_notification(notify_args: NotifyArgs) -> Result<Amount, ICPReceiverError> {
+async fn transaction_notification(
+    notify_args: NotifyArgs,
+) -> Result<TransactionICRCNotification, ICPReceiverError> {
     transaction_notification_impl(notify_args).await
 }
 

@@ -162,6 +162,7 @@ NODE_WALLET_ID=$(dfx identity get-wallet)
 dfx ledger fabricate-cycles --canister $USER_WALLET_ID --amount 200000
 dfx ledger fabricate-cycles --canister $NODE_WALLET_ID --amount 200000
 dfx canister deposit-cycles 1000000 $MOCK_ID
+dfx canister deposit-cycles 1000000 $CKL_ID
 
 
 

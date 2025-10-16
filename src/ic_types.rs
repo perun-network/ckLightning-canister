@@ -14,6 +14,7 @@
 use crate::require;
 use digest::{FixedOutputDirty, Update};
 use ed25519_dalek::Sha512 as Hasher;
+use icrc_ledger_types::icrc1::transfer::Memo;
 use k256::EncodedPoint;
 use k256::PublicKey as SecpPublicKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -370,7 +371,7 @@ impl Funding {
         }
     }
 
-    pub fn memo(&self) -> u64 {
+    pub fn memo(&self) -> Memo {
         let mut data = Vec::new();
         data.extend_from_slice(&self.channel.0);
         data.extend_from_slice(self.participant.0.to_encoded_point(false).as_bytes());
@@ -378,7 +379,7 @@ impl Funding {
         let arr: [u8; 8] = [
             h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
         ];
-        u64::from_le_bytes(arr)
+        return Memo::from(arr.to_vec());
     }
 }
 

@@ -16,6 +16,7 @@ use crate::ic_types::{
     Amount, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, RegisteredState, WithdrawalReq,
 };
 use crate::receiver::ICPReceiverError;
+use crate::receiver::TransactionICRCNotification;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
@@ -27,9 +28,7 @@ use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
 use crate::require;
 
 use crate::receiver;
-use candid::Nat;
-use candid::{Principal, candid_method};
-// use ic_cdk::storage;
+use candid::{Nat, Principal};
 
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -57,7 +56,7 @@ where
 
 pub async fn transaction_notification_impl(
     notify_args: NotifyArgs,
-) -> std::result::Result<Amount, ICPReceiverError> {
+) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
     let mut state = STATE.write().unwrap();
     state
         .process_icrc_tx(
@@ -147,7 +146,7 @@ where
         tx: receiver::BlockHeight,
         amount: u64,
         funding: Funding,
-    ) -> std::result::Result<Amount, ICPReceiverError> {
+    ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
         self.icrc_receiver.verify_icrc(tx, amount, funding).await
     }
 

@@ -18,11 +18,15 @@ type Event = variant {
 };
 type Funding = record { participant : blob; channel : blob };
 type ICPReceiverError = variant {
+  TxMapNotFound;
+  TxAmountNotFound;
   TxNotFound;
   TransactionType;
   FailedToQuery;
+  TxFromNotFound;
   DuplicateTransaction;
   Recipient;
+  TxToNotFound;
 };
 type NotifyArgs = record {
   amount : nat64;
@@ -31,13 +35,23 @@ type NotifyArgs = record {
 };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisteredState = record { state : State; timeout : nat64 };
-type Result = variant { Ok : nat; Err : ICPReceiverError };
+type Result = variant {
+  Ok : TransactionICRCNotification;
+  Err : ICPReceiverError;
+};
 type Result_1 = variant { Ok : nat; Err : CklError };
 type State = record {
   version : nat64;
   finalized : bool;
   allocation : vec nat;
   channel : blob;
+};
+type TransactionICRCNotification = record {
+  to : blob;
+  from : blob;
+  memo : blob;
+  timestamp : opt nat64;
+  amount : nat64;
 };
 type WithdrawalReq = record {
   participant : blob;

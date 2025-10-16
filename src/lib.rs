@@ -25,7 +25,7 @@ use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::{
     Amount, ChannelId, Funding, NotifyArgs, RegisteredState, Timestamp, WithdrawalReq,
 };
-use crate::receiver::ICPReceiverError;
+use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;
 
 // This generates the cklightning.did file

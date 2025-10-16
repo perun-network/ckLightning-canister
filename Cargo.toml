@@ -5,7 +5,7 @@ edition = "2024"
 
 [lib]
 # https://github.com/rust-lang/cargo/issues/4881
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 name = "cklightning"
 
 [dependencies]
@@ -30,10 +30,6 @@ bitcoin = { version = "0.32", features = ["rand"] }
 num-traits = "0.2.19"
 rand = "0.8"
 
-[dependencies.ic-agent]
-version = "0.39.3"
-features = ["wasm-bindgen"]
-
-
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+ic-agent = { version = "0.39.3", features = ["wasm-bindgen"] }

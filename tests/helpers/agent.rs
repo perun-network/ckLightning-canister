@@ -11,31 +11,36 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::fmt;
+extern crate cklightning;
 use super::id::{self, BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, CKLIGHTNING_LEDGER_ID};
-use bitcoin::secp256k1::PublicKey as SecpPublicKey;
-use bitcoin::secp256k1::SecretKey as SecpSecretKey;
-use bitcoin::secp256k1::{self, Secp256k1};
+use bitcoin::secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey as SecpSecretKey};
 pub use candid::{
-    Deserialize, Int, Nat,
-    types::{Serializer, Type, TypeInner, TypeInner::Nat8},
+    Deserialize, Nat,
+    types::{Serializer, Type, TypeInner},
 };
+use cklightning::receiver::ICPReceiverError;
+use cklightning::receiver::TransactionICRCNotification;
 use digest::{FixedOutput, Update};
 use ed25519_dalek::Sha512 as Hasher;
+use icrc_ledger_types::icrc1::{
+    account::Account,
+    transfer::{Memo, TransferArg},
+};
+use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use rand::rngs::StdRng;
 use rand::thread_rng;
 
-use candid::{CandidType, Principal};
-use candid::{Decode, Encode};
+use candid::{CandidType, Decode, Encode, Principal};
 use ic_ledger_types::{Timestamp, TransferError};
 use rand::SeedableRng;
 use serde::Serialize;
 use serde::de::{Deserializer, Error as _};
 use serde_bytes::ByteBuf;
 
-use ic_agent::Agent;
-use ic_agent::AgentError;
 #[cfg(test)]
 use ic_agent::identity::Identity;
+use ic_agent::{Agent, AgentError};
 
 pub struct ICAgent {
     pub agent: Agent,
@@ -43,12 +48,6 @@ pub struct ICAgent {
 
 #[cfg(test)]
 use super::id::{PEM_NODE_ACC_PATH, PEM_USER_ACC_PATH};
-
-#[derive(CandidType)]
-pub struct Account {
-    pub owner: Principal,
-    pub subaccount: Option<Vec<u8>>,
-}
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ApproveError {
@@ -238,22 +237,19 @@ impl ICAgent {
         to: Principal,
         from: Principal,
         amount: u64,
-        memo: u64,
+        memo: std::vec::Vec<u8>,
     ) -> Result<Nat, AgentError> {
         let can_btcldg_id = Principal::from_text(BTC_LEDGER_ID).unwrap();
 
-        let tx_args = TransferIcrc1 {
-            from: Account {
-                owner: from,
-                subaccount: None,
-            },
+        let tx_args = TransferArg {
+            from_subaccount: None,
             to: Account {
                 owner: to,
                 subaccount: None,
             },
-            amount: amount.into(),
-            fee: BTC_LEDGER_DEFAULT_FEE.into(),
-            memo,
+            amount: Nat(amount.into()),
+            fee: Nat::from(BTC_LEDGER_DEFAULT_FEE).into(),
+            memo: Some(Memo::from(memo)),
             created_at_time: None,
         };
 
@@ -335,6 +331,46 @@ impl ICAgent {
         Ok(bal_res)
     }
 
+    pub async fn query_block(
+        &self,
+        ledger_canister_id: &str,
+        block_idx: Nat,
+    ) -> Result<GetBlocksResult, Box<dyn std::error::Error>> {
+        let ledger_id = Principal::from_text(ledger_canister_id)?;
+
+        let getblocks_args = vec![GetBlocksRequest {
+            start: block_idx,
+            length: Nat::from(50u64),
+        }];
+
+        self.agent
+            .fetch_root_key()
+            .await
+            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+
+        let arg = Encode!(&getblocks_args).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+
+        let resp = self
+            .agent
+            .query(&ledger_id, "icrc3_get_blocks")
+            .with_arg(arg)
+            .call()
+            .await
+            .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        let blocks_result: GetBlocksResult = Decode!(&resp, GetBlocksResult)?;
+
+        if blocks_result.blocks.is_empty() {
+            return Err("No blocks found in ledger block".into());
+        }
+
+        // Return the block id as an example; adapt as needed
+        // Ok(first_block.id.0.clone().0) // Assuming id is Nat inside a wrapper
+        // let first_block = &blocks_result.blocks[0];
+
+        // Return the block ID (as Nat)
+        Ok(blocks_result.clone())
+    }
+
     pub async fn deposit(&self, funding: Funding) -> Result<String, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
 
@@ -391,7 +427,8 @@ impl ICAgent {
         funding: Funding,
         block: u64,
         amount: u64,
-    ) -> Result<Option<Nat>, Box<dyn std::error::Error>> {
+    ) -> Result<Result<TransactionICRCNotification, ICPReceiverError>, Box<dyn std::error::Error>>
+    {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
 
         self.agent
@@ -411,7 +448,9 @@ impl ICAgent {
             .with_arg(Encode!(&args_notify).unwrap())
             .call_and_wait()
             .await?;
-        let blockres_decoded = Decode!(&blockres, Option<Nat>).unwrap();
+        // let blockres_decoded = Decode!(&blockres, Option<Nat>).unwrap();
+        let blockres_decoded =
+            Decode!(&blockres, Result<TransactionICRCNotification, ICPReceiverError>).unwrap();
 
         Ok(blockres_decoded)
     }
@@ -489,7 +528,7 @@ pub struct TransferIcrc1 {
     pub to: Account,
     pub amount: Nat,
     pub fee: Option<u64>,
-    pub memo: u64,
+    pub memo: std::vec::Vec<u8>,
     pub created_at_time: Option<u64>,
 }
 
@@ -594,7 +633,7 @@ mod tests {
             },
             amount: nat_amount,
             fee: 10u64.into(),
-            memo: 1u64, //Some(0u64.to_be_bytes().to_vec()),
+            memo: (0u64.to_be_bytes().to_vec()),
             created_at_time: None,
         };
 
@@ -689,18 +728,17 @@ mod tests {
         let res_user = Decode!(&resp_user, Option<Nat>).unwrap();
         println!("Balance of user before tx: {:?}", res_user.unwrap());
 
-        let tx_args = TransferIcrc1 {
-            from: Account {
+        let mem = Memo::from(15u64.to_be_bytes().to_vec());
+
+        let tx_args = TransferArg {
+            from_subaccount: None,
+            to: Account {
                 owner: can_ckl_id,
                 subaccount: None,
             },
-            to: Account {
-                owner: usr_user_pr,
-                subaccount: None,
-            },
-            amount: nat_amount,
-            fee: 1000u64.into(),
-            memo: 1u64, //Some(0u64.to_be_bytes().to_vec()),
+            amount: nat_amount.clone(),
+            fee: Nat::from(1000u64).into(),
+            memo: mem.into(), //15u64.to_be_bytes(),
             created_at_time: None,
         };
 
@@ -783,9 +821,15 @@ mod tests {
         );
 
         let memo_transfer = funding.memo();
+        let memo_transfer_bytes = memo_transfer.to_be_bytes().to_vec();
 
         let transfer_some_tx_decoded = client
-            .tx_icrc1_transfer(can_ckl_id, usr_user_pr, amount_u64.clone(), memo_transfer)
+            .tx_icrc1_transfer(
+                can_ckl_id,
+                usr_user_pr,
+                amount_u64.clone(),
+                memo_transfer_bytes,
+            )
             .await
             .map_err(|e| format!("Failed to get user balance: {}", e));
 
