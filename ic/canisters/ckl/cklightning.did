@@ -1,0 +1,120 @@
+type ChannelFunding = record { participant : blob; channel : blob };
+type ChannelTime = record { time : nat64; chanid : blob };
+type CklError = variant {
+  InvalidInput;
+  InsufficientFunding;
+  NotFinalized;
+  OutdatedState;
+  LedgerError;
+  Authentication;
+  AlreadyConcluded;
+  InsufficientLiquidity;
+  Other : text;
+  ReceiverError : ICPReceiverError;
+  ConfirmationError;
+};
+type Event = variant {
+  Disputed : record { state : RegisteredState; timestamp : nat64 };
+  Funded : record { who : blob; total : nat; timestamp : nat64 };
+  Concluded : record { state : RegisteredState; timestamp : nat64 };
+};
+type Funding = variant { Pool : PoolFunding; Channel : ChannelFunding };
+type ICPReceiverError = variant {
+  TxMapNotFound;
+  TxAmountNotFound;
+  TxNotFound;
+  TransactionType;
+  FailedToQuery;
+  TxFromNotFound;
+  DuplicateTransaction;
+  Recipient;
+  TxToNotFound;
+};
+type NotifyArgs = record {
+  amount : nat64;
+  block_height : nat64;
+  funding : Funding;
+};
+type PoolAsset = variant { BTC; CkBTC };
+type PoolFunding = record {
+  depositor : principal;
+  asset : PoolAsset;
+  pubkey_l1 : blob;
+  timestamp : nat64;
+};
+type PoolWithdrawal = record {
+  depositor : principal;
+  asset : PoolAsset;
+  pubkey_l1 : blob;
+  amount : nat;
+};
+type RegEvent = record { time : nat64; event : Event; chanid : blob };
+type RegisteredState = record { state : State; timeout : nat64 };
+type Result = variant { Ok; Err : CklError };
+type Result_1 = variant {
+  Ok : TransactionICRCNotification;
+  Err : ICPReceiverError;
+};
+type Result_2 = variant { Ok : nat; Err : CklError };
+type State = record {
+  version : nat64;
+  finalized : bool;
+  allocation : vec nat;
+  channel : blob;
+};
+type TransactionICRCNotification = record {
+  to : blob;
+  from : blob;
+  memo : blob;
+  timestamp : opt nat64;
+  amount : nat64;
+};
+type WithdrawalReq = record {
+  participant : blob;
+  channel : blob;
+  amount : nat;
+  receiver : principal;
+};
+service : {
+  __candid_method_deposit_channel : (ChannelFunding) -> (Result);
+  __candid_method_deposit_lp : (PoolFunding) -> (Result);
+  __candid_method_query_events : (ChannelTime) -> (text) query;
+  // Returns the funding specific for a channel's participant.
+  // this function should be used to check whether all participants have
+  // deposited their owed funds into a channel to ensure it is fully funded.
+  __candid_method_query_funding_only : (Funding) -> (opt Funding) query;
+  // Returns the funds deposited for a channel's specified participant, if any.
+  // this function should be used to check whether all participants have
+  // deposited their owed funds into a channel to ensure it is fully funded.
+  __candid_method_query_holdings : (Funding) -> (opt nat) query;
+  __candid_method_query_state : (blob) -> (opt RegisteredState) query;
+  __candid_method_register_event : (blob, nat64, Event) -> ();
+  __candid_method_register_event_isolated : (RegEvent) -> ();
+  __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result_1);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_2);
+  __candid_method_withdraw_lp : (PoolWithdrawal) -> (Result);
+  clear : () -> ();
+  deposit_channel : (ChannelFunding) -> (Result);
+  deposit_lp : (PoolFunding) -> (Result);
+  dequeue : () -> (opt text);
+  enqueue : (text) -> ();
+  peek : () -> (opt text) query;
+  query_events : (ChannelTime) -> (text) query;
+  // Returns the funding specific for a channel's participant.
+  // this function should be used to check whether all participants have
+  // deposited their owed funds into a channel to ensure it is fully funded.
+  query_funding_only : (Funding) -> (opt Funding) query;
+  // Returns the funds deposited for a channel's specified participant, if any.
+  // this function should be used to check whether all participants have
+  // deposited their owed funds into a channel to ensure it is fully funded.
+  query_holdings : (Funding) -> (opt nat) query;
+  query_state : (blob) -> (opt RegisteredState) query;
+  register_event : (blob, nat64, Event) -> ();
+  register_event_isolated : (RegEvent) -> ();
+  simple_withdraw : (WithdrawalReq) -> (nat);
+  size : () -> (nat64) query;
+  transaction_notification : (NotifyArgs) -> (Result_1);
+  trigger_withdraw : (WithdrawalReq) -> (Result_2);
+  withdraw_lp : (PoolWithdrawal) -> (Result);
+}

@@ -6,35 +6,42 @@
 //
 //    http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writing, software
+//  Unless required by applicable law or agreed to in writiing, software
 //  distributed under the License is distributed on an "AS IS" BASIS,
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::types::Amount;
-use crate::types::Funding;
+use crate::ic_types::{Amount, DEVNET_CKBTC_LEDGER, Funding, MAINNET_ICP_LEDGER};
 use async_trait::async_trait;
 pub use candid::{
     CandidType, Deserialize, Int, Nat, Principal,
     types::{Serializer, Type},
 };
+use ic_cdk::api::call::CallResult;
+use ic_ledger_types::BlockIndex;
 use ic_ledger_types::{
     AccountIdentifier, Block, DEFAULT_SUBACCOUNT, GetBlocksArgs, Operation, Transaction,
     query_archived_blocks, query_blocks,
 };
+use icrc_ledger_types::icrc::generic_value::ICRC3Value;
+use icrc_ledger_types::icrc1::transfer::Memo;
+use icrc_ledger_types::icrc3::transactions::Transaction as ICRCTransaction;
+use num_traits::cast::ToPrimitive;
+
+use icrc_ledger_types;
+use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
 use std::collections::{BTreeMap, BTreeSet};
-
-pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
-pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
-pub const DEFAULT_CKBTC_FEE: u64 = 1000;
-
-pub type Memo = u64;
+pub type PerunMemo = u64;
 pub type BlockHeight = u64;
-
 /// ICP token handling errors.
 #[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
 pub enum ICPReceiverError {
     TransactionType,
+    TxNotFound,
+    TxMapNotFound,
+    TxFromNotFound,
+    TxToNotFound,
+    TxAmountNotFound,
     Recipient,
     DuplicateTransaction,
     FailedToQuery,
@@ -50,46 +57,77 @@ impl std::fmt::Display for ICPReceiverError {
 pub struct Receiver<Q: TXQuerier> {
     tx_querier: Q,
     my_account: AccountIdentifier,
-    known_txs: BTreeSet<BlockHeight>, // set of block heights
-    unspent: BTreeMap<Memo, Amount>,  // received tokens per memo
+    known_txs: BTreeSet<BlockHeight>,
+    unspent: BTreeMap<Memo, Amount>,
+}
+
+fn extract_blob_bytes(map: &BTreeMap<String, ICRC3Value>, key: &str) -> Option<Vec<u8>> {
+    map.get(key).and_then(|v| match v {
+        ICRC3Value::Blob(blob) => Some(blob.clone().into_vec()),
+        _ => None,
+    })
+}
+
+fn extract_nat_u64(map: &BTreeMap<String, ICRC3Value>, key: &str) -> Option<u64> {
+    map.get(key).and_then(|v| match v {
+        ICRC3Value::Nat(nat) => u64::try_from(nat.0.clone()).ok(),
+        _ => None,
+    })
+}
+
+fn extract_array_blob_first(map: &BTreeMap<String, ICRC3Value>, key: &str) -> Option<Vec<u8>> {
+    map.get(key).and_then(|v| match v {
+        ICRC3Value::Array(arr) => arr.get(0).and_then(|icv| match icv {
+            ICRC3Value::Blob(blob) => Some(blob.clone().into_vec()),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+pub fn icrc3value_map_to_transaction(
+    tx_map: &BTreeMap<String, ICRC3Value>,
+    ts: Option<u64>,
+) -> Result<TransactionICRCNotification, ICPReceiverError> {
+    // Extract 'from' bytes and convert using from_slice
+    let from_bytes =
+        extract_array_blob_first(tx_map, "from").ok_or(ICPReceiverError::TxFromNotFound)?;
+
+    let from = Principal::from_slice(from_bytes.as_slice());
+
+    let acct_id = AccountIdentifier::new(&from, &DEFAULT_SUBACCOUNT);
+    // Extract 'to' bytes and convert using from_slice
+
+    let to_bytes = extract_array_blob_first(tx_map, "to").ok_or(ICPReceiverError::TxToNotFound)?;
+    let to = Principal::from_slice(to_bytes.as_slice());
+
+    let to_acct_id = AccountIdentifier::new(&to, &DEFAULT_SUBACCOUNT);
+
+    // Extract amount as u64
+    let amount = extract_nat_u64(tx_map, "amt").ok_or(ICPReceiverError::TxAmountNotFound)?;
+
+    // Extract memo blob or fallback to empty
+    let memo =
+        extract_blob_bytes(tx_map, "memo").map_or_else(|| Memo::from(vec![]), |b| Memo::from(b));
+
+    Ok(TransactionICRCNotification {
+        to: to_acct_id,
+        from: acct_id,
+        amount,
+        memo,
+        timestamp: ts,
+    })
 }
 
 /// ICP transaction querier.
 #[async_trait]
 pub trait TXQuerier {
-    /// Allows the
-    async fn query_tx(
-        &self,
-        block_height: BlockHeight,
-    ) -> Result<TransactionNotification, ICPReceiverError>;
-
     async fn query_icrc_tx(
         &self,
         block_height: BlockHeight,
         amount: u64,
-    ) -> Result<u64, ICPReceiverError>;
+    ) -> Result<TransactionICRCNotification, ICPReceiverError>;
 }
-
-/// Mocked ICP transaction querier for simulation and testing purposes.
-#[derive(Default)]
-pub struct MockTXQuerier {
-    txs: BTreeMap<BlockHeight, TransactionNotification>,
-}
-
-// #[async_trait]
-// impl TXQuerier for MockTXQuerier {
-//     async fn query_tx(&self, block_height: BlockHeight) -> Result<TransactionNotification, u64> {
-//         self.txs
-//             .get(&block_height)
-//             .cloned()
-//             .ok_or(ICPReceiverError::FailedToQuery)
-//     }
-// }
-
-// impl MockTXQuerier {
-//     /// Inserts a transaction so that it can be read via query_tx().
-//     pub fn register_tx(&mut self, block_height: BlockHeight, tx: TransactionNotification) {
-//         self.txs.insert(block_height, tx);
 //     }
 // }
 
@@ -100,26 +138,33 @@ pub struct CanisterTXQuerier {
 
 #[async_trait]
 impl TXQuerier for CanisterTXQuerier {
-    async fn query_tx(
-        &self,
-        block_height: BlockHeight,
-    ) -> Result<TransactionNotification, ICPReceiverError> {
-        if let Some(block) = self.get_block_from_ledger(block_height).await {
-            if let Some(tx) = TransactionNotification::from_tx(block.transaction) {
-                return Ok(tx);
-            } else {
-                return Err(ICPReceiverError::TransactionType);
-            }
-        }
-        Err(ICPReceiverError::FailedToQuery)
-    }
-
     async fn query_icrc_tx(
         &self,
         block_height: BlockHeight,
-        amount: u64,
-    ) -> Result<u64, ICPReceiverError> {
-        Ok(amount)
+        _amount: u64,
+    ) -> Result<TransactionICRCNotification, ICPReceiverError> {
+        if let Some(block_with_id) = self.get_blocks_from_ic_ledger(block_height).await {
+            match &block_with_id.block {
+                ICRC3Value::Map(block_map) => {
+                    // Extract the timestamp at the block level here:
+                    let timestamp_opt = match block_map.get("ts") {
+                        Some(ICRC3Value::Nat(nat)) => Some(nat.0.to_u64().unwrap_or_default()), // safely convert Nat to u64
+                        _ => None,
+                    };
+
+                    match block_map.get("tx") {
+                        Some(ICRC3Value::Map(tx_map)) => {
+                            // Pass timestamp as Option<u64> to your transaction function
+                            icrc3value_map_to_transaction(tx_map, timestamp_opt)
+                        }
+                        _ => Err(ICPReceiverError::TxMapNotFound),
+                    }
+                }
+                _ => Err(ICPReceiverError::TxNotFound),
+            }
+        } else {
+            Err(ICPReceiverError::FailedToQuery)
+        }
     }
 }
 
@@ -140,26 +185,49 @@ impl CanisterTXQuerier {
         }
     }
 
-    /// Queries a block from the ICP ledger's internal blockchain.
-    async fn get_block_from_ledger(&self, block_height: BlockHeight) -> Option<Block> {
-        let args = GetBlocksArgs {
-            start: block_height,
-            length: 1,
-        };
-        if let Ok(result) = query_blocks(self.ledger, &args.clone()).await {
-            if result.blocks.len() != 0 {
+    async fn get_blocks_from_ic_ledger(&self, block_height: BlockIndex) -> Option<BlockWithId> {
+        use candid::Nat;
+        use num_traits::cast::ToPrimitive;
+
+        let args = vec![GetBlocksRequest {
+            start: Nat::from(block_height),
+            length: Nat::from(2000u64),
+        }];
+
+        let ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+        let call_result: CallResult<(GetBlocksResult,)> =
+            ic_cdk::call(ledger_id, "icrc3_get_blocks", (args.clone(),)).await;
+
+        if let Ok((result,)) = call_result {
+            if !result.blocks.is_empty() {
                 return result.blocks.first().cloned();
             }
-            if let Some(b) = result
-                .archived_blocks
-                .into_iter()
-                .find(|b| (b.start <= block_height && (block_height - b.start) < b.length))
-            {
-                if let Ok(Ok(range)) = query_archived_blocks(&b.callback, &args).await {
-                    return range.blocks.get((block_height - b.start) as usize).cloned();
+
+            for archive in result.archived_blocks.iter() {
+                for req in &archive.args {
+                    let start: u64 = req.start.clone().0.to_u64().unwrap();
+                    let len: u64 = req.length.clone().0.to_u64().unwrap();
+
+                    if start <= block_height && block_height < start + len {
+                        let archived_result: CallResult<(GetBlocksResult,)> = ic_cdk::call(
+                            archive.callback.canister_id,
+                            &archive.callback.method,
+                            (req.clone(),),
+                        )
+                        .await;
+
+                        if let Ok((archived_blocks_result,)) = archived_result {
+                            if !archived_blocks_result.blocks.is_empty() {
+                                let idx = (block_height - start) as usize;
+                                return archived_blocks_result.blocks.get(idx).cloned();
+                            }
+                        }
+                    }
                 }
             }
         }
+
         None
     }
 }
@@ -185,7 +253,7 @@ where
         block_height: BlockHeight,
         amount: u64,
         funding: Funding,
-    ) -> std::result::Result<Amount, ICPReceiverError> {
+    ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
         if self.known_txs.contains(&block_height) {
             return Err(ICPReceiverError::DuplicateTransaction);
         }
@@ -195,36 +263,12 @@ where
                 if !self.known_txs.insert(block_height) {
                     return Err(ICPReceiverError::DuplicateTransaction);
                 }
-                // if tx.to != self.my_account {
-                //     return Err(ICPReceiverError::Recipient);
-                // }
-                *self.unspent.entry(funding.memo()).or_insert(0u64.into()) += amount;
-
-                Ok(Amount::from(amount)) // Return the argument amount as Amount
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    pub async fn verify(
-        &mut self,
-        block_height: BlockHeight,
-    ) -> std::result::Result<Amount, ICPReceiverError> {
-        if self.known_txs.contains(&block_height) {
-            return Err(ICPReceiverError::DuplicateTransaction);
-        }
-
-        match self.tx_querier.query_tx(block_height).await {
-            Ok(tx) => {
-                if !self.known_txs.insert(block_height) {
-                    return Err(ICPReceiverError::DuplicateTransaction);
-                }
                 if tx.to != self.my_account {
                     return Err(ICPReceiverError::Recipient);
                 }
-                *self.unspent.entry(tx.memo).or_insert(0u64.into()) += tx.get_amount();
+                *self.unspent.entry(funding.memo()).or_insert(0u64.into()) += amount;
 
-                Ok(tx.get_amount())
+                Ok(tx)
             }
             Err(e) => Err(e),
         }
@@ -247,40 +291,56 @@ where
 }
 
 /// Contents of a received transaction.
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)] //Hash,
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
+pub struct TransactionICRCNotification {
+    pub to: AccountIdentifier,
+    pub from: AccountIdentifier,
+    pub amount: u64,
+    pub memo: Memo,
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
 pub struct TransactionNotification {
     pub to: AccountIdentifier,
     pub amount: u64,
     pub memo: Memo,
 }
 
-impl TransactionNotification {
+impl TransactionICRCNotification {
     /// Creates a transaction notification from an ICP ledger transaction. If the transaction is neither a transfer nor a mint, returns nothing.
-    pub fn from_tx(tx: Transaction) -> Option<Self> {
-        if tx.operation.is_none() {
-            return None;
-        }
 
-        match tx.operation.unwrap() {
-            Operation::Transfer { to, amount, .. } => {
-                return Some(Self {
-                    to: to,
-                    amount: amount.e8s(),
-                    memo: tx.memo.0,
-                });
-            }
-            Operation::Mint { to, amount, .. } => {
-                return Some(Self {
-                    to: to,
-                    amount: amount.e8s(),
-                    memo: tx.memo.0,
-                });
-            }
-            _ => (),
-        }
-        None
+    pub fn from_icrc_tx(tx: ICRCTransaction) -> Option<Self> {
+        // Get the inner Transfer struct, if it exists
+        let transfer = tx.transfer.as_ref()?;
+
+        // Derive the AccountIdentifier from `transfer.to`
+
+        let to_identifier = AccountIdentifier::new(&transfer.to.owner, &DEFAULT_SUBACCOUNT);
+        let from_identifier = AccountIdentifier::new(&transfer.from.owner, &DEFAULT_SUBACCOUNT);
+
+        // Convert Nat to u64 (if possible)
+        let amount = transfer.amount.0.to_u64().unwrap_or(0);
+
+        // Get the Memo, if present
+        let memo = transfer.memo.clone().unwrap();
+
+        Some(Self {
+            to: to_identifier,
+            from: from_identifier,
+            amount,
+            memo,
+            timestamp: None,
+        })
     }
 
+    /// Returns the transaction's amount.
+    pub fn get_amount(&self) -> Amount {
+        self.amount.into()
+    }
+}
+
+impl TransactionNotification {
     /// Returns the transaction's amount.
     pub fn get_amount(&self) -> Amount {
         self.amount.into()

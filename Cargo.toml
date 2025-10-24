@@ -5,14 +5,14 @@ edition = "2024"
 
 [lib]
 # https://github.com/rust-lang/cargo/issues/4881
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 name = "cklightning"
 
 [dependencies]
 lazy_static = "1"
 ic-cdk-macros = "0.18.2"
-candid = "=0.10.13"
-ic-cdk = "0.18.5"
+candid = "=0.10.19"
+ic-cdk = "0.18.7"
 ic-ledger-types = "0.15.0"
 icrc-ledger-types = "0.1.10"
 candid_parser = "0.1.4"
@@ -25,4 +25,11 @@ hex = "0.4.3"
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 base64 = "0.21"
 k256 = "0.13.4"
+lightning-invoice = "0.33.2"
+bitcoin = { version = "0.32", features = ["rand"] }
+num-traits = "0.2.19"
+rand = "0.8"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+ic-agent = { version = "0.39.3", features = ["wasm-bindgen"] }
