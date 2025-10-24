@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use std::fmt;
 extern crate cklightning;
 use super::id::{self, BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, CKLIGHTNING_LEDGER_ID};
 use bitcoin::secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey as SecpSecretKey};
@@ -19,6 +18,7 @@ pub use candid::{
     Deserialize, Nat,
     types::{Serializer, Type, TypeInner},
 };
+use cklightning::error::CklError;
 use cklightning::receiver::ICPReceiverError;
 use cklightning::receiver::TransactionICRCNotification;
 use digest::{FixedOutput, Update};
@@ -371,13 +371,14 @@ impl ICAgent {
         Ok(blocks_result.clone())
     }
 
-    pub async fn deposit(&self, funding: Funding) -> Result<String, Box<dyn std::error::Error>> {
-        let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
+    pub async fn deposit(&self, funding: Funding) -> Result<String, CklError> {
+        let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
+            .map_err(|e| CklError::Other(format!("Invalid Principal: {}", e)))?;
 
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| CklError::Other(format!("Failed to fetch root key: {}", e)))?;
 
         let resp = self
             .agent
@@ -385,18 +386,21 @@ impl ICAgent {
             .with_arg(
                 Encode!(&Funding {
                     channel: funding.channel,
-                    participant: funding.participant
+                    participant: funding.participant,
                 })
                 .unwrap(),
             )
             .call_and_wait()
-            .await?;
+            .await
+            .map_err(|e| CklError::Other(format!("Update call failed: {}", e)))?;
 
-        let deposit_result = Decode!(&resp, Option<String>).unwrap();
+        // Decode as Result<(), CklError>
+        let deposit_result = Decode!(&resp, Result<(), CklError>)
+            .map_err(|e| CklError::Other(format!("Decode failed: {}", e)))?;
 
         match deposit_result {
-            Some(error_message) => Err(error_message.into()),
-            None => Ok("Deposit successful".to_string()),
+            Ok(()) => Ok("Deposit successful".to_string()),
+            Err(e) => Err(e),
         }
     }
 
@@ -460,7 +464,7 @@ impl ICAgent {
         amount: u64,
         funding: Funding,
         receiver: Principal,
-    ) -> Result<Nat, Box<dyn std::error::Error>> {
+    ) -> Result<Result<Nat, CklError>, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
 
         self.agent
@@ -482,7 +486,7 @@ impl ICAgent {
             .call_and_wait()
             .await?;
 
-        let res = Decode!(&resp, Nat).unwrap();
+        let res = Decode!(&resp, Result<Nat, CklError>).unwrap();
         Ok(res)
     }
 

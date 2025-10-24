@@ -43,6 +43,7 @@ pub enum CklError {
     ReceiverError(crate::receiver::ICPReceiverError),
     /// Error confirming tx
     ConfirmationError,
+    Other(String),
 }
 impl std::fmt::Display for CklError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

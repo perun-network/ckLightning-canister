@@ -12,12 +12,16 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::error::CklError;
+use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    Amount, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, RegisteredState, WithdrawalReq,
+    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding, L2Account,
+    NotifyArgs, PoolFunding, PoolWithdrawal, RegisteredState, WithdrawalReq,
 };
+use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
 use ic_cdk::api::call::CallResult;
+use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
 
@@ -51,7 +55,7 @@ where
     icrc_receiver: receiver::Receiver<Q>,
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
-    liq_pool_holdings: HashMap<L1Account, Amount>,
+    liq_pool: LiquidityPool,
 }
 
 pub async fn transaction_notification_impl(
@@ -72,14 +76,24 @@ pub fn query_holdings_impl(funding: Funding) -> Option<Amount> {
     state.query_holdings(funding)
 }
 
+pub fn withdraw_lp_impl(withdrawal: PoolWithdrawal) -> std::result::Result<(), CklError> {
+    let mut state = STATE.write().unwrap();
+    state.withdraw_icrc(blocktime(), withdrawal)
+}
+
 pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Nat, CklError> {
     let mut state = STATE.write().unwrap();
     state.withdraw_from_liq_pool(req).await
 }
 
-pub fn deposit_impl(funding: Funding) -> Result<()> {
+pub fn deposit_channel_impl(funding: ChannelFunding) -> std::result::Result<(), CklError> {
     let mut state = STATE.write().unwrap();
-    state.deposit_icrc(blocktime(), funding)
+    state.deposit_icrc(blocktime(), Funding::Channel(funding))
+}
+
+pub fn deposit_lp_impl(funding: PoolFunding) -> std::result::Result<(), CklError> {
+    let mut state = STATE.write().unwrap();
+    state.deposit_icrc(blocktime(), Funding::Pool(funding))
 }
 
 pub fn query_state_impl(id: ChannelId) -> Option<RegisteredState> {
@@ -96,48 +110,121 @@ where
             icrc_receiver: receiver::Receiver::new(q, my_principal),
             user_holdings: Default::default(),
             channels: Default::default(),
-            liq_pool_holdings: Default::default(),
+            liq_pool: LiquidityPool::new(),
         }
     }
-    pub fn deposit(&mut self, funding: Funding, amount: Amount) -> Result<()> {
+    pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> Result<()> {
         *self
             .user_holdings
             .entry(funding)
             .or_insert(Default::default()) += amount;
         Ok(())
     }
+    pub fn withdraw_icrc(&mut self, time: Timestamp, withdrawal: PoolWithdrawal) -> Result<()> {
+        let PoolWithdrawal {
+            asset,
+            pubkey_l1: _,
+            depositor,
+            amount,
+        } = withdrawal;
+
+        // Check depositor's balance
+        let depositor_info = self
+            .liq_pool
+            .depositors
+            .get_mut(&depositor)
+            .ok_or_else(|| CklError::InsufficientLiquidity)?;
+
+        // Check asset balance and get mutable reference for deduction
+        let depositor_balance = match asset {
+            PoolAsset::CkBTC => &mut depositor_info.ckbtc_amount,
+            PoolAsset::BTC => &mut depositor_info.btc_amount,
+        };
+
+        if *depositor_balance < amount {
+            return Err(CklError::InsufficientLiquidity);
+        }
+
+        // Check pool's total holdings
+        let total_holding = self
+            .liq_pool
+            .holdings_total
+            .get_mut(&asset)
+            .ok_or_else(|| CklError::InsufficientLiquidity)?;
+
+        if *total_holding < amount {
+            return Err(CklError::InsufficientLiquidity);
+        }
+
+        // Deduct amount from depositor and pool total
+        *depositor_balance -= amount.clone();
+        *total_holding -= amount;
+
+        // Add any additional logic here (e.g., locking, events)
+
+        Ok(())
+    }
+    // Correct usage:
+    pub fn withdraw_channel(&mut self, funding: Funding, amount: Amount) -> Result<()> {
+        // TODO: withdrawal logic as part of the L2 Lightning protocol
+
+        return Ok(());
+    }
 
     pub fn deposit_liq_pool(
         &mut self,
-        funding: u64,
         amount: Amount,
+        asset: PoolAsset,
         depositor: L1Account,
     ) -> Result<()> {
-        *self
-            .liq_pool_holdings
+        // holdings_total already contains keys for all PoolAssets, so .entry() not needed, just .get_mut()
+        *self.liq_pool.holdings_total.get_mut(&asset).unwrap() += amount.clone();
+
+        // depositor entry should exist or be inserted with default asset
+        let depositor_info = self
+            .liq_pool
+            .depositors
             .entry(depositor.clone())
-            .or_insert(Default::default()) += amount;
+            .or_insert_with(Default::default);
+
+        // Since DepositorInfo has a default asset, just deposit normally
+        depositor_info.deposit(asset, amount);
+
         Ok(())
     }
 
     pub fn deposit_icrc(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
         let memo = funding.memo();
+        // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
 
-        self.deposit(funding.clone(), amount)?;
-        // events::STATE
-        //     .write()
-        //     .unwrap()
-        //     .register_event(
-        //         time,
-        //         funding.channel.clone(),
-        //         Event::Funded {
-        //             who: funding.participant.clone(),
-        //             total: self.user_holdings.get(&funding).cloned().unwrap(),
-        //             timestamp: time,
-        //         },
-        //     )
-        //     .await;
+        match &funding {
+            Funding::Channel(_) => {
+                self.deposit_channel(funding.clone(), amount)?;
+            }
+            Funding::Pool(_) => {
+                let depositor = funding.get_depositor().unwrap().clone();
+                let pool_asset = funding.get_asset().unwrap().clone();
+                self.deposit_liq_pool(amount, pool_asset, depositor)?;
+            }
+        }
+
+        //     // events::STATE
+        //     //     .write()
+        //     //     .unwrap()
+        //     //     .register_event(
+        //     //         time,
+        //     //         funding.channel.clone(),
+        //     //         Event::Funded {
+        //     //             who: funding.participant.clone(),
+        //     //             total: self.user_holdings.get(&funding).cloned().unwrap(),
+        //     //             timestamp: time,
+        //     //         },
+        //     //     )
+        //     //     .await;
+
+        // Optionally handle events if needed
+
         Ok(())
     }
 
@@ -154,8 +241,8 @@ where
         self.user_holdings.get(&funding).cloned()
     }
 
-    pub fn query_liq_holdings(&self, depositor: L1Account) -> Option<Amount> {
-        self.liq_pool_holdings.get(&depositor).cloned()
+    pub fn query_liq_holdings(&self, asset: PoolAsset) -> Option<Amount> {
+        self.liq_pool.holdings_total.get(&asset).cloned()
     }
 
     /// Queries a registered state.
@@ -176,7 +263,7 @@ where
                 CklError::InsufficientFunding
             );
         } else {
-            self.update_holdings(&params, &state.state);
+            self.update_channel_holdings(&params, &state.state);
         }
 
         self.channels.insert(state.state.channel.clone(), state);
@@ -185,10 +272,10 @@ where
 
     /// Pushes a state's funding allocation into the channel's holdings mapping
     /// in the canister.
-    fn update_holdings(&mut self, params: &Params, state: &State) {
+    fn update_channel_holdings(&mut self, params: &Params, state: &State) {
         for (i, outcome) in state.allocation.iter().enumerate() {
             self.user_holdings.insert(
-                Funding::new(state.channel.clone(), params.participants[i].clone()),
+                Funding::new_channel(state.channel.clone(), params.participants[i].clone()),
                 outcome.clone(),
             );
         }
@@ -199,7 +286,7 @@ where
     pub fn holdings_total(&self, params: &Params) -> Amount {
         let mut acc = Amount::default();
         for pk in params.participants.iter() {
-            let funding = Funding::new(params.id(), pk.clone());
+            let funding = Funding::new_channel(params.id(), pk.clone());
             acc += self
                 .user_holdings
                 .get(&funding)

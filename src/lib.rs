@@ -18,12 +18,15 @@ pub mod deq;
 pub mod error;
 pub mod events;
 pub mod ic_types;
+pub mod liquidity_pool;
+use crate::ic_types::ChannelFunding;
 pub mod msg;
 pub mod receiver;
 use crate::error::CklError;
 use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::{
-    Amount, ChannelId, Funding, NotifyArgs, RegisteredState, Timestamp, WithdrawalReq,
+    Amount, ChannelId, Funding, NotifyArgs, PoolFunding, PoolWithdrawal, RegisteredState,
+    Timestamp, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;

@@ -13,18 +13,18 @@
 //  limitations under the License.
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use ic_cdk::api::call::CallResult;
-
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::canister_state::{
-    deposit_impl, query_holdings_impl, query_state_impl, transaction_notification_impl,
-    trigger_withdraw_impl,
+    deposit_channel_impl, deposit_lp_impl, query_holdings_impl, query_state_impl,
+    transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
 };
 
 use crate::error::CklError;
 use crate::ic_types::{
-    Amount, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, RegisteredState, WithdrawalReq,
+    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, PoolFunding,
+    PoolWithdrawal, RegisteredState, WithdrawalReq,
 };
 use candid::{Nat, Principal, candid_method};
 use ic_cdk::query;
@@ -58,8 +58,20 @@ fn query_holdings(funding: Funding) -> Option<Amount> {
 
 #[update]
 #[candid_method(update)]
-fn deposit(funding: Funding) -> Option<CklError> {
-    deposit_impl(funding).err()
+fn deposit_channel(funding: ChannelFunding) -> Result<(), CklError> {
+    deposit_channel_impl(funding)
+}
+
+#[update]
+#[candid_method(update)]
+fn withdraw_lp(withdrawal: PoolWithdrawal) -> Result<(), CklError> {
+    withdraw_lp_impl(withdrawal)
+}
+
+#[update]
+#[candid_method(update)]
+fn deposit_lp(funding: PoolFunding) -> Result<(), CklError> {
+    deposit_lp_impl(funding)
 }
 
 #[query]

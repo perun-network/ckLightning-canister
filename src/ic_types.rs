@@ -46,9 +46,21 @@ use serde_bytes::ByteBuf;
 pub struct Hash(pub digest::Output<Hasher>);
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+pub enum Funding {
+    Channel(ChannelFunding),
+    Pool(PoolFunding),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, CandidType)]
+pub enum PoolAsset {
+    CkBTC,
+    BTC,
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 /// Identifies the funds belonging to a certain layer 2 identity within a
 /// certain channel.
-pub struct Funding {
+pub struct ChannelFunding {
     /// The channel's unique identifier.
     pub channel: ChannelId,
     /// The funds' owner's layer-2 identity within the channel.
@@ -67,10 +79,73 @@ pub struct NotifyArgs {
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 pub struct PoolFunding {
-    /// The funds' owner's layer-2 identity within the channel.
-    pub participant: L2Account,
+    pub pubkey_l1: Vec<u8>,
     /// The layer-1 identity to send the funds to.
     pub depositor: L1Account,
+    pub timestamp: u64,
+    pub asset: PoolAsset,
+}
+
+impl Funding {
+    pub fn get_depositor(&self) -> Option<&L1Account> {
+        match self {
+            Funding::Pool(p) => Some(&p.depositor),
+            _ => None,
+        }
+    }
+
+    pub fn get_asset(&self) -> Option<&PoolAsset> {
+        match self {
+            Funding::Pool(p) => Some(&p.asset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+
+pub struct DepositorInfo {
+    pub pubkey: Vec<u8>,
+    pub ckbtc_amount: Amount,
+    pub btc_amount: Amount,
+}
+impl DepositorInfo {
+    pub fn new(pubkey: Vec<u8>) -> Self {
+        Self {
+            pubkey,
+            ckbtc_amount: Amount::default(),
+            btc_amount: Amount::default(),
+        }
+    }
+
+    /// Deposit amounts to the appropriate asset balance.
+    pub fn deposit(&mut self, asset: PoolAsset, amount: Amount) {
+        match asset {
+            PoolAsset::CkBTC => self.ckbtc_amount += amount,
+            PoolAsset::BTC => self.btc_amount += amount,
+        }
+    }
+
+    pub fn get_ckbtc_amount(&self) -> Amount {
+        self.ckbtc_amount.clone()
+    }
+
+    pub fn get_btc_amount(&self) -> Amount {
+        self.btc_amount.clone()
+    }
+
+    pub fn total(&self) -> Amount {
+        self.ckbtc_amount.clone() + self.btc_amount.clone()
+    }
+}
+impl Default for DepositorInfo {
+    fn default() -> Self {
+        Self {
+            pubkey: Vec::new(),
+            ckbtc_amount: Amount::default(),
+            btc_amount: Amount::default(),
+        }
+    }
 }
 
 /// An amount of a currency.
@@ -154,6 +229,17 @@ pub struct WithdrawalReq {
     pub amount: Nat,
     /// The layer-1 identity to send the funds to.
     pub receiver: Principal,
+}
+
+#[derive(Deserialize, CandidType, Clone)]
+// / Contains the payload of a request to withdraw a participant's funds from a
+// / registered channel. Does not contain the authorization signature.
+pub struct PoolWithdrawal {
+    /// The funds to be withdrawn.
+    pub asset: PoolAsset,
+    pub pubkey_l1: Vec<u8>,
+    pub depositor: L1Account,
+    pub amount: Nat,
 }
 
 impl<'de> Deserialize<'de> for ChannelId {
@@ -364,25 +450,46 @@ impl RegisteredState {
 // Funding
 
 impl Funding {
-    pub fn new(channel: ChannelId, participant: L2Account) -> Self {
-        Self {
+    pub fn new_channel(channel: ChannelId, participant: L2Account) -> Self {
+        Funding::Channel(ChannelFunding {
             channel,
             participant,
-        }
+        })
+    }
+
+    pub fn new_pool(pubkey_l1: Vec<u8>, depositor: L1Account, ts: u64, asset: PoolAsset) -> Self {
+        Funding::Pool(PoolFunding {
+            pubkey_l1,
+            depositor,
+            timestamp: ts,
+            asset,
+        })
     }
 
     pub fn memo(&self) -> Memo {
-        let mut data = Vec::new();
-        data.extend_from_slice(&self.channel.0);
-        data.extend_from_slice(self.participant.0.to_encoded_point(false).as_bytes());
-        let h = Hash::digest(&data);
-        let arr: [u8; 8] = [
-            h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
-        ];
-        return Memo::from(arr.to_vec());
+        match self {
+            Funding::Channel(c) => {
+                let mut data = Vec::new();
+                data.extend_from_slice(&c.channel.0);
+                data.extend_from_slice(c.participant.0.to_encoded_point(false).as_bytes());
+                let h = Hash::digest(&data);
+                let arr: [u8; 8] = [
+                    h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
+                ];
+                Memo::from(arr.to_vec())
+            }
+            Funding::Pool(p) => {
+                let mut data = Vec::new();
+                // For PoolFunding, combine depositor and participant info.
+                data.extend_from_slice(p.depositor.0.as_ref());
+                // data.extend_from_slice(p.pubkey_l1.0.to_encoded_point(false).as_bytes());
+                data.extend_from_slice(&p.pubkey_l1);
+                let h = Hash::digest(&data);
+                let arr: [u8; 8] = [
+                    h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
+                ];
+                Memo::from(arr.to_vec())
+            }
+        }
     }
-}
-
-pub fn to_nanoseconds(seconds: u64) -> u64 {
-    seconds * 1_000_000_000
 }

@@ -18,6 +18,8 @@ pub use candid::{
 };
 use cklightning::receiver::icrc3value_map_to_transaction;
 use ic_agent::AgentError;
+use ic_agent::Identity;
+
 use ic_ledger_types::{AccountIdentifier, Subaccount};
 use num_traits::cast::ToPrimitive;
 mod helpers;
@@ -30,7 +32,7 @@ use helpers::id::{
     BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, CKLIGHTNING_LEDGER_ID, PEM_NODE_ACC_PATH,
     PEM_USER_ACC_PATH, create_keypair, str_home_from_path,
 };
-use ic_agent::Identity;
+// use ic_agent::Identity;
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferError;
@@ -280,6 +282,8 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
     let client = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_USER_ACC_PATH)))?;
     client.fetch_root_key().await?;
 
+    // let idd = client.agent.identity();
+
     let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID).unwrap();
     println!("\nckLightning Ledger Canister ID: {:?}", can_ckl_id);
     let str_user = str_home_from_path(PEM_USER_ACC_PATH);
@@ -398,7 +402,7 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
             println!("Notification Result OK: {:?}", amount);
         }
         Err(e) => {
-            println!("Notification error: {:?}", e); // <-- THIS IS THE ERR
+            println!("Notification error: {:?}", e);
         }
     }
 
@@ -437,13 +441,16 @@ async fn test_ckbtc_deposit_cklightning_contract() -> Result<(), AgentError> {
         .trigger_withdraw(200u64.into(), funding.clone(), usr_user_pr)
         .await;
 
-    println!("trigger_withdraw tx decoded: {:?}", trigger_withdraw_tx);
+    println!(
+        "trigger_withdraw tx decoded: {:?}",
+        trigger_withdraw_tx.unwrap()
+    );
 
     let resp_user_after_withdrawal = client.icrc1_balance_of(usr_user_pr).await;
 
     println!(
         "\nUser's ckBTC balance after withdrawal: {:?}",
-        resp_user_after_withdrawal
+        resp_user_after_withdrawal.unwrap()
     );
 
     // Final contract holdings
