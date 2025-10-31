@@ -21,7 +21,16 @@ pub use candid::{
 /// Contains all errors that can occur during an operation on the Perun
 /// canister.
 pub enum CklError {
-    /// Any kind of signature mismatch.
+    NoHoldingsFound,
+    SignatureVerificationFailed,
+    InvalidSignature,
+    InvalidPubKey,
+    UnauthorizedCaller,
+    SerializationError,
+
+    ///// The provided public key does not match the expected one.
+    PubKeyMismatch,
+    /// Any kind of signature mismatch.    
     Authentication,
     /// A non-finalized state was registered when a finalized state was
     /// expected.
