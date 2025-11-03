@@ -25,8 +25,8 @@ pub mod receiver;
 use crate::error::CklError;
 use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::{
-    Amount, ChannelId, Funding, NotifyArgs, PoolFunding, PoolWithdrawal, RegisteredState,
-    Timestamp, WithdrawalReq,
+    Amount, ChannelId, Funding, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
+    PoolFunding, PoolWithdrawal, RegisteredState, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;

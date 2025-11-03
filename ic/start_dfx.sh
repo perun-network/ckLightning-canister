@@ -2,8 +2,12 @@
 set -e
 
 # Before starting devnet Chain via dfx, start a Bitcoin Node + Chain, connecting to Dfinity Bitcoin Canisters
+# If need to stop before restarting: ./bin/bitcoin-cli -conf=$(pwd)/bitcoin.conf -datadir=$(pwd)/data stop
 # Inside bitcoin-25.0 directory: ./bin/bitcoind -conf=$(pwd)/bitcoin.conf -datadir=$(pwd)/data --port=18444
+# If wallet does not exist yet, create it:
 # ./bitcoin-cli -regtest -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E= createwallet testwallet
+# If wallet already exists, load it:
+# ./bitcoin-cli -regtest -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E= loadwallet testwallet
 # ./bitcoin-cli -regtest -rpcwallet=testwallet -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E= getnewaddress
 # ./bitcoin-cli -regtest -rpcwallet=testwallet -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E= generatetoaddress 1 <address>
 

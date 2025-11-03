@@ -17,14 +17,15 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::canister_state::{
-    deposit_channel_impl, deposit_lp_impl, query_holdings_impl, query_state_impl,
+    deposit_channel_impl, deposit_lp_impl, query_state_impl, query_user_lp_holdings_impl,
     transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
 };
 
 use crate::error::CklError;
 use crate::ic_types::{
-    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding, NotifyArgs, PoolFunding,
-    PoolWithdrawal, RegisteredState, WithdrawalReq,
+    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding, FundingLPArgs,
+    FundingLPQueryArgs, HoldingsResponse, NotifyArgs, PoolFunding, PoolWithdrawal, RegisteredState,
+    WithdrawalLPArgs, WithdrawalReq,
 };
 use candid::{Nat, Principal, candid_method};
 use ic_cdk::query;
@@ -40,38 +41,35 @@ async fn transaction_notification(
 
 #[query]
 #[candid_method(query)]
-/// Returns the funding specific for a channel's participant.
-/// this function should be used to check whether all participants have
-/// deposited their owed funds into a channel to ensure it is fully funded.
-fn query_funding_only(funding: Funding) -> Option<Funding> {
-    Some(funding.clone())
-}
-
-#[query]
-#[candid_method(query)]
 /// Returns the funds deposited for a channel's specified participant, if any.
 /// this function should be used to check whether all participants have
 /// deposited their owed funds into a channel to ensure it is fully funded.
-fn query_holdings(funding: Funding) -> Option<Amount> {
-    query_holdings_impl(funding)
+fn query_user_lp_holdings(
+    funding: FundingLPQueryArgs,
+) -> std::result::Result<HoldingsResponse, CklError> {
+    query_user_lp_holdings_impl(funding)
 }
 
 #[update]
 #[candid_method(update)]
-fn deposit_channel(funding: ChannelFunding) -> Result<(), CklError> {
-    deposit_channel_impl(funding)
+fn deposit_channel(funding: ChannelFunding, signature_bytes: Vec<u8>) -> Result<(), CklError> {
+    deposit_channel_impl(funding, &signature_bytes)
 }
 
 #[update]
 #[candid_method(update)]
-fn withdraw_lp(withdrawal: PoolWithdrawal) -> Result<(), CklError> {
-    withdraw_lp_impl(withdrawal)
+async fn withdraw_lp(withdrawal: WithdrawalLPArgs) -> Result<(), CklError> {
+    let sig_withdrawal = withdrawal.signature.clone();
+
+    withdraw_lp_impl(withdrawal, sig_withdrawal).await
 }
 
 #[update]
 #[candid_method(update)]
-fn deposit_lp(funding: PoolFunding) -> Result<(), CklError> {
-    deposit_lp_impl(funding)
+fn deposit_lp(funding: FundingLPArgs) -> Result<(), CklError> {
+    let signature_bytes = funding.signature.clone();
+
+    deposit_lp_impl(funding, &signature_bytes)
 }
 
 #[query]

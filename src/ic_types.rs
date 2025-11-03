@@ -12,12 +12,15 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::require;
+use bitcoin::secp256k1::{Message, SecretKey as SecpSecretKey}; // PublicKey as SecpPublicKey,
 use digest::{FixedOutputDirty, Update};
 use ed25519_dalek::Sha512 as Hasher;
 use icrc_ledger_types::icrc1::transfer::Memo;
 use k256::EncodedPoint;
 use k256::PublicKey as SecpPublicKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use rand::rngs::StdRng;
+use rand::thread_rng;
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
@@ -25,13 +28,13 @@ pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
-
 use candid::{CandidType, Principal};
 pub use candid::{
     Deserialize, Int, Nat,
     types::{Serializer, Type},
     types::{TypeInner, TypeInner::Nat8},
 };
+use k256::Secp256k1;
 
 use core::cmp::*;
 use core::convert::*;
@@ -49,6 +52,19 @@ pub struct Hash(pub digest::Output<Hasher>);
 pub enum Funding {
     Channel(ChannelFunding),
     Pool(PoolFunding),
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+pub struct FundingLPQuery {
+    pub address: L1Account,
+    pub pubkey_l1: Vec<u8>,
+    pub asset: PoolAsset,
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+pub struct FundingLPQueryArgs {
+    pub funding_query: FundingLPQuery,
+    pub funding_query_sig: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, CandidType)]
@@ -100,6 +116,18 @@ impl Funding {
             _ => None,
         }
     }
+
+    pub fn get_pubkey(&self) -> Option<&Vec<u8>> {
+        match self {
+            Funding::Pool(p) => Some(&p.pubkey_l1),
+            _ => None,
+        }
+    }
+}
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
+pub struct HoldingsResponse {
+    pub ckbtc_amount: Amount,
+    pub btc_amount: Amount,
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
@@ -157,6 +185,18 @@ pub type Timestamp = u64;
 /// Unique channel identifier.
 #[derive(PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct ChannelId(pub [u8; 32]);
+
+impl Clone for ChannelId {
+    fn clone(&self) -> Self {
+        ChannelId(self.0.clone())
+    }
+}
+
+impl Default for ChannelId {
+    fn default() -> Self {
+        ChannelId([0; 32])
+    }
+}
 
 #[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Deserialize, CandidType)]
 pub struct L1Account(pub Principal);
@@ -240,6 +280,18 @@ pub struct PoolWithdrawal {
     pub pubkey_l1: Vec<u8>,
     pub depositor: L1Account,
     pub amount: Nat,
+}
+
+#[derive(Deserialize, CandidType, Clone)]
+pub struct WithdrawalLPArgs {
+    pub pool_withdrawal: PoolWithdrawal,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Deserialize, CandidType, Clone)]
+pub struct FundingLPArgs {
+    pub pool_funding: PoolFunding,
+    pub signature: Vec<u8>,
 }
 
 impl<'de> Deserialize<'de> for ChannelId {
@@ -344,6 +396,57 @@ impl CandidType for L2Account {
     }
 }
 
+// impl<'de> Deserialize<'de> for ChannelId {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: Deserializer<'de>,
+//     {
+//         let bytes = Vec::<u8>::deserialize(deserializer)?;
+//         // require!(bytes.len() == 32, D::Error::invalid_length(bytes.len(), &"32-byte ChannelId"));
+//         let mut arr = [0u8; 32];
+//         arr.copy_from_slice(&bytes[..32]);
+//         Ok(ChannelId(arr))
+//     }
+// }
+
+// impl Default for L2Account {
+//     fn default() -> Self {
+//         // Create a random secret key
+//         let secp = Secp256k1::new();
+//         let mut rng = thread_rng();
+//         let (secret_key, public_key) = secp.generate_keypair(&mut rng);
+//         let secret_key = SecpSecretKey::new(&mut rng);
+//         let public_key = SecpPublicKey::from_secret_key(&secp, &secret_key);
+//         L2Account(public_key)
+//     }
+// }
+
+// impl<'de> Deserialize<'de> for L2Account {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: Deserializer<'de>,
+//     {
+//         let bytes = ByteBuf::deserialize(deserializer)?;
+//         let pk = SecpPublicKey::from_slice(bytes.as_slice())
+//             .ok()
+//             .ok_or(D::Error::invalid_length(bytes.len(), &"public key"))?;
+//         Ok(L2Account(pk))
+//     }
+// }
+
+// impl CandidType for L2Account {
+//     fn _ty() -> Type {
+//         Type::from(TypeInner::Vec(Type::from(TypeInner::Nat8)))
+//     }
+
+//     fn idl_serialize<S>(&self, serializer: S) -> core::result::Result<(), S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         serializer.serialize_blob(&self.0.serialize())
+//     }
+// }
+
 impl CandidType for ChannelId {
     fn _ty() -> Type {
         Type::from(TypeInner::Vec(Type::from(TypeInner::Nat8)))
@@ -370,12 +473,6 @@ impl CandidType for Nonce {
     }
 }
 
-impl Default for ChannelId {
-    fn default() -> Self {
-        ChannelId([0; 32])
-    }
-}
-
 impl Default for L2Account {
     fn default() -> Self {
         // 33-byte compressed public key of all zeros
@@ -389,12 +486,6 @@ impl Default for L2Account {
 impl Default for Nonce {
     fn default() -> Self {
         Nonce([0; 32])
-    }
-}
-
-impl Clone for ChannelId {
-    fn clone(&self) -> Self {
-        ChannelId(self.0.clone())
     }
 }
 

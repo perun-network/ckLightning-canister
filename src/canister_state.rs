@@ -14,18 +14,28 @@
 use crate::error::CklError;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding, L2Account,
-    NotifyArgs, PoolFunding, PoolWithdrawal, RegisteredState, WithdrawalReq,
+    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding, FundingLPArgs,
+    FundingLPQueryArgs, HoldingsResponse, L2Account, NotifyArgs, PoolFunding, PoolWithdrawal,
+    RegisteredState, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
+use candid::Encode;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
-
 use icrc_ledger_types::icrc1::transfer::TransferArg;
+use k256::ecdsa::Signature;
+use k256::ecdsa::VerifyingKey;
+use k256::ecdsa::signature::Verifier;
+use k256::pkcs8::DecodePublicKey;
+use k256::sha2::{Digest, Sha256};
+// use zerocopy::IntoBytes;
+// use k256::sha2::{Digest, Sha256};
+use std::collections::hash_map::Entry;
+use std::fs;
 
 use crate::error::Result;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
@@ -71,14 +81,32 @@ pub async fn transaction_notification_impl(
         .await
 }
 
-pub fn query_holdings_impl(funding: Funding) -> Option<Amount> {
+pub fn query_user_lp_holdings_impl(
+    funding: FundingLPQueryArgs,
+) -> std::result::Result<HoldingsResponse, CklError> {
     let state = STATE.read().unwrap();
     state.query_holdings(funding)
 }
 
-pub fn withdraw_lp_impl(withdrawal: PoolWithdrawal) -> std::result::Result<(), CklError> {
+pub async fn withdraw_lp_impl(
+    withdrawal: WithdrawalLPArgs,
+    sig_withdrawal: Vec<u8>,
+) -> std::result::Result<(), CklError> {
+    //std::result::Result<(), CklError>
     let mut state = STATE.write().unwrap();
-    state.withdraw_icrc(blocktime(), withdrawal)
+    let pr_caller = msg_caller();
+    let receiver = withdrawal.pool_withdrawal.depositor.0;
+
+    // compare pr_caller and receiver, give error if unequal
+    if pr_caller != receiver {
+        return Err(CklError::UnauthorizedCaller);
+    }
+
+    let pool_withdrawal = withdrawal.pool_withdrawal;
+
+    state
+        .withdraw_icrc(blocktime(), receiver, pool_withdrawal, &sig_withdrawal)
+        .await
 }
 
 pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Nat, CklError> {
@@ -86,14 +114,23 @@ pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Na
     state.withdraw_from_liq_pool(req).await
 }
 
-pub fn deposit_channel_impl(funding: ChannelFunding) -> std::result::Result<(), CklError> {
+pub fn deposit_channel_impl(
+    funding: ChannelFunding,
+    signature_bytes: &[u8],
+) -> std::result::Result<(), CklError> {
     let mut state = STATE.write().unwrap();
-    state.deposit_icrc(blocktime(), Funding::Channel(funding))
+    state.deposit_icrc(blocktime(), Funding::Channel(funding), signature_bytes)
 }
 
-pub fn deposit_lp_impl(funding: PoolFunding) -> std::result::Result<(), CklError> {
+pub fn deposit_lp_impl(
+    funding: FundingLPArgs,
+    signature_bytes: &[u8],
+) -> std::result::Result<(), CklError> {
     let mut state = STATE.write().unwrap();
-    state.deposit_icrc(blocktime(), Funding::Pool(funding))
+
+    let pool_funding = funding.pool_funding;
+
+    state.deposit_icrc(blocktime(), Funding::Pool(pool_funding), signature_bytes)
 }
 
 pub fn query_state_impl(id: ChannelId) -> Option<RegisteredState> {
@@ -120,50 +157,120 @@ where
             .or_insert(Default::default()) += amount;
         Ok(())
     }
-    pub fn withdraw_icrc(&mut self, time: Timestamp, withdrawal: PoolWithdrawal) -> Result<()> {
+
+    pub async fn withdraw_icrc(
+        &mut self,
+        time: Timestamp,
+        receiver: Principal,
+        withdrawal: PoolWithdrawal,
+        signature_bytes: &[u8],
+    ) -> Result<()> {
         let PoolWithdrawal {
             asset,
-            pubkey_l1: _,
+            pubkey_l1,
             depositor,
             amount,
-        } = withdrawal;
+        } = &withdrawal;
 
-        // Check depositor's balance
+        // Retrieve depositor info
         let depositor_info = self
             .liq_pool
             .depositors
-            .get_mut(&depositor)
+            .get_mut(depositor)
             .ok_or_else(|| CklError::InsufficientLiquidity)?;
 
-        // Check asset balance and get mutable reference for deduction
-        let depositor_balance = match asset {
+        // Verify pubkey matches stored
+        if depositor_info.pubkey.as_slice() != pubkey_l1.as_slice() {
+            return Err(CklError::PubKeyMismatch);
+        }
+
+        // Serialize the withdrawal data
+        let withdrawal_serialized =
+            Encode!(&withdrawal).map_err(|_| CklError::SerializationError)?;
+
+        // Hash the serialized data
+        let hash = Sha256::digest(&withdrawal_serialized);
+
+        // Verify signature using stored pubkey
+        let pubkey_bytes = &depositor_info.pubkey;
+        let verifying_key =
+            VerifyingKey::from_public_key_der(pubkey_bytes).map_err(|_| CklError::InvalidPubKey)?;
+        let signature =
+            Signature::try_from(signature_bytes).map_err(|_| CklError::InvalidSignature)?;
+
+        verifying_key
+            .verify(&hash, &signature)
+            .map_err(|_| CklError::SignatureVerificationFailed)?;
+
+        // Check depositor's balance
+        let depositor_balance = match &asset {
             PoolAsset::CkBTC => &mut depositor_info.ckbtc_amount,
             PoolAsset::BTC => &mut depositor_info.btc_amount,
         };
 
-        if *depositor_balance < amount {
+        if *depositor_balance < *amount {
             return Err(CklError::InsufficientLiquidity);
         }
 
-        // Check pool's total holdings
+        // Check total pool holdings
         let total_holding = self
             .liq_pool
             .holdings_total
             .get_mut(&asset)
             .ok_or_else(|| CklError::InsufficientLiquidity)?;
 
-        if *total_holding < amount {
+        if *total_holding < *amount {
             return Err(CklError::InsufficientLiquidity);
         }
 
-        // Deduct amount from depositor and pool total
+        // Deduct from depositor and total holdings
         *depositor_balance -= amount.clone();
-        *total_holding -= amount;
+        *total_holding -= amount.clone();
 
-        // Add any additional logic here (e.g., locking, events)
+        // Placeholder: Send funds back to L1 address
+        let _ = self
+            .send_funds_to_l1(receiver, &pubkey_l1, amount.clone(), &asset)
+            .await;
 
         Ok(())
     }
+
+    async fn send_funds_to_l1(
+        &self,
+        receiver: Principal,
+        pubkey: &Vec<u8>,
+        amount: Amount,
+        asset: &PoolAsset,
+    ) -> Result<()> {
+        // TODO: Implement transfer logic here
+
+        let transfer_arg = TransferArg {
+            from_subaccount: None,
+            to: Account {
+                owner: receiver,
+                subaccount: None,
+            },
+            amount: Nat(amount.clone().0),
+            fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+            memo: None,
+            created_at_time: None,
+        };
+
+        let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+        let call_result: CallResult<(
+            std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+        )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+
+        match call_result {
+            Ok((inner_result,)) => match inner_result {
+                Ok(_block_height) => Ok(()),
+                Err(_e) => Err(CklError::LedgerError),
+            },
+            Err((_code, _msg)) => Err(CklError::LedgerError),
+        }
+    }
+
     // Correct usage:
     pub fn withdraw_channel(&mut self, funding: Funding, amount: Amount) -> Result<()> {
         // TODO: withdrawal logic as part of the L2 Lightning protocol
@@ -176,24 +283,60 @@ where
         amount: Amount,
         asset: PoolAsset,
         depositor: L1Account,
+        pubkey_bytes: Vec<u8>,
+        funding: &Funding,      // Added funding ref for verification
+        signature_bytes: &[u8], // Added signature bytes for verification
     ) -> Result<()> {
-        // holdings_total already contains keys for all PoolAssets, so .entry() not needed, just .get_mut()
+        // Step 1: Serialize funding exactly as signed
+        let funding_serialized = Encode!(funding).map_err(|_| CklError::SerializationError)?;
+
+        // Step 2: Hash serialized data with SHA-256
+        let hash = Sha256::digest(&funding_serialized);
+
+        // Step 3: Parse the public key from DER or raw bytes
+        let verifying_key = VerifyingKey::from_public_key_der(&pubkey_bytes)
+            .map_err(|_| CklError::InvalidPubKey)?;
+
+        // Step 4: Convert signature bytes (assumed DER encoded)
+        let signature =
+            Signature::try_from(signature_bytes).map_err(|_| CklError::InvalidSignature)?;
+
+        // Step 5: Verify the signature on the hashed data
+        verifying_key
+            .verify(&hash, &signature)
+            .map_err(|_| CklError::SignatureVerificationFailed)?;
+
+        // Step 6: Proceed with existing pubkey matching and depositing logic
+        use std::collections::hash_map::Entry;
+        match self.liq_pool.depositors.entry(depositor.clone()) {
+            Entry::Occupied(mut entry) => {
+                let depositor_info = entry.get_mut();
+                if depositor_info.pubkey != pubkey_bytes {
+                    return Err(CklError::PubKeyMismatch);
+                }
+                depositor_info.deposit(asset.clone(), amount.clone());
+            }
+            Entry::Vacant(entry) => {
+                let mut info = DepositorInfo {
+                    pubkey: pubkey_bytes.clone(),
+                    ckbtc_amount: Amount::default(),
+                    btc_amount: Amount::default(),
+                };
+                info.deposit(asset.clone(), amount.clone());
+                entry.insert(info);
+            }
+        }
+        // Update total holdings for the asset
         *self.liq_pool.holdings_total.get_mut(&asset).unwrap() += amount.clone();
-
-        // depositor entry should exist or be inserted with default asset
-        let depositor_info = self
-            .liq_pool
-            .depositors
-            .entry(depositor.clone())
-            .or_insert_with(Default::default);
-
-        // Since DepositorInfo has a default asset, just deposit normally
-        depositor_info.deposit(asset, amount);
 
         Ok(())
     }
-
-    pub fn deposit_icrc(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
+    pub fn deposit_icrc(
+        &mut self,
+        time: Timestamp,
+        funding: Funding,
+        signature_bytes: &[u8], // added signature argument
+    ) -> Result<()> {
         let memo = funding.memo();
         // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
@@ -205,10 +348,19 @@ where
             Funding::Pool(_) => {
                 let depositor = funding.get_depositor().unwrap().clone();
                 let pool_asset = funding.get_asset().unwrap().clone();
-                self.deposit_liq_pool(amount, pool_asset, depositor)?;
+                let pubkey = funding.get_pubkey().unwrap().clone();
+
+                // New call, now passing funding reference and signature bytes
+                self.deposit_liq_pool(
+                    amount,
+                    pool_asset,
+                    depositor,
+                    pubkey,
+                    &funding,        // pass reference for verification
+                    signature_bytes, // pass signature bytes for verification
+                )?;
             }
         }
-
         //     // events::STATE
         //     //     .write()
         //     //     .unwrap()
@@ -222,12 +374,32 @@ where
         //     //         },
         //     //     )
         //     //     .await;
-
-        // Optionally handle events if needed
-
         Ok(())
     }
 
+    // pub fn deposit_icrc(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
+    //     let memo = funding.memo();
+    //     // Drain the receiver for the amount associated with this memo.
+    //     let amount = self.icrc_receiver.drain(memo);
+
+    //     match &funding {
+    //         Funding::Channel(_) => {
+    //             self.deposit_channel(funding.clone(), amount)?;
+    //         }
+    //         Funding::Pool(_) => {
+    //             let depositor = funding.get_depositor().unwrap().clone();
+    //             let pool_asset = funding.get_asset().unwrap().clone();
+
+    //             // Get pubkey and include it in deposit_liq_pool call
+    //             let pubkey = funding.get_pubkey().unwrap().clone();
+    //             self.deposit_liq_pool(amount, pool_asset, depositor, pubkey)?;
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
+
+    // Optionally handle events if needed
     pub async fn process_icrc_tx(
         &mut self,
         tx: receiver::BlockHeight,
@@ -237,8 +409,49 @@ where
         self.icrc_receiver.verify_icrc(tx, amount, funding).await
     }
 
-    pub fn query_holdings(&self, funding: Funding) -> Option<Amount> {
-        self.user_holdings.get(&funding).cloned()
+    pub fn query_holdings(
+        &self,
+        funding: FundingLPQueryArgs,
+    ) -> std::result::Result<HoldingsResponse, CklError> {
+        let sig = funding.funding_query_sig.clone();
+        let l1_account_principal = funding.funding_query.address.clone();
+        let caller_principal = msg_caller();
+
+        if l1_account_principal.0 != caller_principal {
+            return Err(CklError::UnauthorizedCaller);
+        }
+
+        let depositor_info = self
+            .liq_pool
+            .depositors
+            .get(&funding.funding_query.address)
+            .ok_or(CklError::NoHoldingsFound)?;
+
+        // 3. Serialize funding_query exactly as signed
+        let serialized_query =
+            Encode!(&funding.funding_query).map_err(|_| CklError::SerializationError)?;
+
+        // 4. Hash the serialized bytes with SHA256
+        let hash = Sha256::digest(&serialized_query);
+
+        // 5. Parse public key from stored DepositorInfo pubkey bytes (DER format)
+        let verifying_key = VerifyingKey::from_public_key_der(&depositor_info.pubkey)
+            .map_err(|_| CklError::InvalidPubKey)?;
+
+        // 6. Parse signature bytes (DER encoded)
+        let signature = Signature::try_from(funding.funding_query_sig.as_slice())
+            .map_err(|_| CklError::InvalidSignature)?;
+
+        // 7. Verify signature on the hash matches stored public key
+        verifying_key
+            .verify(&hash, &signature)
+            .map_err(|_| CklError::SignatureVerificationFailed)?;
+
+        // 8. Signature valid, return holdings for this depositor
+        Ok(HoldingsResponse {
+            ckbtc_amount: depositor_info.ckbtc_amount.clone(),
+            btc_amount: depositor_info.btc_amount.clone(),
+        })
     }
 
     pub fn query_liq_holdings(&self, asset: PoolAsset) -> Option<Amount> {
