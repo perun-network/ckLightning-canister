@@ -26,6 +26,9 @@ pub const PEM_USER_ACC_PATH: &str = ".config/dfx/identity/user/identity.pem";
 pub const LEDGER_ID: &str = "by6od-j4aaa-aaaaa-qaadq-cai";
 pub const BTC_LEDGER_ID: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
 pub const CKLIGHTNING_LEDGER_ID: &str = "avqkn-guaaa-aaaaa-qaaea-cai";
+pub const BASIC_BITCOIN_ID: &str = "bw4dl-smaaa-aaaaa-qaacq-cai";
+pub const BTC_MINTER_ID: &str = "be2us-64aaa-aaaaa-qaabq-cai";
+
 pub const BTC_LEDGER_DEFAULT_FEE: u64 = 1000;
 
 pub fn create_identity(path: Option<&str>) -> impl Identity {
@@ -92,7 +95,6 @@ mod tests {
     use k256::ecdsa::{Signature, VerifyingKey};
     use k256::pkcs8::DecodePublicKey;
     use k256::sha2::{Digest, Sha256};
-    use std::fs;
 
     #[test]
     fn test_sign_and_verify_bogus_data() {

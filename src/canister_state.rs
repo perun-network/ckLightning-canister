@@ -11,18 +11,20 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::error::CklError;
+use crate::error::{BtcError, CklError, ResultBtc};
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding, FundingLPArgs,
-    FundingLPQueryArgs, HoldingsResponse, L2Account, NotifyArgs, PoolFunding, PoolWithdrawal,
-    RegisteredState, WithdrawalLPArgs, WithdrawalReq,
+    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DEVNET_CKBTC_MINTER, DepositorInfo,
+    Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcAddressArgs, HoldingsResponse, L2Account,
+    NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs, SetBtcAddressMsg,
+    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
 use candid::Encode;
 use ic_cdk::api::call::CallResult;
+use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
@@ -32,12 +34,8 @@ use k256::ecdsa::VerifyingKey;
 use k256::ecdsa::signature::Verifier;
 use k256::pkcs8::DecodePublicKey;
 use k256::sha2::{Digest, Sha256};
-// use zerocopy::IntoBytes;
-// use k256::sha2::{Digest, Sha256};
-use std::collections::hash_map::Entry;
-use std::fs;
 
-use crate::error::Result;
+use crate::error::ResultCkl;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
 use crate::require;
 
@@ -54,7 +52,7 @@ lazy_static! {
             receiver::CanisterTXQuerier::new(
                 Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal") // //bkyz2-fmaaa-aaaaa-qaaaq-cai
             ),
-            ic_cdk::id(),
+            canister_self(),
         ));
 }
 
@@ -62,10 +60,42 @@ pub struct CanisterState<Q>
 where
     Q: receiver::TXQuerier,
 {
+    own_principal: Principal,
+    own_btc_address: Option<String>,
     icrc_receiver: receiver::Receiver<Q>,
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
     liq_pool: LiquidityPool,
+}
+
+pub async fn set_btc_address_impl(
+    set_btc_address_args: SetBtcAddressArgs,
+) -> std::result::Result<SetBtcAddressResponse, BtcError> {
+    let mut state = STATE.write().unwrap();
+    let current_btc_address = state.own_btc_address.clone();
+
+    // If address already exists, return that result immediately
+    if let Some(address) = current_btc_address {
+        return Ok(SetBtcAddressResponse {
+            address,
+            msg: SetBtcAddressMsg::BtcAddressAlreadySet,
+        });
+    }
+
+    // If None, fetch the address asynchronously
+    let address = match state.get_btc_address().await {
+        Ok(addr) => addr,
+        Err(e) => return Err(e),
+    };
+
+    // Update the state now that address was fetched
+    state.own_btc_address = Some(address.clone());
+
+    // Return proper response indicating success
+    Ok(SetBtcAddressResponse {
+        address,
+        msg: SetBtcAddressMsg::BtcAddressSetNow,
+    })
 }
 
 pub async fn transaction_notification_impl(
@@ -143,14 +173,23 @@ where
     Q: receiver::TXQuerier,
 {
     pub fn new(q: Q, my_principal: Principal) -> Self {
+        assert!(my_principal == canister_self());
+
         Self {
+            own_principal: canister_self(),
+            own_btc_address: None, // this will be initialized later by an authorized call
             icrc_receiver: receiver::Receiver::new(q, my_principal),
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool: LiquidityPool::new(),
         }
     }
-    pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> Result<()> {
+
+    pub fn set_btc_address_impl(&mut self, address: String) -> () {
+        self.own_btc_address = Some(address);
+    }
+
+    pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
         *self
             .user_holdings
             .entry(funding)
@@ -164,7 +203,7 @@ where
         receiver: Principal,
         withdrawal: PoolWithdrawal,
         signature_bytes: &[u8],
-    ) -> Result<()> {
+    ) -> ResultCkl<()> {
         let PoolWithdrawal {
             asset,
             pubkey_l1,
@@ -235,13 +274,32 @@ where
         Ok(())
     }
 
+    async fn get_btc_address(&self) -> ResultBtc<String> {
+        let ckbtc_minter_id = Principal::from_text(DEVNET_CKBTC_MINTER).expect("parsing principal");
+
+        let own_principal = Some(self.own_principal);
+
+        let get_btc_address_args = GetBtcAddressArgs {
+            principal: own_principal,
+            subaccount: None,
+        };
+
+        let call_result: CallResult<(String,)> =
+            ic_cdk::call(ckbtc_minter_id, "get_btc_address", (get_btc_address_args,)).await;
+
+        match call_result {
+            Ok((address,)) => Ok(address),
+            Err((_code, msg)) => Err(BtcError::BtcAddressFetchError(msg)),
+        }
+    }
+
     async fn send_funds_to_l1(
         &self,
         receiver: Principal,
         pubkey: &Vec<u8>,
         amount: Amount,
         asset: &PoolAsset,
-    ) -> Result<()> {
+    ) -> ResultCkl<()> {
         // TODO: Implement transfer logic here
 
         let transfer_arg = TransferArg {
@@ -272,7 +330,7 @@ where
     }
 
     // Correct usage:
-    pub fn withdraw_channel(&mut self, funding: Funding, amount: Amount) -> Result<()> {
+    pub fn withdraw_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
         // TODO: withdrawal logic as part of the L2 Lightning protocol
 
         return Ok(());
@@ -286,7 +344,7 @@ where
         pubkey_bytes: Vec<u8>,
         funding: &Funding,      // Added funding ref for verification
         signature_bytes: &[u8], // Added signature bytes for verification
-    ) -> Result<()> {
+    ) -> ResultCkl<()> {
         // Step 1: Serialize funding exactly as signed
         let funding_serialized = Encode!(funding).map_err(|_| CklError::SerializationError)?;
 
@@ -336,7 +394,7 @@ where
         time: Timestamp,
         funding: Funding,
         signature_bytes: &[u8], // added signature argument
-    ) -> Result<()> {
+    ) -> ResultCkl<()> {
         let memo = funding.memo();
         // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
@@ -376,28 +434,6 @@ where
         //     //     .await;
         Ok(())
     }
-
-    // pub fn deposit_icrc(&mut self, time: Timestamp, funding: Funding) -> Result<()> {
-    //     let memo = funding.memo();
-    //     // Drain the receiver for the amount associated with this memo.
-    //     let amount = self.icrc_receiver.drain(memo);
-
-    //     match &funding {
-    //         Funding::Channel(_) => {
-    //             self.deposit_channel(funding.clone(), amount)?;
-    //         }
-    //         Funding::Pool(_) => {
-    //             let depositor = funding.get_depositor().unwrap().clone();
-    //             let pool_asset = funding.get_asset().unwrap().clone();
-
-    //             // Get pubkey and include it in deposit_liq_pool call
-    //             let pubkey = funding.get_pubkey().unwrap().clone();
-    //             self.deposit_liq_pool(amount, pool_asset, depositor, pubkey)?;
-    //         }
-    //     }
-
-    //     Ok(())
-    // }
 
     // Optionally handle events if needed
     pub async fn process_icrc_tx(
@@ -468,7 +504,7 @@ where
     /// initial state, the holdings are not updated, as initial states are
     /// allowed to be under-funded and are otherwise expected to match the
     /// deposit distribution exactly if fully funded.
-    fn register_channel(&mut self, params: &Params, state: RegisteredState) -> Result<()> {
+    fn register_channel(&mut self, params: &Params, state: RegisteredState) -> ResultCkl<()> {
         let total = &self.holdings_total(&params);
         if total < &state.state.total() {
             require!(

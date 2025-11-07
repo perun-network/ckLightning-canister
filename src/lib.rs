@@ -22,11 +22,11 @@ pub mod liquidity_pool;
 use crate::ic_types::ChannelFunding;
 pub mod msg;
 pub mod receiver;
-use crate::error::CklError;
+use crate::error::{BtcError, CklError};
 use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::{
-    Amount, ChannelId, Funding, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
-    PoolFunding, PoolWithdrawal, RegisteredState, Timestamp, WithdrawalLPArgs, WithdrawalReq,
+    ChannelId, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs, RegisteredState,
+    SetBtcAddressArgs, SetBtcAddressResponse, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;

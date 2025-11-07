@@ -19,10 +19,7 @@ pub use candid::{
 };
 use ic_cdk::api::call::CallResult;
 use ic_ledger_types::BlockIndex;
-use ic_ledger_types::{
-    AccountIdentifier, Block, DEFAULT_SUBACCOUNT, GetBlocksArgs, Operation, Transaction,
-    query_archived_blocks, query_blocks,
-};
+use ic_ledger_types::{AccountIdentifier, DEFAULT_SUBACCOUNT};
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::transfer::Memo;
 use icrc_ledger_types::icrc3::transactions::Transaction as ICRCTransaction;

@@ -67,6 +67,7 @@ dfx canister create mock_contract
 dfx canister create archive
 dfx canister create ledger
 dfx canister create cklightning
+dfx canister create basic_bitcoin
 
 dfx build
 
@@ -77,6 +78,8 @@ LEDGER_ID=$(dfx canister id ledger)
 CHECKER_ID=$(dfx canister id btc_checker)
 BTC_LEDGER_ID=$(dfx canister id btcledger)
 CKL_ID=$(dfx canister id cklightning)
+BASIC_BITCOIN_ID=$(dfx canister id basic_bitcoin)
+
 
 # Prepare btc checker initialization argument
 
@@ -150,6 +153,8 @@ dfx canister install index --argument "$INDEX_INIT_ARG"
 dfx canister install archive --argument "$ARCHIVE_INIT_ARG"
 dfx canister install mock_contract --argument "(principal \"${LEDGER_ID}\")"
 dfx canister install cklightning
+dfx deploy basic_bitcoin --argument '(variant { regtest })'
+
 
 MOCK_ID=$(dfx canister id mock_contract)
 
@@ -172,6 +177,8 @@ echo "BTC Ledger Contract ID: ${BTC_LEDGER_ID}"
 echo "Ledger Contract ID: ${LEDGER_ID}"
 echo "Demo Mock Contract ID: ${MOCK_ID}"
 echo "ckLightning Principal: ${CKL_ID}"
+echo "Basic Bitcoin Principal: ${BASIC_BITCOIN_ID}"
+
 echo -e "\nAccount Information:"
 echo "Minting Account: ${MINTING_ACCOUNT}"
 echo "User Principal: ${USER_PRINCIPAL}"

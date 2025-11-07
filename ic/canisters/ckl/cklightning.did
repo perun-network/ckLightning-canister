@@ -1,3 +1,4 @@
+type BtcError = variant { BtcAddressFetchError : text; Other : text };
 type ChannelFunding = record { participant : blob; channel : blob };
 type ChannelTime = record { time : nat64; chanid : blob };
 type CklError = variant {
@@ -70,11 +71,22 @@ type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisteredState = record { state : State; timeout : nat64 };
 type Result = variant { Ok; Err : CklError };
 type Result_1 = variant { Ok : HoldingsResponse; Err : CklError };
-type Result_2 = variant {
+type Result_2 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
+type Result_3 = variant {
   Ok : TransactionICRCNotification;
   Err : ICPReceiverError;
 };
-type Result_3 = variant { Ok : nat; Err : CklError };
+type Result_4 = variant { Ok : nat; Err : CklError };
+type SetBtcAddressArgs = record {
+  "principal" : opt principal;
+  subaccount : opt blob;
+};
+type SetBtcAddressMsg = variant {
+  BtcAddressAlreadySet;
+  BtcAddressSetFailed;
+  BtcAddressSetNow;
+};
+type SetBtcAddressResponse = record { msg : SetBtcAddressMsg; address : text };
 type State = record {
   version : nat64;
   finalized : bool;
@@ -106,14 +118,15 @@ service : {
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
-  __candid_method_query_user_lp_holdings : (FundingLPQueryArgs, blob) -> (
+  __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
       Result_1,
     ) query;
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
+  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_2);
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
-  __candid_method_transaction_notification : (NotifyArgs) -> (Result_2);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_3);
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result_3);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_4);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result);
   clear : () -> ();
   deposit_channel : (ChannelFunding, blob) -> (Result);
@@ -126,12 +139,13 @@ service : {
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
-  query_user_lp_holdings : (FundingLPQueryArgs, blob) -> (Result_1) query;
+  query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_1) query;
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
+  set_btc_address : (SetBtcAddressArgs) -> (Result_2);
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
-  transaction_notification : (NotifyArgs) -> (Result_2);
-  trigger_withdraw : (WithdrawalReq) -> (Result_3);
+  transaction_notification : (NotifyArgs) -> (Result_3);
+  trigger_withdraw : (WithdrawalReq) -> (Result_4);
   withdraw_lp : (WithdrawalLPArgs) -> (Result);
 }

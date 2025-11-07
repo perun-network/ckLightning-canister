@@ -60,7 +60,9 @@ impl std::fmt::Display for CklError {
     }
 }
 /// Canister operation result type.
-pub type Result<T> = core::result::Result<T, CklError>;
+pub type ResultCkl<T> = core::result::Result<T, CklError>;
+pub type ResultBtc<T> = core::result::Result<T, BtcError>;
+
 #[macro_export]
 macro_rules! require {
     ($cond:expr, $err:ident) => {
@@ -73,4 +75,14 @@ macro_rules! require {
             return Err($err);
         }
     };
+}
+#[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
+pub enum BtcError {
+    BtcAddressFetchError(String), // Carry error message here
+    Other(String),
+}
+impl std::fmt::Display for BtcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
 }

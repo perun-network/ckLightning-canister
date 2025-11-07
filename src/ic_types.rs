@@ -12,18 +12,17 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::require;
-use bitcoin::secp256k1::{Message, SecretKey as SecpSecretKey}; // PublicKey as SecpPublicKey,
 use digest::{FixedOutputDirty, Update};
 use ed25519_dalek::Sha512 as Hasher;
+use icrc_ledger_types::icrc1::account::Subaccount;
 use icrc_ledger_types::icrc1::transfer::Memo;
 use k256::EncodedPoint;
 use k256::PublicKey as SecpPublicKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use rand::rngs::StdRng;
-use rand::thread_rng;
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
+pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 #[derive(PartialEq, Debug, Clone, Eq)]
@@ -34,13 +33,24 @@ pub use candid::{
     types::{Serializer, Type},
     types::{TypeInner, TypeInner::Nat8},
 };
-use k256::Secp256k1;
-
 use core::cmp::*;
 use core::convert::*;
 
 use serde::de::{Deserializer, Error as _};
 use serde_bytes::ByteBuf;
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
+pub struct SetBtcAddressResponse {
+    pub address: String,
+    pub msg: SetBtcAddressMsg,
+}
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
+
+pub enum SetBtcAddressMsg {
+    BtcAddressAlreadySet,
+    BtcAddressSetNow,
+    BtcAddressSetFailed,
+}
 
 // Type definitions start here.
 
@@ -292,6 +302,18 @@ pub struct WithdrawalLPArgs {
 pub struct FundingLPArgs {
     pub pool_funding: PoolFunding,
     pub signature: Vec<u8>,
+}
+
+#[derive(Deserialize, CandidType, Clone)]
+pub struct SetBtcAddressArgs {
+    pub principal: Option<Principal>,
+    pub subaccount: Option<Subaccount>,
+}
+#[derive(Deserialize, CandidType, Clone)]
+
+pub struct GetBtcAddressArgs {
+    pub principal: Option<Principal>,
+    pub subaccount: Option<Subaccount>,
 }
 
 impl<'de> Deserialize<'de> for ChannelId {

@@ -19,8 +19,7 @@ pub use candid::{
     types::{Serializer, Type, TypeInner, TypeInner::Nat8},
 };
 use cklightning::ic_types::{
-    ChannelFunding, ChannelId, Funding, FundingLPQuery, L1Account, L2Account, PoolAsset,
-    PoolFunding, PoolWithdrawal,
+    Funding, FundingLPQuery, L1Account, PoolAsset, PoolFunding, PoolWithdrawal,
 };
 use cklightning::receiver::icrc3value_map_to_transaction;
 use ic_agent::AgentError;
@@ -33,7 +32,7 @@ use candid::{Decode, Encode};
 use helpers::agent::{ICAgent, TransferIcrc1};
 use helpers::id::{
     BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, CKLIGHTNING_LEDGER_ID, PEM_NODE_ACC_PATH,
-    PEM_USER_ACC_PATH, create_keypair, str_home_from_path,
+    PEM_USER_ACC_PATH, str_home_from_path,
 };
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::account::Account;
@@ -66,6 +65,7 @@ async fn get_balance(
     let balance_opt = Decode!(&resp, Option<Nat>).unwrap();
     Ok(balance_opt.unwrap_or_else(|| Nat(0u64.into())))
 }
+
 #[tokio::test]
 async fn test_ckbtc_balance_node_and_user() -> Result<(), AgentError> {
     let nat_amount = Nat(10000u64.into());
@@ -263,11 +263,13 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
     let block = transfer_some_tx_decoded.clone();
     let blocku64 = block.0.to_u64_digits()[0];
 
-    let _ = client
+    let tx_notif = client
         .transaction_notification(funding.clone(), blocku64, amount_u64)
         .await
         .map(|amount| println!("Notification Result OK: {:?}", amount))
         .map_err(|e| AgentError::MessageError(format!("Notification error: {}", e)))?;
+
+    println!("tx notification: {:?}", tx_notif);
 
     let funding_deserialized = Encode!(&funding.clone()).unwrap();
     let funding_hash = Sha256::digest(&funding_deserialized);
