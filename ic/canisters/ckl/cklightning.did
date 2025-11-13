@@ -1,4 +1,9 @@
-type BtcError = variant { BtcAddressFetchError : text; Other : text };
+type BtcAddressType = variant { P2WPKH; P2PKH; P2TR };
+type BtcError = variant {
+  BtcAddressFetchError : text;
+  BtcCouldNotFetchBalance;
+  Other : text;
+};
 type ChannelFunding = record { participant : blob; channel : blob };
 type ChannelTime = record { time : nat64; chanid : blob };
 type CklError = variant {
@@ -37,6 +42,10 @@ type FundingLPQueryArgs = record {
   funding_query_sig : blob;
   funding_query : FundingLPQuery;
 };
+type GetBtcBalancesResponse = record {
+  msg : SetBtcAddressMsg;
+  balances : vec record { BtcAddressType; opt nat64 };
+};
 type HoldingsResponse = record { btc_amount : nat; ckbtc_amount : nat };
 type ICPReceiverError = variant {
   TxMapNotFound;
@@ -49,6 +58,7 @@ type ICPReceiverError = variant {
   Recipient;
   TxToNotFound;
 };
+type Network = variant { mainnet; regtest; testnet };
 type NotifyArgs = record {
   amount : nat64;
   block_height : nat64;
@@ -67,24 +77,38 @@ type PoolWithdrawal = record {
   pubkey_l1 : blob;
   amount : nat;
 };
+type QueryBtcAddressResponse = record {
+  msg : SetBtcAddressMsg;
+  addresses : opt vec record { BtcAddressType; text };
+};
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisteredState = record { state : State; timeout : nat64 };
 type Result = variant { Ok; Err : CklError };
-type Result_1 = variant { Ok : HoldingsResponse; Err : CklError };
-type Result_2 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
-type Result_3 = variant {
+type Result_1 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
+type Result_2 = variant { Ok : QueryBtcAddressResponse; Err : BtcError };
+type Result_3 = variant { Ok : HoldingsResponse; Err : CklError };
+type Result_4 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
+type Result_5 = variant {
   Ok : TransactionICRCNotification;
   Err : ICPReceiverError;
 };
-type Result_4 = variant { Ok : nat; Err : CklError };
+type Result_6 = variant { Ok : nat; Err : CklError };
+type Result_7 = variant { Ok : text; Err : BtcError };
+type SendRequest = record {
+  destination_address : text;
+  amount_in_satoshi : nat64;
+};
 type SetBtcAddressArgs = record {
   "principal" : opt principal;
   subaccount : opt blob;
+  address_type : BtcAddressType;
 };
 type SetBtcAddressMsg = variant {
-  BtcAddressAlreadySet;
-  BtcAddressSetFailed;
-  BtcAddressSetNow;
+  BtcAddressesAvailable;
+  BtcAddressSetNowSingle : BtcAddressType;
+  BtcAddressNotSet;
+  BtcAddressAlreadySetSingle : BtcAddressType;
+  BtcAddressSetFailedSingle : BtcAddressType;
 };
 type SetBtcAddressResponse = record { msg : SetBtcAddressMsg; address : text };
 type State = record {
@@ -110,42 +134,60 @@ type WithdrawalReq = record {
   amount : nat;
   receiver : principal;
 };
-service : {
+service : (Network) -> {
   __candid_method_deposit_channel : (ChannelFunding, blob) -> (Result);
   __candid_method_deposit_lp : (FundingLPArgs) -> (Result);
+  __candid_method_get_btc_balance : (opt nat64) -> (Result_1);
+  __candid_method_query_btc_address : () -> (Result_2);
   __candid_method_query_events : (ChannelTime) -> (text) query;
   __candid_method_query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
-      Result_1,
+      Result_3,
     ) query;
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
-  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_2);
+  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_4);
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
-  __candid_method_transaction_notification : (NotifyArgs) -> (Result_3);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_4);
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result_5);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_6);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result);
   clear : () -> ();
   deposit_channel : (ChannelFunding, blob) -> (Result);
   deposit_lp : (FundingLPArgs) -> (Result);
   dequeue : () -> (opt text);
   enqueue : (text) -> ();
+  // Returns the balance of the given bitcoin address.
+  get_balance : (text) -> (nat64);
+  get_btc_balance : (opt nat64) -> (Result_1);
+  // Returns a legacy P2PKH (Pay-to-PubKey-Hash) address for this smart contract.
+  // 
+  // This address uses an ECDSA public key and encodes it in the legacy Base58 format.
+  // It is supported by all bitcoin wallets and full nodes.
+  get_p2pkh_address : () -> (Result_7);
+  // Returns a Taproot (P2TR) address of this smart contract that supports **key path spending only**.
+  // 
+  // This address does not commit to a script path (it commits to an unspendable path per BIP-341).
+  // It allows spending using a single Schnorr signature corresponding to the internal key.
+  get_p2tr_key_path_only_address : () -> (Result_7);
+  get_p2wpkh_address : () -> (Result_7);
   peek : () -> (opt text) query;
+  query_btc_address : () -> (Result_2);
   query_events : (ChannelTime) -> (text) query;
   query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
-  query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_1) query;
+  query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_3) query;
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
-  set_btc_address : (SetBtcAddressArgs) -> (Result_2);
+  send_from_p2pkh_address : (SendRequest) -> (text);
+  set_btc_address : (SetBtcAddressArgs) -> (Result_4);
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
-  transaction_notification : (NotifyArgs) -> (Result_3);
-  trigger_withdraw : (WithdrawalReq) -> (Result_4);
+  transaction_notification : (NotifyArgs) -> (Result_5);
+  trigger_withdraw : (WithdrawalReq) -> (Result_6);
   withdraw_lp : (WithdrawalLPArgs) -> (Result);
 }

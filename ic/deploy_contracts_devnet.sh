@@ -153,7 +153,8 @@ dfx canister install index --argument "$INDEX_INIT_ARG"
 dfx canister install archive --argument "$ARCHIVE_INIT_ARG"
 dfx canister install mock_contract --argument "(principal \"${LEDGER_ID}\")"
 dfx canister install cklightning
-dfx deploy basic_bitcoin --argument '(variant { regtest })'
+dfx canister install basic_bitcoin --argument '(variant { regtest })'
+# dfx deploy basic_bitcoin --argument '(variant { regtest })'
 
 
 MOCK_ID=$(dfx canister id mock_contract)
@@ -168,6 +169,7 @@ dfx ledger fabricate-cycles --canister $USER_WALLET_ID --amount 200000
 dfx ledger fabricate-cycles --canister $NODE_WALLET_ID --amount 200000
 dfx canister deposit-cycles 1000000 $MOCK_ID
 dfx canister deposit-cycles 1000000 $CKL_ID
+dfx canister deposit-cycles 1000000 $BASIC_BITCOIN_ID
 
 
 

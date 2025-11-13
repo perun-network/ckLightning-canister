@@ -11,13 +11,15 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
+use crate::btc::address::get_balance;
+use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
 use crate::error::{BtcError, CklError, ResultBtc};
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    Amount, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DEVNET_CKBTC_MINTER, DepositorInfo,
-    Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcAddressArgs, HoldingsResponse, L2Account,
-    NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs, SetBtcAddressMsg,
-    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding,
+    FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
+    NotifyArgs, PoolWithdrawal, QueryBtcAddressResponse, RegisteredState, SetBtcAddressArgs,
+    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
@@ -62,6 +64,7 @@ where
 {
     own_principal: Principal,
     own_btc_address: Option<String>,
+    own_btc_addresses: HashMap<BtcAddressType, String>,
     icrc_receiver: receiver::Receiver<Q>,
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
@@ -70,32 +73,86 @@ where
 
 pub async fn set_btc_address_impl(
     set_btc_address_args: SetBtcAddressArgs,
-) -> std::result::Result<SetBtcAddressResponse, BtcError> {
+) -> Result<SetBtcAddressResponse, BtcError> {
     let mut state = STATE.write().unwrap();
-    let current_btc_address = state.own_btc_address.clone();
+    let address_type = set_btc_address_args.address_type;
 
-    // If address already exists, return that result immediately
-    if let Some(address) = current_btc_address {
+    // Check if address for this type exists
+    if let Some(address) = state.own_btc_addresses.get(&address_type) {
         return Ok(SetBtcAddressResponse {
-            address,
-            msg: SetBtcAddressMsg::BtcAddressAlreadySet,
+            address: address.clone(),
+            msg: SetBtcAddressMsg::BtcAddressAlreadySetSingle(address_type),
         });
     }
 
-    // If None, fetch the address asynchronously
-    let address = match state.get_btc_address().await {
-        Ok(addr) => addr,
-        Err(e) => return Err(e),
+    // If not, retrieve address for the given type by calling the matching async fn
+    let address = match address_type {
+        BtcAddressType::P2PKH => get_p2pkh_address().await?,
+        BtcAddressType::P2WPKH => get_p2wpkh_address().await?,
+        BtcAddressType::P2TR => get_p2tr_key_path_only_address().await?,
     };
 
-    // Update the state now that address was fetched
-    state.own_btc_address = Some(address.clone());
+    // Store in the map
+    state
+        .own_btc_addresses
+        .insert(address_type.clone(), address.clone());
 
-    // Return proper response indicating success
     Ok(SetBtcAddressResponse {
         address,
-        msg: SetBtcAddressMsg::BtcAddressSetNow,
+        msg: SetBtcAddressMsg::BtcAddressSetNowSingle(address_type),
     })
+}
+
+pub async fn get_btc_balances_impl(
+    confirmations: Option<u64>,
+) -> Result<GetBtcBalancesResponse, BtcError> {
+    let state = STATE.read().unwrap();
+
+    let mut balances: HashMap<BtcAddressType, Option<u64>> = HashMap::new();
+    let mut any_address_set = false;
+
+    for (address_type, address) in &state.own_btc_addresses {
+        any_address_set = true;
+
+        // Construct GetBtcBalanceArgs with actual address string, not address_type
+        let args = GetBtcBalanceArgs {
+            address: address.clone(),
+            confirmations, // pass on confirmation filter if any
+        };
+
+        // Query balance asynchronously, handle errors gracefully
+        let balance = match get_balance(args).await {
+            Ok(bal) => Some(bal),
+            Err(_) => None, // optionally log or process error
+        };
+
+        balances.insert(*address_type, balance);
+    }
+
+    let msg = if any_address_set {
+        SetBtcAddressMsg::BtcAddressesAvailable
+    } else {
+        SetBtcAddressMsg::BtcAddressNotSet
+    };
+
+    Ok(GetBtcBalancesResponse { balances, msg })
+}
+
+pub async fn query_btc_address_impl() -> Result<QueryBtcAddressResponse, BtcError> {
+    let state = STATE.read().unwrap();
+    let addresses_map = state.own_btc_addresses.clone();
+
+    if addresses_map.is_empty() {
+        Ok(QueryBtcAddressResponse {
+            msg: SetBtcAddressMsg::BtcAddressNotSet,
+            addresses: None,
+        })
+    } else {
+        Ok(QueryBtcAddressResponse {
+            msg: SetBtcAddressMsg::BtcAddressesAvailable,
+            addresses: Some(addresses_map),
+        })
+    }
 }
 
 pub async fn transaction_notification_impl(
@@ -178,6 +235,7 @@ where
         Self {
             own_principal: canister_self(),
             own_btc_address: None, // this will be initialized later by an authorized call
+            own_btc_addresses: HashMap::new(),
             icrc_receiver: receiver::Receiver::new(q, my_principal),
             user_holdings: Default::default(),
             channels: Default::default(),
@@ -273,24 +331,20 @@ where
 
         Ok(())
     }
-
-    async fn get_btc_address(&self) -> ResultBtc<String> {
-        let ckbtc_minter_id = Principal::from_text(DEVNET_CKBTC_MINTER).expect("parsing principal");
-
-        let own_principal = Some(self.own_principal);
-
-        let get_btc_address_args = GetBtcAddressArgs {
-            principal: own_principal,
-            subaccount: None,
+    async fn get_btc_address(&self, address_type: BtcAddressType) -> ResultBtc<String> {
+        let result = match address_type {
+            BtcAddressType::P2PKH => get_p2pkh_address()
+                .await
+                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2PKH error: {}", e))),
+            BtcAddressType::P2WPKH => get_p2wpkh_address()
+                .await
+                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2WPKH error: {}", e))),
+            BtcAddressType::P2TR => get_p2tr_key_path_only_address()
+                .await
+                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2TR error: {}", e))),
         };
 
-        let call_result: CallResult<(String,)> =
-            ic_cdk::call(ckbtc_minter_id, "get_btc_address", (get_btc_address_args,)).await;
-
-        match call_result {
-            Ok((address,)) => Ok(address),
-            Err((_code, msg)) => Err(BtcError::BtcAddressFetchError(msg)),
-        }
+        result
     }
 
     async fn send_funds_to_l1(
