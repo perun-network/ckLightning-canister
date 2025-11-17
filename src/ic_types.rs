@@ -54,6 +54,12 @@ pub struct GetBtcBalancesResponse {
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct SendBtcTxResponse {
+    pub balances: HashMap<BtcAddressType, Option<u64>>, // None if address missing
+    pub msg: SetBtcAddressMsg, // Overall status, e.g. BtcAddressNotSet if none
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
 pub struct QueryBtcAddressResponse {
     pub msg: SetBtcAddressMsg,
     pub addresses: Option<HashMap<BtcAddressType, String>>,
@@ -73,6 +79,20 @@ pub enum SetBtcAddressMsg {
     BtcAddressSetNowSingle(BtcAddressType),
     BtcAddressSetFailedSingle(BtcAddressType),
     BtcAddressesAvailable, // New variant to indicate multiple addresses available
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+
+pub struct SendBtcTxArgs {
+    pub recipient: String,
+    pub from_address_type: BtcAddressType,
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+pub enum SendBtcTxMsg {
+    Success(String),
+    Fail,
 }
 
 // Type definitions start here.

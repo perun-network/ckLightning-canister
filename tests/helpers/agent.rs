@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use cklightning::btc::address::derive_btc_address;
-
+use cklightning::ic_types::QueryBtcAddressResponse;
 extern crate cklightning;
 use super::id::{
     self, BTC_LEDGER_DEFAULT_FEE, BTC_LEDGER_ID, BTC_MINTER_ID, CKLIGHTNING_LEDGER_ID,
@@ -23,8 +23,8 @@ use cklightning::error::{BtcError, CklError, ResultBtc};
 use cklightning::ic_types::{
     BtcAddressType, ChannelId, Funding, FundingLPArgs, FundingLPQuery, FundingLPQueryArgs,
     GetBtcAddressArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse, L2Account,
-    PoolWithdrawal, SendFromP2pkhAddressArgs, SetBtcAddressArgs, SetBtcAddressResponse,
-    WithdrawalLPArgs,
+    PoolWithdrawal, SendBtcTxArgs, SendBtcTxMsg, SendFromP2pkhAddressArgs, SetBtcAddressArgs,
+    SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use cklightning::receiver::ICPReceiverError;
 use cklightning::receiver::TransactionICRCNotification;
@@ -110,6 +110,42 @@ impl ICAgent {
     }
     pub async fn fetch_root_key(&self) -> Result<(), AgentError> {
         self.agent.fetch_root_key().await
+    }
+    pub async fn send_btc_tx(
+        &self,
+        recipient: String,
+        fromaddresstype: BtcAddressType,
+        amount: u64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let cancklid = Principal::from_text(CKLIGHTNING_LEDGER_ID)
+            .map_err(|e| format!("Invalid principal: {}", e))?;
+        self.agent
+            .fetch_root_key()
+            .await
+            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+        let args = SendBtcTxArgs {
+            recipient,
+            from_address_type: fromaddresstype,
+            amount,
+        };
+        let resp = self
+            .agent
+            .update(&cancklid, "send_btc_tx")
+            .with_arg(Encode!(&args).map_err(|e| format!("Encoding failed: {}", e))?)
+            .call_and_wait()
+            .await
+            .map_err(|e| format!("sendbtctx call failed: {}", e))?;
+        let decoded_response: Result<SendBtcTxMsg, BtcError> =
+            Decode!(&resp, Result<SendBtcTxMsg, BtcError>)
+                .map_err(|e| format!("Decode failed: {}", e))?;
+
+        match decoded_response {
+            Ok(msg) => match msg {
+                SendBtcTxMsg::Success(txid) => Ok(txid),
+                SendBtcTxMsg::Fail => Err("sendbtctx returned Fail".into()),
+            },
+            Err(e) => Err(format!("sendbtctx error: {:?}", e).into()),
+        }
     }
 
     pub async fn tx_icrc1_transfer(
@@ -697,6 +733,46 @@ impl ICAgent {
             .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decoding failed: {}", e)))?;
 
         Ok(btc_address)
+    }
+
+    pub async fn query_btc_addresses(
+        &self,
+    ) -> Result<QueryBtcAddressResponse, Box<dyn std::error::Error>> {
+        let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {}", e)))?;
+
+        self.agent.fetch_root_key().await.map_err(|e| {
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+        })?;
+
+        // Call the canister's update method named "query_btc_address"
+        let resp = self
+            .agent
+            .update(&can_ckl_id, "query_btc_address")
+            .call_and_wait()
+            .await
+            .map_err(|e| {
+                Box::<dyn std::error::Error>::from(format!("query_btc_address call failed: {}", e))
+            })?;
+
+        // Decode as Result<QueryBtcAddressResponse, BtcError>
+        let decoded_response =
+            Decode!(&resp, std::result::Result<QueryBtcAddressResponse, BtcError>)
+                .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
+
+        // Unwrap the inner Result (can return Err(BtcError))
+        let response = decoded_response?;
+
+        println!("Decoded Response msg: {:?}", response.msg);
+        if let Some(addresses) = &response.addresses {
+            for (address_type, address) in addresses {
+                println!("Address type: {:?}, address: {}", address_type, address);
+            }
+        } else {
+            println!("No BTC addresses set");
+        }
+
+        Ok(response)
     }
 }
 

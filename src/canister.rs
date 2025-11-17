@@ -18,7 +18,7 @@ use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::canister_state::{
     deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl, query_btc_address_impl,
-    query_state_impl, query_user_lp_holdings_impl, set_btc_address_impl,
+    query_state_impl, query_user_lp_holdings_impl, send_btc_tx_impl, set_btc_address_impl,
     transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
 };
 
@@ -26,11 +26,22 @@ use crate::error::{BtcError, CklError};
 use crate::ic_types::{
     ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs,
     GetBtcBalancesResponse, HoldingsResponse, NotifyArgs, QueryBtcAddressResponse, RegisteredState,
-    SetBtcAddressArgs, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, WithdrawalLPArgs,
+    WithdrawalReq,
 };
 use candid::{Nat, Principal, candid_method};
 use ic_cdk::query;
 use ic_cdk::update;
+
+#[update]
+#[candid_method(update)]
+async fn send_btc_tx(args: SendBtcTxArgs) -> std::result::Result<SendBtcTxMsg, BtcError> {
+    let recipient = args.recipient;
+    let from_address_type = args.from_address_type;
+    let amount = args.amount;
+
+    send_btc_tx_impl(recipient, from_address_type, amount).await
+}
 
 #[query]
 #[candid_method(update)]

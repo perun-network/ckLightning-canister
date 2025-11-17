@@ -23,6 +23,74 @@ use helpers::btc_commands::generate_blocks_to_address;
 use helpers::id::{PEM_NODE_ACC_PATH, PEM_USER_ACC_PATH, str_home_from_path};
 
 #[tokio::test]
+async fn testagent_sendbtctx() -> Result<(), Box<dyn std::error::Error>> {
+    let userclient = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_USER_ACC_PATH)))?;
+    userclient.fetch_root_key().await?;
+
+    let nodeclient = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_USER_ACC_PATH)))?;
+    nodeclient.fetch_root_key().await?;
+
+    // Get user BTC address
+    let userbtcaddress = userclient.get_own_btc_address().await.map_err(|e| {
+        println!("Error getting BTC address: {}", e);
+        e // Propagate the original error type unchanged
+    })?;
+    println!("User BTC address: {}", userbtcaddress);
+
+    // Mine some BTC to user address
+    generate_blocks_to_address(&userbtcaddress).await?;
+    sleep(Duration::from_secs(10)).await;
+    // let btc_address_type = cklightning::ic_types::BtcAddressType::P2TR; //P2WPKH;
+    //mv6hFpg8yd5RGjAPWeujQUXZ3hQWVPM8Rk
+    //bcrt1q2d0p9x9zxkuyfwh6acsnw446mu2gs8lqr27zxy
+    //bcrt1pwyhrz4mec3znq4m0ay67vlxmvstf8pfprmx7gxu86ef73jezmszs2ly84w
+
+    // Send BTC using sendbtctx
+    let recipient = "bcrt1pwyhrz4mec3znq4m0ay67vlxmvstf8pfprmx7gxu86ef73jezmszs2ly84w".to_string();
+    let fromaddresstype = cklightning::ic_types::BtcAddressType::P2WPKH;
+    let amount = 100u64;
+    let txid = userclient
+        .send_btc_tx(recipient.clone(), fromaddresstype, amount)
+        .await
+        .map_err(|e| {
+            println!("Error sending BTC: {}", e);
+            e
+        })?;
+    println!("BTC sent successfully, transaction ID: {}", txid);
+
+    // Mine blocks to confirm transaction
+    generate_blocks_to_address(&recipient).await?;
+    sleep(Duration::from_secs(10)).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_agent_query_all_btc_addresses() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize your agent with PEM file for identity
+    let client = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_USER_ACC_PATH)))?;
+    client.fetch_root_key().await?;
+
+    // Query all BTC addresses from the canister
+    let response = client.query_btc_addresses().await.map_err(|e| {
+        println!("Error querying BTC addresses: {:?}", e);
+        e
+    })?;
+
+    // Optionally assert or inspect returned addresses
+    if let Some(addresses) = &response.addresses {
+        println!("Queried BTC addresses:");
+        for (address_type, address) in addresses {
+            println!(" - {:?}: {}", address_type, address);
+        }
+    } else {
+        println!("No BTC addresses found");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_basic_bitcoin_get_balance() -> Result<(), Box<dyn std::error::Error>> {
     let user_client = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_USER_ACC_PATH)))?;
     user_client.fetch_root_key().await?;
@@ -256,7 +324,7 @@ async fn test_btc_mine_to_address() -> Result<(), Box<dyn std::error::Error>> {
         .join("bin")
         .join("bitcoin-cli");
 
-    let mined_address = "mhRWwZzPnsrsy5r74Tc7Mw9d2VhePqZ4uM";
+    let mined_address = "bcrt1q9aqms5qqr8qk5tw0khkhfgss9kg978cwc8ehdj";
 
     let output = std::process::Command::new(bitcoin_cli_path)
         .args(&[

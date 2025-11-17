@@ -87,13 +87,20 @@ type Result = variant { Ok; Err : CklError };
 type Result_1 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
 type Result_2 = variant { Ok : QueryBtcAddressResponse; Err : BtcError };
 type Result_3 = variant { Ok : HoldingsResponse; Err : CklError };
-type Result_4 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
-type Result_5 = variant {
+type Result_4 = variant { Ok : SendBtcTxMsg; Err : BtcError };
+type Result_5 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
+type Result_6 = variant {
   Ok : TransactionICRCNotification;
   Err : ICPReceiverError;
 };
-type Result_6 = variant { Ok : nat; Err : CklError };
-type Result_7 = variant { Ok : text; Err : BtcError };
+type Result_7 = variant { Ok : nat; Err : CklError };
+type Result_8 = variant { Ok : text; Err : BtcError };
+type SendBtcTxArgs = record {
+  recipient : text;
+  from_address_type : BtcAddressType;
+  amount : nat64;
+};
+type SendBtcTxMsg = variant { Fail; Success : text };
 type SendRequest = record {
   destination_address : text;
   amount_in_satoshi : nat64;
@@ -149,10 +156,11 @@ service : (Network) -> {
     ) query;
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
-  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_4);
+  __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_4);
+  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_5);
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
-  __candid_method_transaction_notification : (NotifyArgs) -> (Result_5);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_6);
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result_6);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_7);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result);
   clear : () -> ();
   deposit_channel : (ChannelFunding, blob) -> (Result);
@@ -166,13 +174,13 @@ service : (Network) -> {
   // 
   // This address uses an ECDSA public key and encodes it in the legacy Base58 format.
   // It is supported by all bitcoin wallets and full nodes.
-  get_p2pkh_address : () -> (Result_7);
+  get_p2pkh_address : () -> (Result_8);
   // Returns a Taproot (P2TR) address of this smart contract that supports **key path spending only**.
   // 
   // This address does not commit to a script path (it commits to an unspendable path per BIP-341).
   // It allows spending using a single Schnorr signature corresponding to the internal key.
-  get_p2tr_key_path_only_address : () -> (Result_7);
-  get_p2wpkh_address : () -> (Result_7);
+  get_p2tr_key_path_only_address : () -> (Result_8);
+  get_p2wpkh_address : () -> (Result_8);
   peek : () -> (opt text) query;
   query_btc_address : () -> (Result_2);
   query_events : (ChannelTime) -> (text) query;
@@ -183,11 +191,12 @@ service : (Network) -> {
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_3) query;
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
+  send_btc_tx : (SendBtcTxArgs) -> (Result_4);
   send_from_p2pkh_address : (SendRequest) -> (text);
-  set_btc_address : (SetBtcAddressArgs) -> (Result_4);
+  set_btc_address : (SetBtcAddressArgs) -> (Result_5);
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
-  transaction_notification : (NotifyArgs) -> (Result_5);
-  trigger_withdraw : (WithdrawalReq) -> (Result_6);
+  transaction_notification : (NotifyArgs) -> (Result_6);
+  trigger_withdraw : (WithdrawalReq) -> (Result_7);
   withdraw_lp : (WithdrawalLPArgs) -> (Result);
 }

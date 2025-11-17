@@ -13,22 +13,37 @@
 //  limitations under the License.
 use crate::btc::address::get_balance;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
+use crate::btc::common::DerivationPath;
+use crate::btc::common::PrimaryOutput;
+use crate::btc::common::get_fee_per_byte;
+use crate::btc::p2pkh;
+use crate::btc::p2tr;
+use crate::btc::p2wpkh;
 use crate::error::{BtcError, CklError, ResultBtc};
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
     Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
-    NotifyArgs, PoolWithdrawal, QueryBtcAddressResponse, RegisteredState, SetBtcAddressArgs,
-    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    NotifyArgs, PoolWithdrawal, QueryBtcAddressResponse, RegisteredState, SendBtcTxMsg,
+    SetBtcAddressArgs, SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::{Address, CompressedPublicKey, hashes::Hash};
+use bitcoin::{PublicKey, XOnlyPublicKey, consensus::serialize};
 use candid::Encode;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
+use ic_cdk::{
+    bitcoin_canister::{
+        GetUtxosRequest, SendTransactionRequest, bitcoin_get_utxos, bitcoin_send_transaction,
+    },
+    trap, update,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 use k256::ecdsa::Signature;
@@ -36,6 +51,7 @@ use k256::ecdsa::VerifyingKey;
 use k256::ecdsa::signature::Verifier;
 use k256::pkcs8::DecodePublicKey;
 use k256::sha2::{Digest, Sha256};
+use std::str::FromStr;
 
 use crate::error::ResultCkl;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
@@ -69,6 +85,194 @@ where
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
     liq_pool: LiquidityPool,
+}
+
+// This function is called inside canister_state.rs and delegates BTC-context logic to btc/calls.rs
+pub async fn send_btc_tx_impl(
+    destination_address_str: String,
+    from_address_type: BtcAddressType,
+    amount_in_satoshi: u64,
+) -> Result<SendBtcTxMsg, BtcError> {
+    if amount_in_satoshi == 0 {
+        ic_cdk::trap("Amount must be greater than 0");
+    }
+
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    // Parse destination address and check network
+    let dst_address = Address::from_str(&destination_address_str)
+        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
+        .require_network(ctx.bitcoin_network)
+        .map_err(|e| BtcError::Other(format!("Destination address network mismatch: {:?}", e)))?;
+
+    // Derive own address and public key according to address type
+    let derivation_path = match from_address_type {
+        BtcAddressType::P2PKH => crate::btc::common::DerivationPath::p2pkh(0, 0),
+        BtcAddressType::P2WPKH => crate::btc::common::DerivationPath::p2wpkh(0, 0),
+        BtcAddressType::P2TR => crate::btc::common::DerivationPath::p2tr(0, 0),
+    };
+
+    let public_key_bytes =
+        crate::btc::ecdsa::get_ecdsa_public_key(&ctx, derivation_path.to_vec_u8_path()).await;
+
+    // Prepare strings from public key bytes
+    let (own_address, own_public_key) = match from_address_type {
+        BtcAddressType::P2PKH => {
+            let pubkey = PublicKey::from_slice(&public_key_bytes)
+                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+            let address = Address::p2pkh(pubkey, ctx.bitcoin_network);
+            (address, pubkey)
+        }
+        BtcAddressType::P2WPKH => {
+            let compressed_key =
+                CompressedPublicKey::from_slice(&public_key_bytes).map_err(|e| {
+                    BtcError::Other(format!("Failed to parse compressed public key: {}", e))
+                })?;
+            let pubkey = PublicKey::from_slice(&public_key_bytes)
+                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+            let address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
+            (address, pubkey)
+        }
+        BtcAddressType::P2TR => {
+            let pubkey = PublicKey::from_slice(&public_key_bytes)
+                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+            let xonly = XOnlyPublicKey::from(pubkey.inner);
+            let address = Address::p2tr(&Secp256k1::new(), xonly, None, ctx.bitcoin_network);
+            (address, pubkey)
+        }
+    };
+
+    // Fetch all UTXOs for own address
+    let own_utxos = bitcoin_get_utxos(&GetUtxosRequest {
+        address: own_address.to_string(),
+        network: ctx.network,
+        filter: None,
+    })
+    .await
+    .map_err(|e| BtcError::Other(format!("Failed to fetch UTXOs: {}", e)))?
+    .utxos;
+
+    // Get fee rate for transaction
+    let fee_per_byte = get_fee_per_byte(&ctx).await;
+
+    // Build, sign, send transaction based on address type
+    let txid = match from_address_type {
+        BtcAddressType::P2PKH => {
+            // Build transaction
+            let transaction = p2pkh::build_transaction(
+                &ctx,
+                &own_public_key,
+                &own_address,
+                &own_utxos,
+                &PrimaryOutput::Address(dst_address, amount_in_satoshi),
+                fee_per_byte,
+            )
+            .await;
+
+            // Sign transaction
+            let signed_tx = p2pkh::sign_transaction(
+                &ctx,
+                &own_public_key,
+                &own_address,
+                transaction,
+                derivation_path.to_vec_u8_path(),
+                crate::btc::ecdsa::sign_with_ecdsa,
+            )
+            .await;
+
+            // Send transaction to Bitcoin canister
+            bitcoin_send_transaction(&SendTransactionRequest {
+                network: ctx.network,
+                transaction: serialize(&signed_tx),
+            })
+            .await
+            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+
+            signed_tx.compute_txid().to_string()
+        }
+        BtcAddressType::P2WPKH => {
+            // Build transaction with prevouts
+            let (transaction, prevouts) = p2wpkh::build_transaction(
+                &ctx,
+                &own_public_key,
+                &own_address,
+                &own_utxos,
+                &dst_address,
+                amount_in_satoshi,
+                fee_per_byte,
+            )
+            .await;
+
+            // Sign transaction
+            let signed_tx = p2wpkh::sign_transaction(
+                &ctx,
+                &own_public_key,
+                &own_address,
+                transaction,
+                &prevouts,
+                derivation_path.to_vec_u8_path(),
+                crate::btc::ecdsa::sign_with_ecdsa,
+            )
+            .await;
+
+            bitcoin_send_transaction(&SendTransactionRequest {
+                network: ctx.network,
+                transaction: serialize(&signed_tx),
+            })
+            .await
+            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+
+            signed_tx.compute_txid().to_string()
+        }
+        BtcAddressType::P2TR => {
+            // Build transaction (Key path only taproot)
+            let (transaction, prevouts) = p2tr::build_transaction(
+                &ctx,
+                &own_address,
+                &own_utxos,
+                p2tr::SelectUtxosMode::Greedy,
+                &PrimaryOutput::Address(dst_address, amount_in_satoshi),
+                fee_per_byte,
+            )
+            .await;
+
+            // Internal key path (matches derivation of the address)
+            let internal_key_path = DerivationPath::p2tr(0, 0);
+            let internal_key_bytes = crate::btc::schnorr::get_schnorr_public_key(
+                &ctx,
+                internal_key_path.to_vec_u8_path(),
+            )
+            .await;
+
+            let taproot_spend_info = p2tr::create_taproot_spend_info(&internal_key_bytes, &[]);
+
+            // Sign transaction
+            let signed_tx = p2tr::sign_transaction_key_spend(
+                &ctx,
+                &own_address,
+                transaction,
+                prevouts.as_slice(),
+                internal_key_path.to_vec_u8_path(),
+                taproot_spend_info
+                    .merkle_root()
+                    .map(|r| r.to_byte_array().to_vec())
+                    .unwrap_or_default(),
+                crate::btc::schnorr::sign_with_schnorr,
+            )
+            .await;
+
+            bitcoin_send_transaction(&SendTransactionRequest {
+                network: ctx.network,
+                transaction: serialize(&signed_tx),
+            })
+            .await
+            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+
+            signed_tx.compute_txid().to_string()
+        }
+    };
+
+    Ok(SendBtcTxMsg::Success(txid))
 }
 
 pub async fn set_btc_address_impl(
@@ -143,11 +347,13 @@ pub async fn query_btc_address_impl() -> Result<QueryBtcAddressResponse, BtcErro
     let addresses_map = state.own_btc_addresses.clone();
 
     if addresses_map.is_empty() {
+        // No addresses set, respond with None
         Ok(QueryBtcAddressResponse {
             msg: SetBtcAddressMsg::BtcAddressNotSet,
             addresses: None,
         })
     } else {
+        // Return all stored addresses in Some(HashMap)
         Ok(QueryBtcAddressResponse {
             msg: SetBtcAddressMsg::BtcAddressesAvailable,
             addresses: Some(addresses_map),
