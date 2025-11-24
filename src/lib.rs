@@ -28,8 +28,8 @@ use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
     ChannelId, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
-    QueryBtcAddressResponse, RegisteredState, SetBtcAddressArgs, SetBtcAddressResponse, Timestamp,
-    WithdrawalLPArgs, WithdrawalReq,
+    QueryBtcAddressResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
+    SetBtcAddressResponse, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 // use bitcoin::Network;

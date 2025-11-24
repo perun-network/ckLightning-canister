@@ -279,10 +279,6 @@ impl ICAgent {
             return Err("No blocks found in ledger block".into());
         }
 
-        // Return the block id as an example; adapt as needed
-        // Ok(first_block.id.0.clone().0) // Assuming id is Nat inside a wrapper
-        // let first_block = &blocks_result.blocks[0];
-
         // Return the block ID (as Nat)
         Ok(blocks_result.clone())
     }
