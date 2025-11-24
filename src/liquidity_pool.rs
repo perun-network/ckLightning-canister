@@ -11,13 +11,8 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::error::{CklError, Result};
-use crate::ic_types::{
-    Amount, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding, L1Account, NotifyArgs,
-    PoolAsset, RegisteredState, WithdrawalReq,
-};
-use candid::CandidType;
-use candid::Deserialize;
+use crate::error::{CklError, ResultCkl};
+use crate::ic_types::{Amount, DepositorInfo, L1Account, PoolAsset};
 use candid::Nat;
 use std::collections::HashMap;
 
@@ -50,7 +45,7 @@ impl LiquidityPool {
         }
     }
 }
-fn check_and_update_liq_pool(amount_req: &Nat, amount_avail: &Nat) -> Result<Nat> {
+fn check_and_update_liq_pool(amount_req: &Nat, amount_avail: &Nat) -> ResultCkl<Nat> {
     if amount_req > amount_avail {
         return Err(CklError::InsufficientLiquidity);
     }

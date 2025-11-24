@@ -19,7 +19,7 @@ rm -rf ~/.config/dfx/identity/initial
 rm -rf ~/.config/dfx/identity/archive
 rm -rf ~/.cache/dfinity/
 rm -rf ~/.config/dfx/
-dfxvm default 0.24.3
+dfxvm default 0.29.2
 # Remove canister_ids.json if it exists
 if [ -f "canister_ids.json" ]; then
     rm canister_ids.json

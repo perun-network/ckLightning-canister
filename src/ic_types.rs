@@ -12,18 +12,19 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::require;
-use bitcoin::secp256k1::{Message, SecretKey as SecpSecretKey}; // PublicKey as SecpPublicKey,
 use digest::{FixedOutputDirty, Update};
 use ed25519_dalek::Sha512 as Hasher;
+use icrc_ledger_types::icrc1::account::Subaccount;
 use icrc_ledger_types::icrc1::transfer::Memo;
 use k256::EncodedPoint;
 use k256::PublicKey as SecpPublicKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use rand::rngs::StdRng;
-use rand::thread_rng;
+use std::collections::HashMap;
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
+pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
+pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 #[derive(PartialEq, Debug, Clone, Eq)]
@@ -34,13 +35,65 @@ pub use candid::{
     types::{Serializer, Type},
     types::{TypeInner, TypeInner::Nat8},
 };
-use k256::Secp256k1;
-
 use core::cmp::*;
 use core::convert::*;
 
 use serde::de::{Deserializer, Error as _};
 use serde_bytes::ByteBuf;
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
+pub struct SetBtcAddressResponse {
+    pub address: String,
+    pub msg: SetBtcAddressMsg,
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct GetBtcBalancesResponse {
+    pub balances: HashMap<BtcAddressType, Option<u64>>, // None if address missing
+    pub msg: SetBtcAddressMsg, // Overall status, e.g. BtcAddressNotSet if none
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct SendBtcTxResponse {
+    pub balances: HashMap<BtcAddressType, Option<u64>>, // None if address missing
+    pub msg: SetBtcAddressMsg, // Overall status, e.g. BtcAddressNotSet if none
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct QueryBtcAddressResponse {
+    pub msg: SetBtcAddressMsg,
+    pub addresses: Option<HashMap<BtcAddressType, String>>,
+}
+
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
+pub struct GetBtcBalanceArgs {
+    pub address: String, // specify which address type to get balance for
+    pub confirmations: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+
+pub enum SetBtcAddressMsg {
+    BtcAddressNotSet,
+    BtcAddressAlreadySetSingle(BtcAddressType),
+    BtcAddressSetNowSingle(BtcAddressType),
+    BtcAddressSetFailedSingle(BtcAddressType),
+    BtcAddressesAvailable, // New variant to indicate multiple addresses available
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+
+pub struct SendBtcTxArgs {
+    pub recipient: String,
+    pub from_address_type: BtcAddressType,
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+pub enum SendBtcTxMsg {
+    Success(String),
+    Fail,
+}
 
 // Type definitions start here.
 
@@ -65,6 +118,18 @@ pub struct FundingLPQuery {
 pub struct FundingLPQueryArgs {
     pub funding_query: FundingLPQuery,
     pub funding_query_sig: Vec<u8>,
+}
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+
+pub struct SendBtcArgs {
+    pub to_address: String,
+    pub amount_sat: Nat,
+}
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+
+pub struct SendFromP2pkhAddressArgs {
+    pub destination_address: String,
+    pub amount_in_satoshi: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, CandidType)]
@@ -292,6 +357,27 @@ pub struct WithdrawalLPArgs {
 pub struct FundingLPArgs {
     pub pool_funding: PoolFunding,
     pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+
+pub enum BtcAddressType {
+    P2WPKH, //Native SegWit (Pay-to-Witness-PubKey-Hash). This address uses a compressed ECDSA public key and is encoded in Bech32 (BIP-173)
+    P2PKH,  //(Pay-to-PubKey-Hash). This address is encoded in the legacy Base58 format.
+    P2TR, //Pay-to-Taproot. This address does not commit to a script path (it commits to an unspendable path per BIP-341)
+}
+
+#[derive(Deserialize, CandidType, Clone)]
+pub struct SetBtcAddressArgs {
+    pub principal: Option<Principal>,
+    pub subaccount: Option<Subaccount>,
+    pub address_type: BtcAddressType,
+}
+#[derive(Deserialize, CandidType, Clone)]
+
+pub struct GetBtcAddressArgs {
+    pub principal: Option<Principal>,
+    pub subaccount: Option<Subaccount>,
 }
 
 impl<'de> Deserialize<'de> for ChannelId {

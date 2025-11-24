@@ -20,16 +20,100 @@ pub mod events;
 pub mod ic_types;
 pub mod liquidity_pool;
 use crate::ic_types::ChannelFunding;
+pub mod btc;
 pub mod msg;
 pub mod receiver;
-use crate::error::CklError;
+use crate::error::{BtcError, CklError};
 use crate::events::{ChannelTime, Event, RegEvent};
+use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
-    Amount, ChannelId, Funding, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
-    PoolFunding, PoolWithdrawal, RegisteredState, Timestamp, WithdrawalLPArgs, WithdrawalReq,
+    ChannelId, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
+    QueryBtcAddressResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
+    SetBtcAddressResponse, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
+// use bitcoin::Network;
+use crate::error::ResultBtc;
 use candid::Nat;
+use ic_cdk::bitcoin_canister::Network;
+// use ic_cdk::bitcoin_canister::Network as BitcoinBetaNetwork;
+
+use ic_cdk::{init, post_upgrade};
+use std::cell::Cell;
+
+/// Runtime configuration shared across all Bitcoin-related operations.
+///
+/// This struct carries network-specific context:
+/// - `network`: The ICP Bitcoin API network enum.
+/// - `bitcoin_network`: The corresponding network enum from the `bitcoin` crate, used
+///   for address formatting and transaction construction.
+/// - `key_name`: The global ECDSA key name used when requesting derived keys or making
+///   signatures. Different key names are used locally and when deployed on the IC.
+///
+/// Note: Both `network` and `bitcoin_network` are needed because ICP and the
+/// Bitcoin library use distinct network enum types.
+#[derive(Clone, Copy)]
+pub struct BitcoinContext {
+    pub network: Network,
+    pub bitcoin_network: bitcoin::Network,
+    pub key_name: &'static str,
+}
+
+// Global, thread-local instance of the Bitcoin context.
+// This is initialized at smart contract init/upgrade time and reused across all API calls.
+thread_local! {
+    static BTC_CONTEXT: Cell<BitcoinContext> = const {
+        Cell::new(BitcoinContext {
+            network: Network::Regtest,
+            bitcoin_network: bitcoin::Network::Regtest,
+            key_name: "test_key_1",
+        })
+    };
+}
+
+// Internal shared init logic used both by init and post-upgrade hooks.
+fn init_upgrade(network: Network) {
+    let key_name = match network {
+        Network::Regtest => "dfx_test_key",
+        Network::Mainnet | Network::Testnet => "test_key_1",
+    };
+
+    let bitcoin_network = match network {
+        Network::Mainnet => bitcoin::Network::Bitcoin,
+        Network::Testnet => bitcoin::Network::Testnet,
+        Network::Regtest => bitcoin::Network::Regtest,
+    };
+
+    BTC_CONTEXT.with(|ctx| {
+        ctx.set(BitcoinContext {
+            network,
+            bitcoin_network,
+            key_name,
+        })
+    });
+}
+
+// Smart contract init hook.
+// Sets up the BitcoinContext based on the given IC Bitcoin network.
+#[init]
+pub fn init(network: Network) {
+    init_upgrade(network);
+}
+
+// Post-upgrade hook.
+// Reinitializes the BitcoinContext with the same logic as `init`.
+#[post_upgrade]
+fn upgrade(network: Network) {
+    init_upgrade(network);
+}
+
+/// Input structure for sending Bitcoin.
+/// Used across P2PKH, P2WPKH, and P2TR transfer endpoints.
+#[derive(candid::CandidType, candid::Deserialize)]
+pub struct SendRequest {
+    pub destination_address: String,
+    pub amount_in_satoshi: u64,
+}
 
 // This generates the cklightning.did file
 // candid-extractor target/wasm32-unknown-unknown/release/cklightning.wasm > cklightning.did
