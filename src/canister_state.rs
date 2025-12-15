@@ -11,16 +11,19 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
+use crate::BtcPurpose;
 use crate::btc::address::get_balance;
+use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
-use crate::btc::common::DerivationPath;
 use crate::btc::common::PrimaryOutput;
 use crate::btc::common::get_fee_per_byte;
 use crate::btc::p2pkh;
-use crate::btc::p2tr;
 use crate::btc::p2wpkh;
 use crate::error::{BtcError, CklError, ResultBtc};
+use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::PoolAsset;
+use crate::ic_types::SetLiquidityBtcAddressResponse;
+use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
@@ -30,9 +33,16 @@ use crate::ic_types::{
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
-use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{Address, CompressedPublicKey, hashes::Hash};
+use bitcoin::TapNodeHash;
+// use bitcoin::secp256k1::Secp256k1;
+// use bitcoin::secp256k1::SecretKey;
+use lightning_invoice::Currency;
+use secp256k1::Secp256k1;
+use secp256k1::SecretKey;
+
+use bitcoin::{Address, CompressedPublicKey};
 use bitcoin::{PublicKey, XOnlyPublicKey, consensus::serialize};
+use bitcoin_hashes::{Hash, sha256};
 use candid::Encode;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
@@ -51,14 +61,16 @@ use k256::ecdsa::VerifyingKey;
 use k256::ecdsa::signature::Verifier;
 use k256::pkcs8::DecodePublicKey;
 use k256::sha2::{Digest, Sha256};
-use std::str::FromStr;
+use lightning::ln::PaymentSecret;
+use lightning_invoice::Invoice;
+use lightning_invoice::InvoiceBuilder;
 
 use crate::error::ResultCkl;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
-use crate::require;
-
 use crate::receiver;
+use crate::require;
 use candid::{Nat, Principal};
+use std::str::FromStr;
 
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -78,13 +90,64 @@ pub struct CanisterState<Q>
 where
     Q: receiver::TXQuerier,
 {
-    own_principal: Principal,
-    own_btc_address: Option<String>,
-    own_btc_addresses: HashMap<BtcAddressType, String>,
+    principal: Principal,
+
+    // Multiple liquidity depositor addresses
+    btc_liquidity_addresses: HashMap<Principal, String>,
+
+    // SINGLE global invoice deposit address
+    btc_invoice_address: Option<String>,
+
     icrc_receiver: receiver::Receiver<Q>,
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
     liq_pool: LiquidityPool,
+}
+
+// pub struct CanisterState<Q>
+// where
+//     Q: receiver::TXQuerier,
+// {
+//     principal: Principal,
+//     btc_addresses_liquidity: Option<String>,
+//     btc_address_lightning: Option<String>,
+//     own_btc_addresses: HashMap<BtcAddressType, String>,
+//     icrc_receiver: receiver::Receiver<Q>,
+//     user_holdings: HashMap<Funding, Amount>,
+//     channels: HashMap<ChannelId, RegisteredState>,
+//     liq_pool: LiquidityPool,
+// }
+
+pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressResponse, BtcError> {
+    let depositor = msg_caller(); // IC principal of the caller
+
+    // First check state
+    {
+        let state = STATE.read().unwrap();
+        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+            return Ok(SetLiquidityBtcAddressResponse {
+                address: addr.clone(),
+                already_existed: true,
+            });
+        }
+    }
+
+    // Derive new SegWit address for this depositor
+    let purpose = BtcPurpose::LiquidityDepositor(depositor);
+    let address = get_segwit_address(purpose).await?;
+
+    // Store in state
+    {
+        let mut state = STATE.write().unwrap();
+        state
+            .btc_liquidity_addresses
+            .insert(depositor, address.clone());
+    }
+
+    Ok(SetLiquidityBtcAddressResponse {
+        address,
+        already_existed: false,
+    })
 }
 
 // This function is called inside canister_state.rs and delegates BTC-context logic to btc/calls.rs
@@ -134,11 +197,12 @@ pub async fn send_btc_tx_impl(
             (address, pubkey)
         }
         BtcAddressType::P2TR => {
-            let pubkey = PublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
-            let xonly = XOnlyPublicKey::from(pubkey.inner);
-            let address = Address::p2tr(&Secp256k1::new(), xonly, None, ctx.bitcoin_network);
-            (address, pubkey)
+            todo!()
+            // let pubkey = PublicKey::from_slice(&public_key_bytes)
+            //     .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+            // let xonly = XOnlyPublicKey::from(pubkey.inner);
+            // let address = Address::p2tr(&Secp256k1::new(), xonly, None, ctx.bitcoin_network);
+            // (address, pubkey)
         }
     };
 
@@ -225,50 +289,7 @@ pub async fn send_btc_tx_impl(
             signed_tx.compute_txid().to_string()
         }
         BtcAddressType::P2TR => {
-            // Build transaction (Key path only taproot)
-            let (transaction, prevouts) = p2tr::build_transaction(
-                &ctx,
-                &own_address,
-                &own_utxos,
-                p2tr::SelectUtxosMode::Greedy,
-                &PrimaryOutput::Address(dst_address, amount_in_satoshi),
-                fee_per_byte,
-            )
-            .await;
-
-            // Internal key path (matches derivation of the address)
-            let internal_key_path = DerivationPath::p2tr(0, 0);
-            let internal_key_bytes = crate::btc::schnorr::get_schnorr_public_key(
-                &ctx,
-                internal_key_path.to_vec_u8_path(),
-            )
-            .await;
-
-            let taproot_spend_info = p2tr::create_taproot_spend_info(&internal_key_bytes, &[]);
-
-            // Sign transaction
-            let signed_tx = p2tr::sign_transaction_key_spend(
-                &ctx,
-                &own_address,
-                transaction,
-                prevouts.as_slice(),
-                internal_key_path.to_vec_u8_path(),
-                taproot_spend_info
-                    .merkle_root()
-                    .map(|r| r.to_byte_array().to_vec())
-                    .unwrap_or_default(),
-                crate::btc::schnorr::sign_with_schnorr,
-            )
-            .await;
-
-            bitcoin_send_transaction(&SendTransactionRequest {
-                network: ctx.network,
-                transaction: serialize(&signed_tx),
-            })
-            .await
-            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
-
-            signed_tx.compute_txid().to_string()
+            todo!()
         }
     };
 
@@ -280,9 +301,14 @@ pub async fn set_btc_address_impl(
 ) -> Result<SetBtcAddressResponse, BtcError> {
     let mut state = STATE.write().unwrap();
     let address_type = set_btc_address_args.address_type;
+    let principal = msg_caller();
+
+    assert!(principal == set_btc_address_args.principal.unwrap());
+
+    assert!(!state.btc_liquidity_addresses.contains_key(&principal));
 
     // Check if address for this type exists
-    if let Some(address) = state.own_btc_addresses.get(&address_type) {
+    if let Some(address) = state.btc_liquidity_addresses.get(&principal) {
         return Ok(SetBtcAddressResponse {
             address: address.clone(),
             msg: SetBtcAddressMsg::BtcAddressAlreadySetSingle(address_type),
@@ -298,8 +324,8 @@ pub async fn set_btc_address_impl(
 
     // Store in the map
     state
-        .own_btc_addresses
-        .insert(address_type.clone(), address.clone());
+        .btc_liquidity_addresses
+        .insert(principal.clone(), address.clone());
 
     Ok(SetBtcAddressResponse {
         address,
@@ -312,10 +338,10 @@ pub async fn get_btc_balances_impl(
 ) -> Result<GetBtcBalancesResponse, BtcError> {
     let state = STATE.read().unwrap();
 
-    let mut balances: HashMap<BtcAddressType, Option<u64>> = HashMap::new();
+    let mut balances: HashMap<Principal, Option<u64>> = HashMap::new();
     let mut any_address_set = false;
 
-    for (address_type, address) in &state.own_btc_addresses {
+    for (address_type, address) in &state.btc_liquidity_addresses {
         any_address_set = true;
 
         // Construct GetBtcBalanceArgs with actual address string, not address_type
@@ -342,24 +368,278 @@ pub async fn get_btc_balances_impl(
     Ok(GetBtcBalancesResponse { balances, msg })
 }
 
-pub async fn query_btc_address_impl() -> Result<QueryBtcAddressResponse, BtcError> {
-    let state = STATE.read().unwrap();
-    let addresses_map = state.own_btc_addresses.clone();
+// pub async fn get_ln_invoice_nocandid_impl(
+//     request: LnInvoiceRequest,
+// ) -> std::result::Result<Invoice, BtcError> {
+//     // 1. Verify caller matches principal
+//     let caller = msg_caller();
+//     if caller != request.caller_principal {
+//         return Err(BtcError::Other("Principal mismatch".to_string()));
+//     }
 
-    if addresses_map.is_empty() {
-        // No addresses set, respond with None
-        Ok(QueryBtcAddressResponse {
-            msg: SetBtcAddressMsg::BtcAddressNotSet,
-            addresses: None,
-        })
-    } else {
-        // Return all stored addresses in Some(HashMap)
-        Ok(QueryBtcAddressResponse {
-            msg: SetBtcAddressMsg::BtcAddressesAvailable,
-            addresses: Some(addresses_map),
-        })
+//     // 2. Verify btc_address matches expected deposit address
+//     let purpose = BtcPurpose::LiquidityDepositor(caller);
+//     let expected_deposit_addr = get_segwit_address(purpose).await?;
+//     if request.btc_address != expected_deposit_addr {
+//         return Err(BtcError::Other("BTC address mismatch".to_string()));
+//     }
+
+//     // 3. Payment hash: hash(principal || amount || time)
+//     let mut hash_input = caller.as_slice().to_vec();
+//     hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
+//     hash_input.extend_from_slice(&blocktime().to_be_bytes());
+//     let payment_hash = sha256::Hash::hash(&hash_input);
+
+//     // 4. Payment secret: deterministic from principal + amount + time
+//     let mut secret_input = caller.as_slice().to_vec();
+//     secret_input.extend_from_slice(&request.amount_msat.to_be_bytes());
+//     secret_input.extend_from_slice(&blocktime().to_be_bytes());
+//     secret_input.extend_from_slice(b"ln_payment_secret");
+
+//     let hash_result = sha256::Hash::hash(&secret_input);
+//     let payment_secret_bytes = hash_result.into_inner();
+
+//     let payment_secret = PaymentSecret(payment_secret_bytes); // ✅ Fixed tuple syntax
+
+//     // 5. Timestamp from blocktime
+//     let now_secs = blocktime();
+//     let timestamp = std::time::Duration::from_secs(now_secs);
+
+//     // 6. Build and sign invoice directly
+//     let secp_ctx = Secp256k1::new();
+//     // Use a canister-specific signing key (replace with your actual key management)
+//     let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: Use proper key management
+
+//     let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
+//         .description(format!("IC LN Invoice for principal: {}", caller).into())
+//         .payment_hash(payment_hash)
+//         .payment_secret(payment_secret)
+//         .duration_since_epoch(timestamp)
+//         .amount_milli_satoshis(request.amount_msat)
+//         .expiry_time(timestamp + std::time::Duration::from_secs(3600))
+//         .build_raw()
+//         .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
+
+//     let signed_invoice = raw_invoice
+//         .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
+//         .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
+
+//     let invoice = Invoice::from_signed(signed_invoice)
+//         .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
+
+//     Ok(invoice)
+// }
+
+// pub async fn get_ln_invoice_impl(
+//     request: LnInvoiceRequest,
+// ) -> std::result::Result<CandidInvoice, BtcError> {
+//     // 1. Verify caller matches principal
+//     let caller = msg_caller();
+//     if caller != request.caller_principal {
+//         return Err(BtcError::Other("Principal mismatch".to_string()));
+//     }
+
+//     // 2. Verify btc_address matches expected deposit address
+//     let purpose = BtcPurpose::LiquidityDepositor(caller);
+//     let expected_deposit_addr = get_segwit_address(purpose).await?;
+//     if request.btc_address != expected_deposit_addr {
+//         return Err(BtcError::Other("BTC address mismatch".to_string()));
+//     }
+
+//     // 3. Payment hash: hash(principal || amount || time)
+//     let mut hash_input = caller.as_slice().to_vec();
+//     hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
+//     hash_input.extend_from_slice(&blocktime().to_be_bytes());
+
+//     let payment_hash = sha256::Hash::hash(&hash_input).into_inner().to_vec();
+
+//     // 4. Payment secret: fixed but can be changed to per-invoice later
+//     let payment_secret = sha256::Hash::hash(b"ln_payment_secret")
+//         .into_inner()
+//         .to_vec();
+
+//     // 5. Timestamp from your blocktime()
+//     let now_secs = blocktime();
+
+//     // 6. Expiry
+//     let expiry_secs = Some(3600_u64);
+
+//     // 7. Currency and placeholder channel_id
+//     let currency = "Bitcoin".to_string();
+//     let channel_id = vec![0u8; 32];
+
+//     // 8. Build unsigned CandidInvoice
+//     let candid_invoice = CandidInvoice {
+//         invoice: "".to_string(), // client will build real BOLT11
+//         amount_msat: Some(Nat::from(request.amount_msat)),
+//         payment_hash,
+//         payment_secret,
+//         timestamp: now_secs,
+//         expiry_secs,
+//         currency,
+//         channel_id,
+//     };
+
+//     Ok(candid_invoice)
+// }
+
+pub async fn get_ln_invoice_impl(
+    request: LnInvoiceRequest,
+) -> std::result::Result<SignedCandidInvoice, BtcError> {
+    // 1. Verify caller matches principal
+    let caller = msg_caller();
+    if caller != request.caller_principal {
+        return Err(BtcError::Other("Principal mismatch".to_string()));
     }
+
+    // 2. Verify btc_address matches expected deposit address
+    let purpose = BtcPurpose::LiquidityDepositor(caller);
+    let expected_deposit_addr = get_segwit_address(purpose).await?;
+    if request.btc_address != expected_deposit_addr {
+        return Err(BtcError::Other("BTC address mismatch".to_string()));
+    }
+
+    // 3. Payment hash: hash(principal || amount || time)
+    let mut hash_input = caller.as_slice().to_vec();
+    hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
+    hash_input.extend_from_slice(&blocktime().to_be_bytes());
+    let payment_hash = sha256::Hash::hash(&hash_input);
+
+    // 4. Payment secret: deterministic from principal + amount + time + salt
+    let mut secret_input = caller.as_slice().to_vec();
+    secret_input.extend_from_slice(&request.amount_msat.to_be_bytes());
+    secret_input.extend_from_slice(&blocktime().to_be_bytes());
+    secret_input.extend_from_slice(b"ln_payment_secret");
+    let payment_secret_bytes = sha256::Hash::hash(&secret_input).into_inner();
+    let payment_secret = PaymentSecret(payment_secret_bytes);
+
+    // 5. Timestamp from blocktime
+    let now_secs = blocktime();
+    let timestamp = std::time::Duration::from_secs(now_secs);
+
+    // 6. Build and SIGN real invoice (exactly like nocandid_impl)
+    let secp_ctx = Secp256k1::new();
+    let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: proper key mgmt
+
+    let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
+        .description(format!("IC LN Invoice for principal: {}", caller).into())
+        .payment_hash(payment_hash)
+        .payment_secret(payment_secret)
+        .duration_since_epoch(timestamp)
+        .amount_milli_satoshis(request.amount_msat)
+        .expiry_time(timestamp + std::time::Duration::from_secs(3600))
+        .build_raw()
+        .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
+
+    let signed_invoice = raw_invoice
+        .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
+        .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
+
+    let invoice = Invoice::from_signed(signed_invoice.clone())
+        .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
+
+    // 7. Extract signature from signed invoice for storage/verification
+    // let signature = signed_invoice.signature().serialize_compact(); //.to_bytes().to_vec(); // ✅ Real invoice signature
+    let (recovery_id, signature_bytes) = signed_invoice.signature().serialize_compact();
+    let mut signature_serialized = Vec::with_capacity(65);
+    signature_serialized.push(recovery_id.to_i32() as u8); // RecoveryId as single byte (0-3)
+    signature_serialized.extend_from_slice(&signature_bytes); // 64 signature bytes
+    // 8. Build SignedCandidInvoice with real signed data
+    let currency = "Bitcoin".to_string();
+    let channel_id = vec![0u8; 32];
+
+    let signed_candid_invoice = SignedCandidInvoice {
+        invoice: invoice.to_string(), // ✅ Real signed BOLT11
+        amount_msat: Some(Nat::from(request.amount_msat)),
+        payment_hash: payment_hash.into_inner().to_vec(),
+        payment_secret: payment_secret.0.to_vec(),
+        timestamp: now_secs,
+        expiry_secs: Some(3600_u64),
+        currency,
+        channel_id,
+        signature: signature_serialized, // ✅ Signature of REAL invoice
+    };
+
+    Ok(signed_candid_invoice)
 }
+
+pub async fn get_ln_invoice_deposit_address_impl() -> Result<String, BtcError> {
+    // Check global cache first
+    {
+        let state = STATE.read().unwrap();
+        if let Some(addr) = state.btc_invoice_address.as_ref() {
+            return Ok(addr.clone());
+        }
+    }
+
+    // Derive SINGLE invoice deposit address
+    let purpose = BtcPurpose::LnInvoiceDeposit;
+    let address = get_segwit_address(purpose).await?;
+
+    // Store globally
+    {
+        let mut state = STATE.write().unwrap();
+        state.btc_invoice_address = Some(address.clone());
+    }
+
+    Ok(address)
+}
+
+pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<String, BtcError> {
+    let depositor = msg_caller();
+
+    // 1. Fast path: return existing address if present
+    {
+        let state = STATE.read().unwrap();
+        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+            return Ok(addr.clone());
+        }
+    }
+
+    // 2. Derive new SegWit address for this depositor
+    let purpose = BtcPurpose::LiquidityDepositor(depositor);
+    let address = get_segwit_address(purpose).await?;
+
+    // 3. Store in state and return
+    {
+        let mut state = STATE.write().unwrap();
+        state
+            .btc_liquidity_addresses
+            .insert(depositor, address.clone());
+    }
+
+    Ok(address)
+}
+
+// pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<String, BtcError> {
+//     let depositor = msg_caller();
+//     let state = STATE.read().unwrap();
+//     match state.btc_liquidity_addresses.get(&depositor) {
+//         Some(addr) => Ok(addr.clone()),
+//         None => Err(BtcError::Other(
+//             "No liquidity BTC address set for caller".to_string(),
+//         )),
+//     }
+// }
+
+// pub async fn query_btc_address_impl() -> Result<QueryBtcAddressResponse, BtcError> {
+//     let state = STATE.read().unwrap();
+//     let addresses_map = state.btc_liquidity_addresses.clone();
+
+//     if addresses_map.is_empty() {
+//         // No addresses set, respond with None
+//         Ok(QueryBtcAddressResponse {
+//             msg: SetBtcAddressMsg::BtcAddressNotSet,
+//             addresses: None,
+//         })
+//     } else {
+//         // Return all stored addresses in Some(HashMap)
+//         Ok(QueryBtcAddressResponse {
+//             msg: SetBtcAddressMsg::BtcAddressesAvailable,
+//             addresses: Some(addresses_map),
+//         })
+//     }
+// }
 
 pub async fn transaction_notification_impl(
     notify_args: NotifyArgs,
@@ -439,9 +719,9 @@ where
         assert!(my_principal == canister_self());
 
         Self {
-            own_principal: canister_self(),
-            own_btc_address: None, // this will be initialized later by an authorized call
-            own_btc_addresses: HashMap::new(),
+            principal: canister_self(),
+            btc_liquidity_addresses: HashMap::new(), // multiple per depositor
+            btc_invoice_address: None,               // single global invoice address
             icrc_receiver: receiver::Receiver::new(q, my_principal),
             user_holdings: Default::default(),
             channels: Default::default(),
@@ -449,9 +729,9 @@ where
         }
     }
 
-    pub fn set_btc_address_impl(&mut self, address: String) -> () {
-        self.own_btc_address = Some(address);
-    }
+    // pub fn set_btc_address_impl(&mut self, address: String) -> () {
+    //     self.btc_liquidity_addresses = Some(address);
+    // }
 
     pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
         *self
@@ -783,6 +1063,7 @@ where
     /// in the canister.
     fn update_channel_holdings(&mut self, params: &Params, state: &State) {
         for (i, outcome) in state.allocation.iter().enumerate() {
+            // let amt = outcome.clone();
             self.user_holdings.insert(
                 Funding::new_channel(state.channel.clone(), params.participants[i].clone()),
                 outcome.clone(),

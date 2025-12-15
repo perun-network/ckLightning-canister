@@ -49,8 +49,8 @@ pub struct SetBtcAddressResponse {
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
 pub struct GetBtcBalancesResponse {
-    pub balances: HashMap<BtcAddressType, Option<u64>>, // None if address missing
-    pub msg: SetBtcAddressMsg, // Overall status, e.g. BtcAddressNotSet if none
+    pub balances: HashMap<Principal, Option<u64>>, // None if address missing
+    pub msg: SetBtcAddressMsg,                     // Overall status, e.g. BtcAddressNotSet if none
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
@@ -63,6 +63,36 @@ pub struct SendBtcTxResponse {
 pub struct QueryBtcAddressResponse {
     pub msg: SetBtcAddressMsg,
     pub addresses: Option<HashMap<BtcAddressType, String>>,
+}
+
+#[derive(CandidType, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum BtcPurpose {
+    LiquidityDepositor(Principal), // multiple: ["btc", "liq_deposit", principal]
+    LnInvoiceDeposit,              // SINGLE: ["btc", "ln_invoice"]
+}
+
+#[derive(CandidType, Deserialize)]
+pub struct LnInvoiceRequest {
+    pub caller_principal: Principal, // for derivation
+    pub btc_address: String,         // deposit address verification
+    pub amount_msat: u64,            // invoice amount
+}
+
+impl BtcPurpose {
+    pub fn derivation_path(&self) -> Vec<Vec<u8>> {
+        match self {
+            BtcPurpose::LiquidityDepositor(principal) => {
+                vec![
+                    b"btc".to_vec(),
+                    b"liq_deposit".to_vec(),
+                    principal.as_slice().to_vec(),
+                ]
+            }
+            BtcPurpose::LnInvoiceDeposit => {
+                vec![b"btc".to_vec(), b"ln_invoice".to_vec()]
+            }
+        }
+    }
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
@@ -79,6 +109,37 @@ pub enum SetBtcAddressMsg {
     BtcAddressSetNowSingle(BtcAddressType),
     BtcAddressSetFailedSingle(BtcAddressType),
     BtcAddressesAvailable, // New variant to indicate multiple addresses available
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, CandidType, Deserialize)]
+pub struct SetLiquidityBtcAddressResponse {
+    pub address: String,
+    pub already_existed: bool,
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CandidInvoice {
+    pub invoice: String, // bech32 BOLT11 string
+    pub amount_msat: Option<Nat>,
+    pub payment_hash: Vec<u8>,   // 32 bytes
+    pub payment_secret: Vec<u8>, // 32 bytes
+    pub timestamp: u64,
+    pub expiry_secs: Option<u64>,
+    pub currency: String,
+    pub channel_id: Vec<u8>, // 32 bytes from ChannelId
+}
+
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignedCandidInvoice {
+    pub invoice: String, // Signed BOLT11 string
+    pub amount_msat: Option<Nat>,
+    pub payment_hash: Vec<u8>,   // 32 bytes
+    pub payment_secret: Vec<u8>, // 32 bytes
+    pub timestamp: u64,
+    pub expiry_secs: Option<u64>,
+    pub currency: String,
+    pub channel_id: Vec<u8>, // 32 bytes
+    pub signature: Vec<u8>,  // ✅ NEW: Invoice signature bytes
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
@@ -101,7 +162,7 @@ pub enum SendBtcTxMsg {
 /// A hash as used by the signature scheme.
 pub struct Hash(pub digest::Output<Hasher>);
 
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
 pub enum Funding {
     Channel(ChannelFunding),
     Pool(PoolFunding),
@@ -138,7 +199,7 @@ pub enum PoolAsset {
     BTC,
 }
 
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
 /// Identifies the funds belonging to a certain layer 2 identity within a
 /// certain channel.
 pub struct ChannelFunding {
@@ -146,6 +207,7 @@ pub struct ChannelFunding {
     pub channel: ChannelId,
     /// The funds' owner's layer-2 identity within the channel.
     pub participant: L2Account,
+    // pub amount: Amount,
     // pub receiver: L1Account,
 }
 
@@ -158,7 +220,7 @@ pub struct NotifyArgs {
     pub funding: Funding,
 }
 
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
 pub struct PoolFunding {
     pub pubkey_l1: Vec<u8>,
     /// The layer-1 identity to send the funds to.
@@ -248,7 +310,7 @@ pub type Duration = u64;
 /// Timestamp in nanoseconds (same as ICP timestamps).
 pub type Timestamp = u64;
 /// Unique channel identifier.
-#[derive(PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
 pub struct ChannelId(pub [u8; 32]);
 
 impl Clone for ChannelId {
@@ -263,7 +325,7 @@ impl Default for ChannelId {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Deserialize, CandidType)]
+#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Deserialize, CandidType, Debug)]
 pub struct L1Account(pub Principal);
 
 /// A channel's unique nonce.
@@ -286,6 +348,46 @@ pub struct Params {
 }
 
 #[derive(Deserialize, CandidType, Default, Clone)]
+pub struct LiquidityPoolState {
+    pub total_ckbtc: Amount,
+    pub locked_ckbtc: Amount,
+    pub total_btc: Amount,
+    pub locked_btc: Amount,
+}
+#[derive(Deserialize, CandidType, Default, Clone)]
+pub enum WithdrawalState {
+    #[default]
+    Idle,
+    AwaitingConfirmations {
+        txid: String,
+        confirmations: u64,
+    },
+}
+#[derive(Deserialize, CandidType, Default, Clone)]
+pub enum DepositingState {
+    #[default]
+    Idle,
+    AwaitingConfirmations {
+        txid: String,
+        confirmations: u64,
+    },
+}
+
+#[derive(Deserialize, CandidType, Default, Clone)]
+pub struct CklChannelState {
+    pub depositing: DepositingState,
+    pub total_btc: Amount,
+}
+#[derive(Deserialize, CandidType, Default, Clone, Debug)]
+
+pub enum CklChannelAction {
+    #[default]
+    Idle,
+    Depositing,
+    Withdrawing,
+}
+
+#[derive(Deserialize, CandidType, Default, Clone, Debug)]
 /// The mutable parameters and state of a channel.
 pub struct State {
     /// The cannel's unique identifier.
@@ -299,9 +401,21 @@ pub struct State {
     /// funds can be withdrawn immediately. A non-finalized channel has to be
     /// finalized via the canister after the channel's challenge duration
     /// elapses.
+    pub remote_id: Option<L2Account>,
+    pub action: CklChannelAction,
     // pub l1_accounts: Vec<L1Account>,
     pub finalized: bool,
     // shows the phase the channel is in
+}
+
+impl State {
+    pub fn get_channelid(&self) -> ChannelId {
+        self.channel.clone()
+    }
+
+    pub fn get_action(&self) -> CklChannelAction {
+        self.action.clone()
+    }
 }
 
 #[derive(Clone, Deserialize, CandidType)]
@@ -482,57 +596,6 @@ impl CandidType for L2Account {
     }
 }
 
-// impl<'de> Deserialize<'de> for ChannelId {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: Deserializer<'de>,
-//     {
-//         let bytes = Vec::<u8>::deserialize(deserializer)?;
-//         // require!(bytes.len() == 32, D::Error::invalid_length(bytes.len(), &"32-byte ChannelId"));
-//         let mut arr = [0u8; 32];
-//         arr.copy_from_slice(&bytes[..32]);
-//         Ok(ChannelId(arr))
-//     }
-// }
-
-// impl Default for L2Account {
-//     fn default() -> Self {
-//         // Create a random secret key
-//         let secp = Secp256k1::new();
-//         let mut rng = thread_rng();
-//         let (secret_key, public_key) = secp.generate_keypair(&mut rng);
-//         let secret_key = SecpSecretKey::new(&mut rng);
-//         let public_key = SecpPublicKey::from_secret_key(&secp, &secret_key);
-//         L2Account(public_key)
-//     }
-// }
-
-// impl<'de> Deserialize<'de> for L2Account {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: Deserializer<'de>,
-//     {
-//         let bytes = ByteBuf::deserialize(deserializer)?;
-//         let pk = SecpPublicKey::from_slice(bytes.as_slice())
-//             .ok()
-//             .ok_or(D::Error::invalid_length(bytes.len(), &"public key"))?;
-//         Ok(L2Account(pk))
-//     }
-// }
-
-// impl CandidType for L2Account {
-//     fn _ty() -> Type {
-//         Type::from(TypeInner::Vec(Type::from(TypeInner::Nat8)))
-//     }
-
-//     fn idl_serialize<S>(&self, serializer: S) -> core::result::Result<(), S::Error>
-//     where
-//         S: Serializer,
-//     {
-//         serializer.serialize_blob(&self.0.serialize())
-//     }
-// }
-
 impl CandidType for ChannelId {
     fn _ty() -> Type {
         Type::from(TypeInner::Vec(Type::from(TypeInner::Nat8)))
@@ -629,6 +692,7 @@ impl RegisteredState {
 impl Funding {
     pub fn new_channel(channel: ChannelId, participant: L2Account) -> Self {
         Funding::Channel(ChannelFunding {
+            // amount,
             channel,
             participant,
         })

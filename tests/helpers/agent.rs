@@ -376,6 +376,10 @@ impl ICAgent {
             confirmations,
         };
 
+        let own_prince = self.agent.get_principal().map_err(|e| {
+            Box::<dyn std::error::Error>::from(format!("Get principal failed: {}", e))
+        })?;
+
         let resp = self
             .agent
             .update(&can_ckl_id, "get_btc_balance")
@@ -392,21 +396,11 @@ impl ICAgent {
         let decoded_response = Decode!(&resp, std::result::Result<GetBtcBalancesResponse, BtcError> ) //std::result::Result<SetBtcAddressResponse, BtcError>
             .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
 
-        // // Extract the String address field (adjust field name):
-        // // let msg_string = decoded_response.unwrap().msg;
         let response = decoded_response.unwrap();
-        // // Now response is SetBtcAddressResponse
-        // let address_string = response.address;
-        // let msg = response.msg;
-
-        // println!(
-        //     "Decoded Response: address = {}, msg = {:?}",
-        //     address_string, msg
-        // );
 
         Ok(response
             .balances
-            .get(&BtcAddressType::P2WPKH)
+            .get(&own_prince)
             .unwrap_or(&None)
             .unwrap_or(0)
             .clone())
