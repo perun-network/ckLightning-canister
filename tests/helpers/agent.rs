@@ -26,6 +26,7 @@ use cklightning::ic_types::{
     PoolWithdrawal, SendBtcTxArgs, SendBtcTxMsg, SendFromP2pkhAddressArgs, SetBtcAddressArgs,
     SetBtcAddressResponse, WithdrawalLPArgs,
 };
+use cklightning::ic_types::{LnInvoiceRequest, SignedCandidInvoice};
 use cklightning::receiver::ICPReceiverError;
 use cklightning::receiver::TransactionICRCNotification;
 use digest::{FixedOutput, Update};
@@ -630,11 +631,10 @@ impl ICAgent {
 
     pub async fn req_ln_invoice(
         &self,
-        amount: u64,
-        memo: String,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+        invoice_req: LnInvoiceRequest,
+    ) -> Result<SignedCandidInvoice, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
-
+        let args = invoice_req.clone();
         self.agent
             .fetch_root_key()
             .await
@@ -642,12 +642,12 @@ impl ICAgent {
 
         let resp = self
             .agent
-            .update(&can_ckl_id, "request_invoice")
-            .with_arg(Encode!(&(amount, memo)).unwrap())
+            .update(&can_ckl_id, "query_ln_invoice")
+            .with_arg(Encode!(&args).unwrap())
             .call_and_wait()
             .await?;
 
-        let invoice = Decode!(&resp, String).unwrap();
+        let invoice = Decode!(&resp, SignedCandidInvoice).unwrap();
         Ok(invoice)
     }
 

@@ -368,121 +368,6 @@ pub async fn get_btc_balances_impl(
     Ok(GetBtcBalancesResponse { balances, msg })
 }
 
-// pub async fn get_ln_invoice_nocandid_impl(
-//     request: LnInvoiceRequest,
-// ) -> std::result::Result<Invoice, BtcError> {
-//     // 1. Verify caller matches principal
-//     let caller = msg_caller();
-//     if caller != request.caller_principal {
-//         return Err(BtcError::Other("Principal mismatch".to_string()));
-//     }
-
-//     // 2. Verify btc_address matches expected deposit address
-//     let purpose = BtcPurpose::LiquidityDepositor(caller);
-//     let expected_deposit_addr = get_segwit_address(purpose).await?;
-//     if request.btc_address != expected_deposit_addr {
-//         return Err(BtcError::Other("BTC address mismatch".to_string()));
-//     }
-
-//     // 3. Payment hash: hash(principal || amount || time)
-//     let mut hash_input = caller.as_slice().to_vec();
-//     hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
-//     hash_input.extend_from_slice(&blocktime().to_be_bytes());
-//     let payment_hash = sha256::Hash::hash(&hash_input);
-
-//     // 4. Payment secret: deterministic from principal + amount + time
-//     let mut secret_input = caller.as_slice().to_vec();
-//     secret_input.extend_from_slice(&request.amount_msat.to_be_bytes());
-//     secret_input.extend_from_slice(&blocktime().to_be_bytes());
-//     secret_input.extend_from_slice(b"ln_payment_secret");
-
-//     let hash_result = sha256::Hash::hash(&secret_input);
-//     let payment_secret_bytes = hash_result.into_inner();
-
-//     let payment_secret = PaymentSecret(payment_secret_bytes); // ✅ Fixed tuple syntax
-
-//     // 5. Timestamp from blocktime
-//     let now_secs = blocktime();
-//     let timestamp = std::time::Duration::from_secs(now_secs);
-
-//     // 6. Build and sign invoice directly
-//     let secp_ctx = Secp256k1::new();
-//     // Use a canister-specific signing key (replace with your actual key management)
-//     let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: Use proper key management
-
-//     let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
-//         .description(format!("IC LN Invoice for principal: {}", caller).into())
-//         .payment_hash(payment_hash)
-//         .payment_secret(payment_secret)
-//         .duration_since_epoch(timestamp)
-//         .amount_milli_satoshis(request.amount_msat)
-//         .expiry_time(timestamp + std::time::Duration::from_secs(3600))
-//         .build_raw()
-//         .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
-
-//     let signed_invoice = raw_invoice
-//         .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
-//         .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
-
-//     let invoice = Invoice::from_signed(signed_invoice)
-//         .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
-
-//     Ok(invoice)
-// }
-
-// pub async fn get_ln_invoice_impl(
-//     request: LnInvoiceRequest,
-// ) -> std::result::Result<CandidInvoice, BtcError> {
-//     // 1. Verify caller matches principal
-//     let caller = msg_caller();
-//     if caller != request.caller_principal {
-//         return Err(BtcError::Other("Principal mismatch".to_string()));
-//     }
-
-//     // 2. Verify btc_address matches expected deposit address
-//     let purpose = BtcPurpose::LiquidityDepositor(caller);
-//     let expected_deposit_addr = get_segwit_address(purpose).await?;
-//     if request.btc_address != expected_deposit_addr {
-//         return Err(BtcError::Other("BTC address mismatch".to_string()));
-//     }
-
-//     // 3. Payment hash: hash(principal || amount || time)
-//     let mut hash_input = caller.as_slice().to_vec();
-//     hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
-//     hash_input.extend_from_slice(&blocktime().to_be_bytes());
-
-//     let payment_hash = sha256::Hash::hash(&hash_input).into_inner().to_vec();
-
-//     // 4. Payment secret: fixed but can be changed to per-invoice later
-//     let payment_secret = sha256::Hash::hash(b"ln_payment_secret")
-//         .into_inner()
-//         .to_vec();
-
-//     // 5. Timestamp from your blocktime()
-//     let now_secs = blocktime();
-
-//     // 6. Expiry
-//     let expiry_secs = Some(3600_u64);
-
-//     // 7. Currency and placeholder channel_id
-//     let currency = "Bitcoin".to_string();
-//     let channel_id = vec![0u8; 32];
-
-//     // 8. Build unsigned CandidInvoice
-//     let candid_invoice = CandidInvoice {
-//         invoice: "".to_string(), // client will build real BOLT11
-//         amount_msat: Some(Nat::from(request.amount_msat)),
-//         payment_hash,
-//         payment_secret,
-//         timestamp: now_secs,
-//         expiry_secs,
-//         currency,
-//         channel_id,
-//     };
-
-//     Ok(candid_invoice)
-// }
-
 pub async fn get_ln_invoice_impl(
     request: LnInvoiceRequest,
 ) -> std::result::Result<SignedCandidInvoice, BtcError> {
@@ -493,7 +378,7 @@ pub async fn get_ln_invoice_impl(
     }
 
     // 2. Verify btc_address matches expected deposit address
-    let purpose = BtcPurpose::LiquidityDepositor(caller);
+    let purpose = BtcPurpose::LnInvoiceDeposit; //LiquidityDepositor(caller);
     let expected_deposit_addr = get_segwit_address(purpose).await?;
     if request.btc_address != expected_deposit_addr {
         return Err(BtcError::Other("BTC address mismatch".to_string()));
@@ -514,8 +399,10 @@ pub async fn get_ln_invoice_impl(
     let payment_secret = PaymentSecret(payment_secret_bytes);
 
     // 5. Timestamp from blocktime
-    let now_secs = blocktime();
-    let timestamp = std::time::Duration::from_secs(now_secs);
+
+    let now_nanos = blocktime();
+    let now_secs = (now_nanos / 1_000_000_000) as u64; // Truncate to seconds
+    let timestamp_duration = std::time::Duration::from_secs(now_secs); // For InvoiceBuilder
 
     // 6. Build and SIGN real invoice (exactly like nocandid_impl)
     let secp_ctx = Secp256k1::new();
@@ -525,9 +412,9 @@ pub async fn get_ln_invoice_impl(
         .description(format!("IC LN Invoice for principal: {}", caller).into())
         .payment_hash(payment_hash)
         .payment_secret(payment_secret)
-        .duration_since_epoch(timestamp)
+        .duration_since_epoch(timestamp_duration)
         .amount_milli_satoshis(request.amount_msat)
-        .expiry_time(timestamp + std::time::Duration::from_secs(3600))
+        .expiry_time(timestamp_duration + std::time::Duration::from_secs(3600))
         .build_raw()
         .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
 
@@ -563,7 +450,7 @@ pub async fn get_ln_invoice_impl(
     Ok(signed_candid_invoice)
 }
 
-pub async fn get_ln_invoice_deposit_address_impl() -> Result<String, BtcError> {
+pub async fn get_ln_address_impl() -> Result<String, BtcError> {
     // Check global cache first
     {
         let state = STATE.read().unwrap();

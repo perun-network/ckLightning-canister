@@ -71,7 +71,7 @@ pub enum BtcPurpose {
     LnInvoiceDeposit,              // SINGLE: ["btc", "ln_invoice"]
 }
 
-#[derive(CandidType, Deserialize)]
+#[derive(CandidType, Deserialize, Clone)]
 pub struct LnInvoiceRequest {
     pub caller_principal: Principal, // for derivation
     pub btc_address: String,         // deposit address verification

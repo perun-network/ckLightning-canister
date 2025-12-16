@@ -13,19 +13,10 @@
 //  limitations under the License.
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
-    deposit_channel_impl,
-    deposit_lp_impl,
-    get_btc_balances_impl,
-    get_btc_liquidity_address_for_caller_impl,
-    get_ln_invoice_deposit_address_impl,
-    get_ln_invoice_impl, //query_btc_address_impl,
-    query_state_impl,
-    query_user_lp_holdings_impl,
-    send_btc_tx_impl,
-    set_btc_address_impl,
-    transaction_notification_impl,
-    trigger_withdraw_impl,
-    withdraw_lp_impl,
+    deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
+    get_btc_liquidity_address_for_caller_impl, get_ln_address_impl, get_ln_invoice_impl,
+    query_state_impl, query_user_lp_holdings_impl, send_btc_tx_impl, set_btc_address_impl,
+    transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
@@ -55,13 +46,13 @@ async fn send_btc_tx(args: SendBtcTxArgs) -> std::result::Result<SendBtcTxMsg, B
     send_btc_tx_impl(recipient, from_address_type, amount).await
 }
 
-#[query]
+#[update]
 #[candid_method(update)]
-async fn query_ln_address() -> std::result::Result<String, BtcError> {
-    get_ln_invoice_deposit_address_impl().await
+async fn get_ln_address() -> std::result::Result<String, BtcError> {
+    get_ln_address_impl().await
 }
 
-#[query]
+#[update]
 #[candid_method(update)]
 async fn query_ln_invoice(
     invoice_req: LnInvoiceRequest,
