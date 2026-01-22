@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -27,22 +27,23 @@ use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
-    NotifyArgs, PoolWithdrawal, QueryBtcAddressResponse, RegisteredState, SendBtcTxMsg,
-    SetBtcAddressArgs, SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    NotifyArgs, PoolWithdrawal, RegisteredState, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressMsg,
+    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+};
+use crate::ic_types::{
+    CompleteSwapRequest, CompleteSwapResponse, RegisterSwapRequest, RegisterSwapResponse,
+    SwapInfo, SwapState,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
-use bitcoin::TapNodeHash;
-// use bitcoin::secp256k1::Secp256k1;
-// use bitcoin::secp256k1::SecretKey;
 use lightning_invoice::Currency;
-use secp256k1::Secp256k1;
-use secp256k1::SecretKey;
+use lightning_invoice::PaymentSecret;
 
+use bitcoin::hashes::{Hash, sha256};
+use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::{Address, CompressedPublicKey};
 use bitcoin::{PublicKey, XOnlyPublicKey, consensus::serialize};
-use bitcoin_hashes::{Hash, sha256};
 use candid::Encode;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
@@ -61,8 +62,7 @@ use k256::ecdsa::VerifyingKey;
 use k256::ecdsa::signature::Verifier;
 use k256::pkcs8::DecodePublicKey;
 use k256::sha2::{Digest, Sha256};
-use lightning::ln::PaymentSecret;
-use lightning_invoice::Invoice;
+use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::InvoiceBuilder;
 
 use crate::error::ResultCkl;
@@ -102,6 +102,9 @@ where
     user_holdings: HashMap<Funding, Amount>,
     channels: HashMap<ChannelId, RegisteredState>,
     liq_pool: LiquidityPool,
+
+    // Lightning → ckBTC swaps storage (payment_hash -> SwapInfo)
+    swaps: HashMap<[u8; 32], SwapInfo>,
 }
 
 // pub struct CanisterState<Q>
@@ -395,7 +398,7 @@ pub async fn get_ln_invoice_impl(
     secret_input.extend_from_slice(&request.amount_msat.to_be_bytes());
     secret_input.extend_from_slice(&blocktime().to_be_bytes());
     secret_input.extend_from_slice(b"ln_payment_secret");
-    let payment_secret_bytes = sha256::Hash::hash(&secret_input).into_inner();
+    let payment_secret_bytes = sha256::Hash::hash(&secret_input).to_byte_array();
     let payment_secret = PaymentSecret(payment_secret_bytes);
 
     // 5. Timestamp from blocktime
@@ -409,7 +412,7 @@ pub async fn get_ln_invoice_impl(
     let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: proper key mgmt
 
     let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
-        .description(format!("IC LN Invoice for principal: {}", caller).into())
+        .description(format!("ckBTC_SWAP:{}", caller).into())
         .payment_hash(payment_hash)
         .payment_secret(payment_secret)
         .duration_since_epoch(timestamp_duration)
@@ -422,7 +425,7 @@ pub async fn get_ln_invoice_impl(
         .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
         .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
 
-    let invoice = Invoice::from_signed(signed_invoice.clone())
+    let invoice = Bolt11Invoice::from_signed(signed_invoice.clone())
         .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
 
     // 7. Extract signature from signed invoice for storage/verification
@@ -438,7 +441,7 @@ pub async fn get_ln_invoice_impl(
     let signed_candid_invoice = SignedCandidInvoice {
         invoice: invoice.to_string(), // ✅ Real signed BOLT11
         amount_msat: Some(Nat::from(request.amount_msat)),
-        payment_hash: payment_hash.into_inner().to_vec(),
+        payment_hash: payment_hash.to_byte_array().to_vec(),
         payment_secret: payment_secret.0.to_vec(),
         timestamp: now_secs,
         expiry_secs: Some(3600_u64),
@@ -613,6 +616,7 @@ where
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool: LiquidityPool::new(),
+            swaps: HashMap::new(), // Lightning → ckBTC swaps
         }
     }
 
@@ -1074,5 +1078,228 @@ pub async fn execute_ledger_transfer(
             Err(_e) => Err(CklError::LedgerError),
         },
         Err((_code, _msg)) => Err(CklError::LedgerError),
+    }
+}
+
+// =============================================================================
+// Lightning → ckBTC Swap Implementation
+// =============================================================================
+
+/// Register a new Lightning → ckBTC swap
+///
+/// Called by the relay node when an invoice is created with an IC principal.
+/// Stores the swap info so it can be verified and completed later.
+pub fn register_swap_impl(request: RegisterSwapRequest) -> RegisterSwapResponse {
+    // Validate payment_hash length
+    if request.payment_hash.len() != 32 {
+        return RegisterSwapResponse {
+            success: false,
+            error: Some("Invalid payment_hash length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    // Convert to fixed array
+    let mut payment_hash_arr = [0u8; 32];
+    payment_hash_arr.copy_from_slice(&request.payment_hash);
+
+    // Check if swap already exists
+    {
+        let state = STATE.read().unwrap();
+        if state.swaps.contains_key(&payment_hash_arr) {
+            return RegisterSwapResponse {
+                success: false,
+                error: Some("Swap with this payment_hash already exists".to_string()),
+            };
+        }
+    }
+
+    // Create swap info
+    let swap_info = SwapInfo {
+        payment_hash: request.payment_hash.clone(),
+        amount_msat: request.amount_msat,
+        recipient: request.recipient,
+        created_at: blocktime(),
+        expiry_timestamp: request.expiry_timestamp,
+        state: SwapState::Pending,
+    };
+
+    // Store swap
+    {
+        let mut state = STATE.write().unwrap();
+        state.swaps.insert(payment_hash_arr, swap_info);
+    }
+
+    RegisterSwapResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Complete a Lightning → ckBTC swap
+///
+/// Called by the relay node when a Lightning payment is received.
+/// Verifies the preimage, then transfers ckBTC to the recipient.
+pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapResponse {
+    // Validate lengths
+    if request.payment_hash.len() != 32 {
+        return CompleteSwapResponse {
+            success: false,
+            block_index: None,
+            error: Some("Invalid payment_hash length".to_string()),
+        };
+    }
+    if request.preimage.len() != 32 {
+        return CompleteSwapResponse {
+            success: false,
+            block_index: None,
+            error: Some("Invalid preimage length".to_string()),
+        };
+    }
+
+    // Verify preimage matches payment_hash
+    let computed_hash = sha256::Hash::hash(&request.preimage);
+    if computed_hash.as_byte_array() != request.payment_hash.as_slice() {
+        return CompleteSwapResponse {
+            success: false,
+            block_index: None,
+            error: Some("Preimage does not match payment_hash".to_string()),
+        };
+    }
+
+    let mut payment_hash_arr = [0u8; 32];
+    payment_hash_arr.copy_from_slice(&request.payment_hash);
+
+    // Get swap info and verify state
+    let swap_info = {
+        let state = STATE.read().unwrap();
+        match state.swaps.get(&payment_hash_arr) {
+            Some(info) => info.clone(),
+            None => {
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some("Swap not found for this payment_hash".to_string()),
+                };
+            }
+        }
+    };
+
+    // Check swap state
+    match &swap_info.state {
+        SwapState::Pending => {} // OK to proceed
+        SwapState::Completed { .. } => {
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some("Swap already completed".to_string()),
+            };
+        }
+        SwapState::Expired => {
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some("Swap has expired".to_string()),
+            };
+        }
+        SwapState::Failed { reason } => {
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some(format!("Swap failed: {}", reason)),
+            };
+        }
+    }
+
+    // Convert amount from millisatoshis to satoshis
+    let amount_sat = swap_info.amount_msat / 1000;
+    if amount_sat == 0 {
+        // Mark as failed
+        {
+            let mut state = STATE.write().unwrap();
+            if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                swap.state = SwapState::Failed {
+                    reason: "Amount too small".to_string(),
+                };
+            }
+        }
+        return CompleteSwapResponse {
+            success: false,
+            block_index: None,
+            error: Some("Amount too small (< 1000 msat)".to_string()),
+        };
+    }
+
+    // Execute ckBTC transfer
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: swap_info.recipient,
+            subaccount: None,
+        },
+        amount: Nat(amount_sat.into()),
+        fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(
+            request.payment_hash.clone(),
+        )),
+        created_at_time: None,
+    };
+
+    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+    let call_result: CallResult<(
+        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => {
+                // Mark swap as completed
+                {
+                    let mut state = STATE.write().unwrap();
+                    if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                        swap.state = SwapState::Completed {
+                            block_index: block_index.clone(),
+                        };
+                    }
+                }
+                CompleteSwapResponse {
+                    success: true,
+                    block_index: Some(block_index),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                // Mark as failed
+                {
+                    let mut state = STATE.write().unwrap();
+                    if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                        swap.state = SwapState::Failed {
+                            reason: format!("Transfer error: {:?}", e),
+                        };
+                    }
+                }
+                CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            // Mark as failed
+            {
+                let mut state = STATE.write().unwrap();
+                if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                    swap.state = SwapState::Failed {
+                        reason: format!("Call error: {:?} - {}", code, msg),
+                    };
+                }
+            }
+            CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+            }
+        }
     }
 }

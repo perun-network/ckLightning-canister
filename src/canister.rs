@@ -13,20 +13,21 @@
 //  limitations under the License.
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
-    deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
+    complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
     get_btc_liquidity_address_for_caller_impl, get_ln_address_impl, get_ln_invoice_impl,
-    query_state_impl, query_user_lp_holdings_impl, send_btc_tx_impl, set_btc_address_impl,
-    transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
+    query_state_impl, query_user_lp_holdings_impl, register_swap_impl, send_btc_tx_impl,
+    set_btc_address_impl, transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    BtcPurpose, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs,
-    GetBtcBalancesResponse, HoldingsResponse, NotifyArgs, QueryBtcAddressResponse, RegisteredState,
-    SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, WithdrawalLPArgs,
-    WithdrawalReq,
+    BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
+    DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
+    HoldingsResponse, NotifyArgs, QueryBtcAddressResponse, RegisterSwapRequest,
+    RegisterSwapResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
+    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -216,4 +217,28 @@ async fn simple_withdraw(req: WithdrawalReq) -> Nat {
 #[candid::candid_method]
 async fn trigger_withdraw(req: WithdrawalReq) -> Result<Nat, CklError> {
     trigger_withdraw_impl(req).await
+}
+
+// =============================================================================
+// Lightning → ckBTC Swap Endpoints
+// =============================================================================
+
+/// Register a new Lightning → ckBTC swap
+///
+/// Called by the relay node when an invoice is created with an IC principal.
+/// The relay stores the mapping: payment_hash → (amount, recipient)
+#[update]
+#[candid_method(update)]
+fn register_swap(request: RegisterSwapRequest) -> RegisterSwapResponse {
+    register_swap_impl(request)
+}
+
+/// Complete a Lightning → ckBTC swap after payment received
+///
+/// Called by the relay node when a Lightning payment is received and claimed.
+/// Verifies the preimage matches the payment_hash, then transfers ckBTC.
+#[update]
+#[candid_method(update)]
+async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
+    complete_swap_impl(request).await
 }

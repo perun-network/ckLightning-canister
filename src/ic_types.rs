@@ -481,6 +481,82 @@ pub enum BtcAddressType {
     P2TR, //Pay-to-Taproot. This address does not commit to a script path (it commits to an unspendable path per BIP-341)
 }
 
+// =============================================================================
+// Lightning Swap Types
+// =============================================================================
+
+/// State of a Lightning → ckBTC swap
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
+pub enum SwapState {
+    /// Swap registered, waiting for Lightning payment
+    Pending,
+    /// Lightning payment received, ckBTC transfer completed
+    Completed { block_index: Nat },
+    /// Swap expired (Lightning payment not received in time)
+    Expired,
+    /// Swap failed
+    Failed { reason: String },
+}
+
+/// Request to register a new Lightning → ckBTC swap
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterSwapRequest {
+    /// Payment hash from the Lightning invoice (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// IC Principal to receive ckBTC
+    pub recipient: Principal,
+    /// Expiry timestamp (Unix seconds)
+    pub expiry_timestamp: u64,
+}
+
+/// Response from registering a swap
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterSwapResponse {
+    /// Whether the swap was successfully registered
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Request to complete a swap after Lightning payment received
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CompleteSwapRequest {
+    /// Payment hash that was paid (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Payment preimage as proof (32 bytes)
+    pub preimage: Vec<u8>,
+}
+
+/// Response from completing a swap
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CompleteSwapResponse {
+    /// Whether the ckBTC transfer was successful
+    pub success: bool,
+    /// Block index of the ckBTC transfer (if successful)
+    pub block_index: Option<Nat>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Internal storage for swap information
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SwapInfo {
+    /// Payment hash (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// IC Principal to receive ckBTC
+    pub recipient: Principal,
+    /// When the swap was registered (Unix nanoseconds)
+    pub created_at: u64,
+    /// Expiry timestamp (Unix seconds)
+    pub expiry_timestamp: u64,
+    /// Current state of the swap
+    pub state: SwapState,
+}
+
 #[derive(Deserialize, CandidType, Clone)]
 pub struct SetBtcAddressArgs {
     pub principal: Option<Principal>,

@@ -152,7 +152,7 @@ dfx canister install btcledger --argument "$BTCLEDGER_INIT_ARG"
 dfx canister install index --argument "$INDEX_INIT_ARG"
 dfx canister install archive --argument "$ARCHIVE_INIT_ARG"
 dfx canister install mock_contract --argument "(principal \"${LEDGER_ID}\")"
-dfx canister install cklightning
+dfx canister install cklightning --argument '(variant { regtest })'
 dfx canister install basic_bitcoin --argument '(variant { regtest })'
 # dfx deploy basic_bitcoin --argument '(variant { regtest })'
 

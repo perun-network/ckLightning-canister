@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ pub mod canister_state;
 pub mod deq;
 pub mod error;
 pub mod events;
+pub mod htlc;
 pub mod ic_types;
 pub mod liquidity_pool;
 use crate::ic_types::ChannelFunding;
@@ -29,7 +30,8 @@ use crate::error::{BtcError, CklError};
 use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
-    BtcPurpose, ChannelId, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
+    BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
+    FundingLPQueryArgs, HoldingsResponse, NotifyArgs, RegisterSwapRequest, RegisterSwapResponse,
     RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
     SignedCandidInvoice, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
