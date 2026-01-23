@@ -106,10 +106,11 @@ LEDGER_INIT_ARG="(variant { Init = record {
 } })"
 
 # Prepare ckbtc ledger initialization argument
-BTCLEDGER_INIT_ARG="(variant { Init = record { 
-    minting_account = record { owner = principal \"${MINTING_PRINCIPAL}\" }; 
+BTCLEDGER_INIT_ARG="(variant { Init = record {
+    minting_account = record { owner = principal \"${MINTING_PRINCIPAL}\" };
     initial_balances = vec { record { record { owner = principal \"${USER_PRINCIPAL}\"} ; 101_000_000  };
-     record { record { owner = principal \"${NODE_PRINCIPAL}\"} ; 100_000_000  }} ; 
+     record { record { owner = principal \"${NODE_PRINCIPAL}\"} ; 100_000_000  };
+     record { record { owner = principal \"${CKL_ID}\"} ; 100_000_000  }} ;
     send_whitelist = vec {}; 
     transfer_fee = 1000 ; 
     token_symbol =  \"ckTESTBTC\"; 

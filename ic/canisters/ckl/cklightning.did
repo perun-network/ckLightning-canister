@@ -28,6 +28,12 @@ type CklError = variant {
   ConfirmationError;
   SerializationError;
 };
+type CompleteSwapRequest = record { payment_hash : blob; preimage : blob };
+type CompleteSwapResponse = record {
+  block_index : opt nat;
+  error : opt text;
+  success : bool;
+};
 type Event = variant {
   Disputed : record { state : RegisteredState; timestamp : nat64 };
   Funded : record { who : blob; total : nat; timestamp : nat64 };
@@ -85,6 +91,13 @@ type PoolWithdrawal = record {
   amount : nat;
 };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
+type RegisterSwapRequest = record {
+  payment_hash : blob;
+  recipient : principal;
+  expiry_timestamp : nat64;
+  amount_msat : nat64;
+};
+type RegisterSwapResponse = record { error : opt text; success : bool };
 type RegisteredState = record { state : State; timeout : nat64 };
 type Result = variant { Ok; Err : CklError };
 type Result_1 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
@@ -163,6 +176,13 @@ type WithdrawalReq = record {
   receiver : principal;
 };
 service : (Network) -> {
+  // Complete a Lightning → ckBTC swap after payment received
+  // 
+  // Called by the relay node when a Lightning payment is received and claimed.
+  // Verifies the preimage matches the payment_hash, then transfers ckBTC.
+  __candid_method_complete_swap : (CompleteSwapRequest) -> (
+      CompleteSwapResponse,
+    );
   __candid_method_deposit_channel : (ChannelFunding, blob) -> (Result);
   __candid_method_deposit_lp : (FundingLPArgs) -> (Result);
   __candid_method_get_btc_balance : (opt nat64) -> (Result_1);
@@ -179,6 +199,13 @@ service : (Network) -> {
     ) query;
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
+  // Register a new Lightning → ckBTC swap
+  // 
+  // Called by the relay node when an invoice is created with an IC principal.
+  // The relay stores the mapping: payment_hash → (amount, recipient)
+  __candid_method_register_swap : (RegisterSwapRequest) -> (
+      RegisterSwapResponse,
+    );
   __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_5);
   __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_6);
   __candid_method_set_btc_liquidity_address : () -> (Result_7);
@@ -187,6 +214,11 @@ service : (Network) -> {
   __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_9);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result);
   clear : () -> ();
+  // Complete a Lightning → ckBTC swap after payment received
+  // 
+  // Called by the relay node when a Lightning payment is received and claimed.
+  // Verifies the preimage matches the payment_hash, then transfers ckBTC.
+  complete_swap : (CompleteSwapRequest) -> (CompleteSwapResponse);
   deposit_channel : (ChannelFunding, blob) -> (Result);
   deposit_lp : (FundingLPArgs) -> (Result);
   dequeue : () -> (opt text);
@@ -218,6 +250,11 @@ service : (Network) -> {
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_4) query;
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
+  // Register a new Lightning → ckBTC swap
+  // 
+  // Called by the relay node when an invoice is created with an IC principal.
+  // The relay stores the mapping: payment_hash → (amount, recipient)
+  register_swap : (RegisterSwapRequest) -> (RegisterSwapResponse);
   send_btc_tx : (SendBtcTxArgs) -> (Result_5);
   send_from_p2pkh_address : (SendRequest) -> (text);
   set_btc_address : (SetBtcAddressArgs) -> (Result_6);

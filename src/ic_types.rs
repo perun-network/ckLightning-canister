@@ -22,7 +22,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use std::collections::HashMap;
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
-pub const DEVNET_CKBTC_LEDGER: &str = "bd3sg-teaaa-aaaaa-qaaba-cai";
+pub const DEVNET_CKBTC_LEDGER: &str = "u6s2n-gx777-77774-qaaba-cai";
 pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
 pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
