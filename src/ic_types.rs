@@ -596,6 +596,8 @@ pub struct LnChannelInfo {
     pub local_node_id: Vec<u8>,
     /// Remote peer's public key (33 bytes compressed)
     pub remote_node_id: Vec<u8>,
+    /// The P2WSH funding address (provided by relay)
+    pub funding_address: String,
     /// When the channel was registered (Unix nanoseconds)
     pub registered_at: u64,
     /// Last verification timestamp (Unix nanoseconds)
@@ -619,6 +621,8 @@ pub struct RegisterLnChannelRequest {
     pub local_node_id: Vec<u8>,
     /// Remote peer's public key (33 bytes compressed)
     pub remote_node_id: Vec<u8>,
+    /// The P2WSH funding address
+    pub funding_address: String,
 }
 
 /// Response from registering a Lightning channel
@@ -655,6 +659,36 @@ pub struct QueryLnChannelRequest {
 pub struct QueryLnChannelsResponse {
     /// List of all registered channels
     pub channels: Vec<LnChannelInfo>,
+}
+
+/// Response containing the canister's Lightning funding pubkey
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LnFundingPubkeyResponse {
+    /// Compressed SEC1 public key (33 bytes)
+    pub pubkey: Vec<u8>,
+    /// The derived P2WSH address (when combined with counterparty key)
+    /// This is None until we know the counterparty's pubkey
+    pub address: Option<String>,
+}
+
+/// Request for the canister to sign a Lightning-related message
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LnSignRequest {
+    /// The 32-byte message hash to sign (e.g., commitment transaction sighash)
+    pub message_hash: Vec<u8>,
+    /// Optional context/purpose for logging/auditing
+    pub purpose: Option<String>,
+}
+
+/// Response containing the ECDSA signature
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LnSignResponse {
+    /// Whether signing succeeded
+    pub success: bool,
+    /// The 64-byte compact ECDSA signature (r || s)
+    pub signature: Option<Vec<u8>>,
+    /// Error message if signing failed
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize, CandidType, Clone)]

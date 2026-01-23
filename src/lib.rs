@@ -31,11 +31,11 @@ use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
     BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
-    FundingLPQueryArgs, HoldingsResponse, LnChannelInfo, NotifyArgs, QueryLnChannelRequest,
-    QueryLnChannelsResponse, RegisterLnChannelRequest, RegisterLnChannelResponse,
-    RegisterSwapRequest, RegisterSwapResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg,
-    SetBtcAddressArgs, SetBtcAddressResponse, SignedCandidInvoice, Timestamp,
-    VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    FundingLPQueryArgs, HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest,
+    LnSignResponse, NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
+    RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
+    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
+    SignedCandidInvoice, Timestamp, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;

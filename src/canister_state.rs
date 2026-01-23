@@ -17,6 +17,7 @@ use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
 use crate::btc::common::PrimaryOutput;
 use crate::btc::common::get_fee_per_byte;
+use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
 use crate::btc::p2pkh;
 use crate::btc::p2wpkh;
 use crate::error::{BtcError, CklError, ResultBtc};
@@ -35,8 +36,9 @@ use crate::ic_types::{
     SwapInfo, SwapState,
 };
 use crate::ic_types::{
-    BtcOutpoint, LnChannelInfo, LnChannelStatus, QueryLnChannelRequest, QueryLnChannelsResponse,
-    RegisterLnChannelRequest, RegisterLnChannelResponse, VerifyLnChannelResponse,
+    BtcOutpoint, LnChannelInfo, LnChannelStatus, LnFundingPubkeyResponse, LnSignRequest,
+    LnSignResponse, QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
+    RegisterLnChannelResponse, VerifyLnChannelResponse,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
@@ -1378,6 +1380,7 @@ pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLn
         capacity_sats: request.capacity_sats,
         local_node_id: request.local_node_id.clone(),
         remote_node_id: request.remote_node_id.clone(),
+        funding_address: request.funding_address.clone(),
         registered_at: blocktime(),
         last_verified_at: None,
         status: LnChannelStatus::Pending,
@@ -1473,26 +1476,12 @@ pub async fn verify_ln_channel_impl(
     // Get Bitcoin context
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
-    // Derive the P2WSH funding address from the two node pubkeys
-    let funding_address = match derive_funding_address(
-        &channel_info.local_node_id,
-        &channel_info.remote_node_id,
-        ctx.bitcoin_network,
-    ) {
-        Ok(addr) => addr,
-        Err(e) => {
-            return VerifyLnChannelResponse {
-                verified: false,
-                confirmations: None,
-                utxo_value_sats: None,
-                error: Some(format!("Failed to derive funding address: {}", e)),
-            };
-        }
-    };
+    // Use the stored funding address (provided by relay when registering)
+    let funding_address = &channel_info.funding_address;
 
     // Query UTXOs for the funding address
     let utxos_result = bitcoin_get_utxos(&GetUtxosRequest {
-        address: funding_address.to_string(),
+        address: funding_address.clone(),
         network: ctx.network,
         filter: None, // Get all UTXOs including unconfirmed
     })
@@ -1652,5 +1641,85 @@ pub fn update_ln_channel_status_impl(channel_id: Vec<u8>, status: LnChannelStatu
         true
     } else {
         false
+    }
+}
+
+// =============================================================================
+// Lightning Signing Endpoints (Chainkey ECDSA)
+// =============================================================================
+
+/// Derivation path for the canister's Lightning funding key.
+/// Using a single key for all channels for simplicity.
+const LN_FUNDING_DERIVATION_PATH: &[&[u8]] = &[b"lightning", b"funding"];
+
+/// Get the canister's Lightning funding public key.
+///
+/// This key is derived via threshold ECDSA (chainkey) and is used as one of the
+/// two keys in the 2-of-2 multisig funding address for Lightning channels.
+/// The counterparty provides the other key.
+pub async fn get_ln_funding_pubkey_impl() -> LnFundingPubkeyResponse {
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
+        .iter()
+        .map(|s| s.to_vec())
+        .collect();
+
+    let pubkey = get_ecdsa_public_key(&ctx, derivation_path).await;
+
+    LnFundingPubkeyResponse {
+        pubkey,
+        address: None, // Address requires counterparty's pubkey
+    }
+}
+
+/// Sign a message hash for Lightning channel operations.
+///
+/// This is called by the relay when it needs a signature for:
+/// - Commitment transactions
+/// - HTLC transactions
+/// - Closing transactions
+///
+/// The canister signs using its Lightning funding key derived via chainkey ECDSA.
+pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
+    // Validate message hash length (must be 32 bytes for ECDSA)
+    if request.message_hash.len() != 32 {
+        return LnSignResponse {
+            success: false,
+            signature: None,
+            error: Some(format!(
+                "Invalid message_hash length: expected 32 bytes, got {}",
+                request.message_hash.len()
+            )),
+        };
+    }
+
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
+        .iter()
+        .map(|s| s.to_vec())
+        .collect();
+
+    // Log the signing request for auditing
+    if let Some(purpose) = &request.purpose {
+        ic_cdk::println!("Signing LN message for purpose: {}", purpose);
+    }
+
+    // Sign using chainkey ECDSA
+    let signature = sign_with_ecdsa(
+        ctx.key_name.to_string(),
+        derivation_path,
+        request.message_hash,
+    )
+    .await;
+
+    // Convert signature to bytes (compact 64-byte format: r || s)
+    let sig_bytes = signature.serialize_compact().to_vec();
+
+    LnSignResponse {
+        success: true,
+        signature: Some(sig_bytes),
+        error: None,
     }
 }

@@ -70,6 +70,7 @@ type ICPReceiverError = variant {
 type LnChannelInfo = record {
   channel_id : blob;
   status : LnChannelStatus;
+  funding_address : text;
   funding_outpoint : BtcOutpoint;
   capacity_sats : nat64;
   last_verified_at : opt nat64;
@@ -83,10 +84,17 @@ type LnChannelStatus = variant {
   Verified : record { confirmations : nat32 };
   Pending;
 };
+type LnFundingPubkeyResponse = record { pubkey : blob; address : opt text };
 type LnInvoiceRequest = record {
   amount_msat : nat64;
   caller_principal : principal;
   btc_address : text;
+};
+type LnSignRequest = record { message_hash : blob; purpose : opt text };
+type LnSignResponse = record {
+  signature : opt blob;
+  error : opt text;
+  success : bool;
 };
 type Network = variant { mainnet; regtest; testnet };
 type NotifyArgs = record {
@@ -112,6 +120,7 @@ type QueryLnChannelsResponse = record { channels : vec LnChannelInfo };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisterLnChannelRequest = record {
   channel_id : blob;
+  funding_address : text;
   capacity_sats : nat64;
   funding_txid : blob;
   funding_vout : nat32;
@@ -222,6 +231,11 @@ service : (Network) -> {
   __candid_method_get_btc_balance : (opt nat64) -> (Result_1);
   __candid_method_get_btc_liquidity_address_for_caller : () -> (Result_2);
   __candid_method_get_ln_address : () -> (Result_2);
+  // Get the canister's Lightning funding public key
+  // 
+  // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
+  // This key is used as one half of the 2-of-2 multisig for channel funding.
+  __candid_method_get_ln_funding_pubkey : () -> (LnFundingPubkeyResponse);
   __candid_method_query_events : (ChannelTime) -> (text) query;
   // Query a specific Lightning channel by ID
   __candid_method_query_ln_channel : (QueryLnChannelRequest) -> (
@@ -256,6 +270,12 @@ service : (Network) -> {
   __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_5);
   __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_6);
   __candid_method_set_btc_liquidity_address : () -> (Result_7);
+  // Sign a message hash for Lightning channel operations
+  // 
+  // Called by the relay when it needs a signature for commitment transactions,
+  // HTLC transactions, or closing transactions. The canister signs using its
+  // Lightning funding key derived via chainkey ECDSA.
+  __candid_method_sign_ln_message : (LnSignRequest) -> (LnSignResponse);
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
   __candid_method_transaction_notification : (NotifyArgs) -> (Result_8);
   __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_9);
@@ -282,6 +302,11 @@ service : (Network) -> {
   get_btc_balance : (opt nat64) -> (Result_1);
   get_btc_liquidity_address_for_caller : () -> (Result_2);
   get_ln_address : () -> (Result_2);
+  // Get the canister's Lightning funding public key
+  // 
+  // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
+  // This key is used as one half of the 2-of-2 multisig for channel funding.
+  get_ln_funding_pubkey : () -> (LnFundingPubkeyResponse);
   // Returns a legacy P2PKH (Pay-to-PubKey-Hash) address for this smart contract.
   // 
   // This address uses an ECDSA public key and encodes it in the legacy Base58 format.
@@ -322,6 +347,12 @@ service : (Network) -> {
   send_from_p2pkh_address : (SendRequest) -> (text);
   set_btc_address : (SetBtcAddressArgs) -> (Result_6);
   set_btc_liquidity_address : () -> (Result_7);
+  // Sign a message hash for Lightning channel operations
+  // 
+  // Called by the relay when it needs a signature for commitment transactions,
+  // HTLC transactions, or closing transactions. The canister signs using its
+  // Lightning funding key derived via chainkey ECDSA.
+  sign_ln_message : (LnSignRequest) -> (LnSignResponse);
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
   transaction_notification : (NotifyArgs) -> (Result_8);
