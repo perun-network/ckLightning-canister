@@ -15,8 +15,9 @@ use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
     complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
     get_btc_liquidity_address_for_caller_impl, get_ln_address_impl, get_ln_invoice_impl,
-    query_state_impl, query_user_lp_holdings_impl, register_swap_impl, send_btc_tx_impl,
-    set_btc_address_impl, transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
+    query_ln_channel_impl, query_ln_channels_impl, query_state_impl, query_user_lp_holdings_impl,
+    register_ln_channel_impl, register_swap_impl, send_btc_tx_impl, set_btc_address_impl,
+    transaction_notification_impl, trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
@@ -25,9 +26,11 @@ use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
     DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
-    HoldingsResponse, NotifyArgs, QueryBtcAddressResponse, RegisterSwapRequest,
-    RegisterSwapResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
-    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    HoldingsResponse, LnChannelInfo, NotifyArgs, QueryBtcAddressResponse, QueryLnChannelRequest,
+    QueryLnChannelsResponse, RegisterLnChannelRequest, RegisterLnChannelResponse,
+    RegisterSwapRequest, RegisterSwapResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg,
+    SetBtcAddressArgs, SetBtcAddressResponse, VerifyLnChannelResponse, WithdrawalLPArgs,
+    WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -241,4 +244,42 @@ fn register_swap(request: RegisterSwapRequest) -> RegisterSwapResponse {
 #[candid_method(update)]
 async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
     complete_swap_impl(request).await
+}
+
+// =============================================================================
+// Lightning Channel Funding Verification Endpoints
+// =============================================================================
+
+/// Register a new Lightning channel for funding verification
+///
+/// Called by the relay node when a channel is opened.
+/// Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
+#[update]
+#[candid_method(update)]
+fn register_ln_channel(request: RegisterLnChannelRequest) -> RegisterLnChannelResponse {
+    register_ln_channel_impl(request)
+}
+
+/// Verify a Lightning channel's funding UTXO on-chain
+///
+/// Queries the Bitcoin canister to check if the funding UTXO exists
+/// with sufficient confirmations.
+#[update]
+#[candid_method(update)]
+async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelResponse {
+    verify_ln_channel_impl(request).await
+}
+
+/// Query a specific Lightning channel by ID
+#[query]
+#[candid_method(query)]
+fn query_ln_channel(request: QueryLnChannelRequest) -> Option<LnChannelInfo> {
+    query_ln_channel_impl(request)
+}
+
+/// Query all registered Lightning channels
+#[query]
+#[candid_method(query)]
+fn query_ln_channels() -> QueryLnChannelsResponse {
+    query_ln_channels_impl()
 }

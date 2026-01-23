@@ -557,6 +557,106 @@ pub struct SwapInfo {
     pub state: SwapState,
 }
 
+// =============================================================================
+// Lightning Channel Funding Verification Types
+// =============================================================================
+
+/// Bitcoin transaction outpoint (txid + output index)
+#[derive(Clone, Debug, PartialEq, Eq, Hash, CandidType, Deserialize)]
+pub struct BtcOutpoint {
+    /// Transaction ID (32 bytes, little-endian)
+    pub txid: Vec<u8>,
+    /// Output index in the transaction
+    pub vout: u32,
+}
+
+/// Status of a Lightning channel's on-chain funding
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
+pub enum LnChannelStatus {
+    /// Channel registered, funding UTXO not yet verified
+    Pending,
+    /// Funding UTXO verified on-chain with sufficient confirmations
+    Verified { confirmations: u32 },
+    /// Channel closed (funding UTXO spent)
+    Closed,
+    /// Verification failed
+    Failed { reason: String },
+}
+
+/// Information about a Lightning channel's on-chain funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LnChannelInfo {
+    /// Unique channel ID (from LDK, typically funding_txid XOR funding_output_index)
+    pub channel_id: Vec<u8>,
+    /// Funding transaction outpoint
+    pub funding_outpoint: BtcOutpoint,
+    /// Channel capacity in satoshis
+    pub capacity_sats: u64,
+    /// Our node's public key (33 bytes compressed)
+    pub local_node_id: Vec<u8>,
+    /// Remote peer's public key (33 bytes compressed)
+    pub remote_node_id: Vec<u8>,
+    /// When the channel was registered (Unix nanoseconds)
+    pub registered_at: u64,
+    /// Last verification timestamp (Unix nanoseconds)
+    pub last_verified_at: Option<u64>,
+    /// Current status
+    pub status: LnChannelStatus,
+}
+
+/// Request to register a new Lightning channel
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterLnChannelRequest {
+    /// Unique channel ID (32 bytes)
+    pub channel_id: Vec<u8>,
+    /// Funding transaction ID (32 bytes)
+    pub funding_txid: Vec<u8>,
+    /// Funding output index
+    pub funding_vout: u32,
+    /// Channel capacity in satoshis
+    pub capacity_sats: u64,
+    /// Our node's public key (33 bytes compressed)
+    pub local_node_id: Vec<u8>,
+    /// Remote peer's public key (33 bytes compressed)
+    pub remote_node_id: Vec<u8>,
+}
+
+/// Response from registering a Lightning channel
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterLnChannelResponse {
+    /// Whether the channel was successfully registered
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Response from verifying a Lightning channel's funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct VerifyLnChannelResponse {
+    /// Whether the funding UTXO was found on-chain
+    pub verified: bool,
+    /// Number of confirmations (if found)
+    pub confirmations: Option<u32>,
+    /// Actual value of the UTXO in satoshis (if found)
+    pub utxo_value_sats: Option<u64>,
+    /// Error message if verification failed
+    pub error: Option<String>,
+}
+
+/// Query request for channel information
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct QueryLnChannelRequest {
+    /// Channel ID to query (32 bytes)
+    pub channel_id: Vec<u8>,
+}
+
+/// Response containing all registered Lightning channels
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct QueryLnChannelsResponse {
+    /// List of all registered channels
+    pub channels: Vec<LnChannelInfo>,
+}
+
 #[derive(Deserialize, CandidType, Clone)]
 pub struct SetBtcAddressArgs {
     pub principal: Option<Principal>,
