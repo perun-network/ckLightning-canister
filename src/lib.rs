@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -11,32 +11,33 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-
+use crate::ic_types::SetLiquidityBtcAddressResponse;
 pub mod canister;
 pub mod canister_state;
 pub mod deq;
 pub mod error;
 pub mod events;
+pub mod htlc;
 pub mod ic_types;
 pub mod liquidity_pool;
 use crate::ic_types::ChannelFunding;
 pub mod btc;
+use crate::ic_types::LnInvoiceRequest;
 pub mod msg;
 pub mod receiver;
+use crate::error::ResultBtc;
 use crate::error::{BtcError, CklError};
 use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
-    ChannelId, FundingLPArgs, FundingLPQueryArgs, HoldingsResponse, NotifyArgs,
-    QueryBtcAddressResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
-    SetBtcAddressResponse, Timestamp, WithdrawalLPArgs, WithdrawalReq,
+    BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
+    FundingLPQueryArgs, HoldingsResponse, NotifyArgs, RegisterSwapRequest, RegisterSwapResponse,
+    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
+    SignedCandidInvoice, Timestamp, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
-// use bitcoin::Network;
-use crate::error::ResultBtc;
 use candid::Nat;
 use ic_cdk::bitcoin_canister::Network;
-// use ic_cdk::bitcoin_canister::Network as BitcoinBetaNetwork;
 
 use ic_cdk::{init, post_upgrade};
 use std::cell::Cell;

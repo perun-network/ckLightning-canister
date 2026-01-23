@@ -5,11 +5,10 @@ use super::{
 };
 use crate::BTC_CONTEXT;
 use crate::btc::common::get_fee_per_byte;
-// use crate::btc::ecdsa::get_ecdsa_public_key;
 use crate::btc::p2pkh;
 use crate::error::BtcError;
 use crate::error::ResultBtc;
-use crate::ic_types::{BtcAddressType, GetBtcBalanceArgs};
+use crate::ic_types::{BtcAddressType, BtcPurpose, GetBtcBalanceArgs};
 use bitcoin::consensus::serialize;
 use bitcoin::{Address, CompressedPublicKey, XOnlyPublicKey};
 use bitcoin::{PublicKey, key::Secp256k1};
@@ -23,6 +22,26 @@ use ic_cdk::{
     trap, // update,
 };
 use std::str::FromStr;
+
+#[derive(candid::CandidType, candid::Deserialize)]
+pub struct SetLiquidityPoolAddressArgs {
+    pub address: String,
+}
+#[update]
+
+pub async fn get_segwit_address(purpose: BtcPurpose) -> Result<String, BtcError> {
+    let ctx = BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let public_key_bytes = get_ecdsa_public_key(&ctx, purpose.derivation_path()).await;
+
+    let compressed_key = CompressedPublicKey::from_slice(&public_key_bytes)
+        .map_err(|_| BtcError::Other("Invalid public key".to_string()))?;
+
+    let address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network).to_string();
+
+    Ok(address)
+}
+
 /// Returns a legacy P2PKH (Pay-to-PubKey-Hash) address for this smart contract.
 ///
 /// This address uses an ECDSA public key and encodes it in the legacy Base58 format.
