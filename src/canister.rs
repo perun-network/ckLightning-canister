@@ -14,9 +14,11 @@
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
     complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
-    get_btc_liquidity_address_for_caller_impl, get_ln_address_impl, get_ln_invoice_impl,
-    query_state_impl, query_user_lp_holdings_impl, register_swap_impl, send_btc_tx_impl,
-    set_btc_address_impl, transaction_notification_impl, trigger_withdraw_impl, withdraw_lp_impl,
+    get_btc_liquidity_address_for_caller_impl, get_ln_address_impl, get_ln_funding_pubkey_impl,
+    get_ln_invoice_impl, query_ln_channel_impl, query_ln_channels_impl, query_state_impl,
+    query_user_lp_holdings_impl, register_ln_channel_impl, register_swap_impl, send_btc_tx_impl,
+    set_btc_address_impl, sign_ln_message_impl, transaction_notification_impl,
+    trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
@@ -25,9 +27,11 @@ use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
     DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
-    HoldingsResponse, NotifyArgs, QueryBtcAddressResponse, RegisterSwapRequest,
-    RegisterSwapResponse, RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs,
-    SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
+    NotifyArgs, QueryBtcAddressResponse, QueryLnChannelRequest, QueryLnChannelsResponse,
+    RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
+    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
+    VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -241,4 +245,85 @@ fn register_swap(request: RegisterSwapRequest) -> RegisterSwapResponse {
 #[candid_method(update)]
 async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
     complete_swap_impl(request).await
+}
+
+// =============================================================================
+// Lightning Channel Funding Verification Endpoints
+// =============================================================================
+
+/// Register a new Lightning channel for funding verification
+///
+/// Called by the relay node when a channel is opened.
+/// Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
+#[update]
+#[candid_method(update)]
+fn register_ln_channel(request: RegisterLnChannelRequest) -> RegisterLnChannelResponse {
+    register_ln_channel_impl(request)
+}
+
+/// Verify a Lightning channel's funding UTXO on-chain
+///
+/// Queries the Bitcoin canister to check if the funding UTXO exists
+/// with sufficient confirmations.
+#[update]
+#[candid_method(update)]
+async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelResponse {
+    verify_ln_channel_impl(request).await
+}
+
+/// Debug: Get raw UTXOs for an address from the Bitcoin canister
+#[update]
+#[candid_method(update)]
+async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canister::GetUtxosResponse, String> {
+    use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
+    use crate::BTC_CONTEXT;
+
+    let network = BTC_CONTEXT.with(|ctx| ctx.get().network);
+
+    bitcoin_get_utxos(&GetUtxosRequest {
+        address,
+        network,
+        filter: None,
+    })
+    .await
+    .map_err(|e| format!("Failed to get UTXOs: {:?}", e))
+}
+
+/// Query a specific Lightning channel by ID
+#[query]
+#[candid_method(query)]
+fn query_ln_channel(request: QueryLnChannelRequest) -> Option<LnChannelInfo> {
+    query_ln_channel_impl(request)
+}
+
+/// Query all registered Lightning channels
+#[query]
+#[candid_method(query)]
+fn query_ln_channels() -> QueryLnChannelsResponse {
+    query_ln_channels_impl()
+}
+
+// =============================================================================
+// Lightning Chainkey Signing Endpoints
+// =============================================================================
+
+/// Get the canister's Lightning funding public key
+///
+/// Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
+/// This key is used as one half of the 2-of-2 multisig for channel funding.
+#[update]
+#[candid_method(update)]
+async fn get_ln_funding_pubkey() -> LnFundingPubkeyResponse {
+    get_ln_funding_pubkey_impl().await
+}
+
+/// Sign a message hash for Lightning channel operations
+///
+/// Called by the relay when it needs a signature for commitment transactions,
+/// HTLC transactions, or closing transactions. The canister signs using its
+/// Lightning funding key derived via chainkey ECDSA.
+#[update]
+#[candid_method(update)]
+async fn sign_ln_message(request: LnSignRequest) -> LnSignResponse {
+    sign_ln_message_impl(request).await
 }

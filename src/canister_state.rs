@@ -17,6 +17,7 @@ use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
 use crate::btc::common::PrimaryOutput;
 use crate::btc::common::get_fee_per_byte;
+use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
 use crate::btc::p2pkh;
 use crate::btc::p2wpkh;
 use crate::error::{BtcError, CklError, ResultBtc};
@@ -34,6 +35,11 @@ use crate::ic_types::{
     CompleteSwapRequest, CompleteSwapResponse, RegisterSwapRequest, RegisterSwapResponse,
     SwapInfo, SwapState,
 };
+use crate::ic_types::{
+    BtcOutpoint, LnChannelInfo, LnChannelStatus, LnFundingPubkeyResponse, LnSignRequest,
+    LnSignResponse, QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
+    RegisterLnChannelResponse, VerifyLnChannelResponse,
+};
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
@@ -42,7 +48,9 @@ use lightning_invoice::PaymentSecret;
 
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use bitcoin::{Address, CompressedPublicKey};
+use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_2};
+use bitcoin::script::Builder;
+use bitcoin::{Address, CompressedPublicKey, ScriptBuf};
 use bitcoin::{PublicKey, XOnlyPublicKey, consensus::serialize};
 use candid::Encode;
 use ic_cdk::api::call::CallResult;
@@ -105,6 +113,9 @@ where
 
     // Lightning → ckBTC swaps storage (payment_hash -> SwapInfo)
     swaps: HashMap<[u8; 32], SwapInfo>,
+
+    // Lightning channel funding verification (channel_id -> LnChannelInfo)
+    ln_channels: HashMap<[u8; 32], LnChannelInfo>,
 }
 
 // pub struct CanisterState<Q>
@@ -616,7 +627,8 @@ where
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool: LiquidityPool::new(),
-            swaps: HashMap::new(), // Lightning → ckBTC swaps
+            swaps: HashMap::new(),       // Lightning → ckBTC swaps
+            ln_channels: HashMap::new(), // Lightning channel funding verification
         }
     }
 
@@ -1301,5 +1313,413 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                 error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
             }
         }
+    }
+}
+
+// =============================================================================
+// Lightning Channel Funding Verification Implementation
+// =============================================================================
+
+/// Register a new Lightning channel for funding verification
+///
+/// Called by the relay node when a channel is opened.
+/// Stores the channel info so the funding UTXO can be verified on-chain.
+pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLnChannelResponse {
+    // Validate channel_id length
+    if request.channel_id.len() != 32 {
+        return RegisterLnChannelResponse {
+            success: false,
+            error: Some("Invalid channel_id length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    // Validate funding_txid length
+    if request.funding_txid.len() != 32 {
+        return RegisterLnChannelResponse {
+            success: false,
+            error: Some("Invalid funding_txid length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    // Validate node IDs (33 bytes compressed pubkey)
+    if request.local_node_id.len() != 33 {
+        return RegisterLnChannelResponse {
+            success: false,
+            error: Some("Invalid local_node_id length (must be 33 bytes)".to_string()),
+        };
+    }
+    if request.remote_node_id.len() != 33 {
+        return RegisterLnChannelResponse {
+            success: false,
+            error: Some("Invalid remote_node_id length (must be 33 bytes)".to_string()),
+        };
+    }
+
+    // Convert to fixed array
+    let mut channel_id_arr = [0u8; 32];
+    channel_id_arr.copy_from_slice(&request.channel_id);
+
+    // Check if channel already exists
+    {
+        let state = STATE.read().unwrap();
+        if state.ln_channels.contains_key(&channel_id_arr) {
+            return RegisterLnChannelResponse {
+                success: false,
+                error: Some("Channel with this channel_id already registered".to_string()),
+            };
+        }
+    }
+
+    // Create channel info
+    let channel_info = LnChannelInfo {
+        channel_id: request.channel_id.clone(),
+        funding_outpoint: BtcOutpoint {
+            txid: request.funding_txid.clone(),
+            vout: request.funding_vout,
+        },
+        capacity_sats: request.capacity_sats,
+        local_node_id: request.local_node_id.clone(),
+        remote_node_id: request.remote_node_id.clone(),
+        funding_address: request.funding_address.clone(),
+        registered_at: blocktime(),
+        last_verified_at: None,
+        status: LnChannelStatus::Pending,
+    };
+
+    // Store channel
+    {
+        let mut state = STATE.write().unwrap();
+        state.ln_channels.insert(channel_id_arr, channel_info);
+    }
+
+    RegisterLnChannelResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Build a 2-of-2 multisig witness script for Lightning channel funding.
+///
+/// The script is: OP_2 <pubkey1> <pubkey2> OP_2 OP_CHECKMULTISIG
+/// Where pubkeys are sorted lexicographically (by byte comparison).
+fn build_funding_witness_script(pubkey1: &[u8], pubkey2: &[u8]) -> Result<ScriptBuf, String> {
+    // Validate pubkey lengths (33 bytes for compressed)
+    if pubkey1.len() != 33 || pubkey2.len() != 33 {
+        return Err("Invalid pubkey length (must be 33 bytes compressed)".to_string());
+    }
+
+    // Convert to fixed-size arrays
+    let pk1: [u8; 33] = pubkey1.try_into().map_err(|_| "Invalid pubkey1")?;
+    let pk2: [u8; 33] = pubkey2.try_into().map_err(|_| "Invalid pubkey2")?;
+
+    // Sort pubkeys lexicographically (as per Lightning BOLT spec)
+    let (first, second) = if pk1 < pk2 { (pk1, pk2) } else { (pk2, pk1) };
+
+    // Build 2-of-2 multisig script
+    let script = Builder::new()
+        .push_opcode(OP_PUSHNUM_2)
+        .push_slice(first)
+        .push_slice(second)
+        .push_opcode(OP_PUSHNUM_2)
+        .push_opcode(OP_CHECKMULTISIG)
+        .into_script();
+
+    Ok(script)
+}
+
+/// Derive the P2WSH funding address from two pubkeys.
+fn derive_funding_address(
+    pubkey1: &[u8],
+    pubkey2: &[u8],
+    network: bitcoin::Network,
+) -> Result<Address, String> {
+    let witness_script = build_funding_witness_script(pubkey1, pubkey2)?;
+    Ok(Address::p2wsh(&witness_script, network))
+}
+
+/// Verify a Lightning channel's funding UTXO on-chain
+///
+/// Queries the Bitcoin canister to check if the funding UTXO exists
+/// and has sufficient confirmations.
+pub async fn verify_ln_channel_impl(
+    request: QueryLnChannelRequest,
+) -> VerifyLnChannelResponse {
+    // Validate channel_id length
+    if request.channel_id.len() != 32 {
+        return VerifyLnChannelResponse {
+            verified: false,
+            confirmations: None,
+            utxo_value_sats: None,
+            error: Some("Invalid channel_id length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    let mut channel_id_arr = [0u8; 32];
+    channel_id_arr.copy_from_slice(&request.channel_id);
+
+    // Get channel info
+    let channel_info = {
+        let state = STATE.read().unwrap();
+        match state.ln_channels.get(&channel_id_arr) {
+            Some(info) => info.clone(),
+            None => {
+                return VerifyLnChannelResponse {
+                    verified: false,
+                    confirmations: None,
+                    utxo_value_sats: None,
+                    error: Some("Channel not found".to_string()),
+                };
+            }
+        }
+    };
+
+    // Get Bitcoin context
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    // Use the stored funding address (provided by relay when registering)
+    let funding_address = &channel_info.funding_address;
+
+    // Query UTXOs for the funding address
+    let utxos_result = bitcoin_get_utxos(&GetUtxosRequest {
+        address: funding_address.clone(),
+        network: ctx.network,
+        filter: None, // Get all UTXOs including unconfirmed
+    })
+    .await;
+
+    let utxos_response = match utxos_result {
+        Ok(response) => response,
+        Err(e) => {
+            return VerifyLnChannelResponse {
+                verified: false,
+                confirmations: None,
+                utxo_value_sats: None,
+                error: Some(format!("Failed to query UTXOs: {:?}", e)),
+            };
+        }
+    };
+
+    // Get current tip height to calculate confirmations
+    let tip_height = utxos_response.tip_height;
+
+    // Look for the specific funding UTXO by matching txid and vout
+    // Note: The txid in the UTXO response is in internal byte order (little-endian)
+    // while Lightning typically uses big-endian (display order)
+    let funding_txid = &channel_info.funding_outpoint.txid;
+    let funding_vout = channel_info.funding_outpoint.vout;
+
+    let mut found_utxo: Option<(u64, u32)> = None; // (value, confirmations)
+
+    for utxo in &utxos_response.utxos {
+        // Compare txid (both should be in the same byte order from the canister)
+        if utxo.outpoint.txid.as_slice() == funding_txid.as_slice()
+            && utxo.outpoint.vout == funding_vout
+        {
+            // Found the funding UTXO
+            let confirmations = if utxo.height > 0 {
+                tip_height.saturating_sub(utxo.height) + 1
+            } else {
+                0 // Unconfirmed
+            };
+            found_utxo = Some((utxo.value, confirmations));
+            break;
+        }
+    }
+
+    match found_utxo {
+        Some((value, confirmations)) => {
+            // Verify the value matches the claimed capacity
+            let value_matches = value == channel_info.capacity_sats;
+
+            // Update channel status
+            let current_time = blocktime();
+            {
+                let mut state = STATE.write().unwrap();
+                if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
+                    channel.last_verified_at = Some(current_time);
+                    if value_matches && confirmations >= 3 {
+                        channel.status = LnChannelStatus::Verified {
+                            confirmations: confirmations as u32,
+                        };
+                    } else if !value_matches {
+                        channel.status = LnChannelStatus::Failed {
+                            reason: format!(
+                                "Value mismatch: expected {} sats, found {} sats",
+                                channel_info.capacity_sats, value
+                            ),
+                        };
+                    } else {
+                        // Not enough confirmations yet, keep as pending
+                        channel.status = LnChannelStatus::Pending;
+                    }
+                }
+            }
+
+            VerifyLnChannelResponse {
+                verified: value_matches && confirmations >= 3,
+                confirmations: Some(confirmations as u32),
+                utxo_value_sats: Some(value),
+                error: if !value_matches {
+                    Some(format!(
+                        "Value mismatch: expected {} sats, found {} sats",
+                        channel_info.capacity_sats, value
+                    ))
+                } else if confirmations < 3 {
+                    Some(format!(
+                        "Insufficient confirmations: {} (need at least 3)",
+                        confirmations
+                    ))
+                } else {
+                    None
+                },
+            }
+        }
+        None => {
+            // UTXO not found - channel might be closed or funding tx not yet confirmed
+            let current_time = blocktime();
+            {
+                let mut state = STATE.write().unwrap();
+                if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
+                    channel.last_verified_at = Some(current_time);
+                    // Check if channel was previously verified - if so, it's now closed
+                    match &channel.status {
+                        LnChannelStatus::Verified { .. } => {
+                            channel.status = LnChannelStatus::Closed;
+                        }
+                        _ => {
+                            // Keep current status, UTXO might not be confirmed yet
+                        }
+                    }
+                }
+            }
+
+            VerifyLnChannelResponse {
+                verified: false,
+                confirmations: None,
+                utxo_value_sats: None,
+                error: Some(format!(
+                    "Funding UTXO not found at address {}. Channel may be closed or funding tx not yet confirmed.",
+                    funding_address
+                )),
+            }
+        }
+    }
+}
+
+/// Query a specific Lightning channel
+pub fn query_ln_channel_impl(request: QueryLnChannelRequest) -> Option<LnChannelInfo> {
+    if request.channel_id.len() != 32 {
+        return None;
+    }
+
+    let mut channel_id_arr = [0u8; 32];
+    channel_id_arr.copy_from_slice(&request.channel_id);
+
+    let state = STATE.read().unwrap();
+    state.ln_channels.get(&channel_id_arr).cloned()
+}
+
+/// Query all registered Lightning channels
+pub fn query_ln_channels_impl() -> QueryLnChannelsResponse {
+    let state = STATE.read().unwrap();
+    let channels: Vec<LnChannelInfo> = state.ln_channels.values().cloned().collect();
+    QueryLnChannelsResponse { channels }
+}
+
+/// Update a Lightning channel's status (e.g., when closed)
+pub fn update_ln_channel_status_impl(channel_id: Vec<u8>, status: LnChannelStatus) -> bool {
+    if channel_id.len() != 32 {
+        return false;
+    }
+
+    let mut channel_id_arr = [0u8; 32];
+    channel_id_arr.copy_from_slice(&channel_id);
+
+    let mut state = STATE.write().unwrap();
+    if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
+        channel.status = status;
+        true
+    } else {
+        false
+    }
+}
+
+// =============================================================================
+// Lightning Signing Endpoints (Chainkey ECDSA)
+// =============================================================================
+
+/// Derivation path for the canister's Lightning funding key.
+/// Using a single key for all channels for simplicity.
+const LN_FUNDING_DERIVATION_PATH: &[&[u8]] = &[b"lightning", b"funding"];
+
+/// Get the canister's Lightning funding public key.
+///
+/// This key is derived via threshold ECDSA (chainkey) and is used as one of the
+/// two keys in the 2-of-2 multisig funding address for Lightning channels.
+/// The counterparty provides the other key.
+pub async fn get_ln_funding_pubkey_impl() -> LnFundingPubkeyResponse {
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
+        .iter()
+        .map(|s| s.to_vec())
+        .collect();
+
+    let pubkey = get_ecdsa_public_key(&ctx, derivation_path).await;
+
+    LnFundingPubkeyResponse {
+        pubkey,
+        address: None, // Address requires counterparty's pubkey
+    }
+}
+
+/// Sign a message hash for Lightning channel operations.
+///
+/// This is called by the relay when it needs a signature for:
+/// - Commitment transactions
+/// - HTLC transactions
+/// - Closing transactions
+///
+/// The canister signs using its Lightning funding key derived via chainkey ECDSA.
+pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
+    // Validate message hash length (must be 32 bytes for ECDSA)
+    if request.message_hash.len() != 32 {
+        return LnSignResponse {
+            success: false,
+            signature: None,
+            error: Some(format!(
+                "Invalid message_hash length: expected 32 bytes, got {}",
+                request.message_hash.len()
+            )),
+        };
+    }
+
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
+        .iter()
+        .map(|s| s.to_vec())
+        .collect();
+
+    // Log the signing request for auditing
+    if let Some(purpose) = &request.purpose {
+        ic_cdk::println!("Signing LN message for purpose: {}", purpose);
+    }
+
+    // Sign using chainkey ECDSA
+    let signature = sign_with_ecdsa(
+        ctx.key_name.to_string(),
+        derivation_path,
+        request.message_hash,
+    )
+    .await;
+
+    // Convert signature to bytes (compact 64-byte format: r || s)
+    let sig_bytes = signature.serialize_compact().to_vec();
+
+    LnSignResponse {
+        success: true,
+        signature: Some(sig_bytes),
+        error: None,
     }
 }
