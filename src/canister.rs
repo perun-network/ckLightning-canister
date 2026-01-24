@@ -271,6 +271,24 @@ async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelRes
     verify_ln_channel_impl(request).await
 }
 
+/// Debug: Get raw UTXOs for an address from the Bitcoin canister
+#[update]
+#[candid_method(update)]
+async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canister::GetUtxosResponse, String> {
+    use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
+    use crate::BTC_CONTEXT;
+
+    let network = BTC_CONTEXT.with(|ctx| ctx.get().network);
+
+    bitcoin_get_utxos(&GetUtxosRequest {
+        address,
+        network,
+        filter: None,
+    })
+    .await
+    .map_err(|e| format!("Failed to get UTXOs: {:?}", e))
+}
+
 /// Query a specific Lightning channel by ID
 #[query]
 #[candid_method(query)]
