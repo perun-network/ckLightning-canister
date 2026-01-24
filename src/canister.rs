@@ -19,10 +19,16 @@ use crate::canister_state::{
     query_user_lp_holdings_impl, register_ln_channel_impl, register_swap_impl, send_btc_tx_impl,
     set_btc_address_impl, sign_ln_message_impl, transaction_notification_impl,
     trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
-    // New simplified LP functions
+    // Simplified LP functions
     deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
+    // BTC LP functions
+    get_lp_btc_address_impl, deposit_btc_impl, withdraw_btc_impl,
 };
-use crate::ic_types::{LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse};
+use crate::ic_types::{
+    LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse,
+    LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
+    LpBtcWithdrawRequest, LpBtcWithdrawResponse,
+};
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
@@ -374,4 +380,44 @@ fn get_my_lp_balance() -> LpBalanceResponse {
 #[candid_method(query)]
 fn get_total_lp_balance() -> TotalLpBalanceResponse {
     get_total_lp_balance_impl()
+}
+
+// =============================================================================
+// BTC Liquidity Pool Endpoints (Shared LP Address)
+// =============================================================================
+
+/// Get the shared LP BTC address
+///
+/// Returns the single shared Bitcoin address for LP BTC deposits.
+/// All users deposit to this address, then call deposit_btc() to claim.
+#[update]
+#[candid_method(update)]
+async fn get_lp_btc_address() -> Result<LpBtcAddressResponse, BtcError> {
+    get_lp_btc_address_impl().await
+}
+
+/// Deposit BTC to the liquidity pool
+///
+/// Flow:
+/// 1. Call get_lp_btc_address() to get the deposit address
+/// 2. Send BTC to that address (off-chain, via wallet)
+/// 3. Wait for 6 confirmations
+/// 4. Call this function to claim your deposit
+///
+/// The canister will scan UTXOs at the LP address and credit new deposits
+/// to the caller's LP balance.
+#[update]
+#[candid_method(update)]
+async fn deposit_btc(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
+    deposit_btc_impl(request).await
+}
+
+/// Withdraw BTC from the liquidity pool
+///
+/// Sends BTC from the LP to your specified destination address.
+/// Your LP BTC balance must be sufficient for the withdrawal amount.
+#[update]
+#[candid_method(update)]
+async fn withdraw_btc(request: LpBtcWithdrawRequest) -> LpBtcWithdrawResponse {
+    withdraw_btc_impl(request).await
 }

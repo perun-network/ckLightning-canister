@@ -69,6 +69,7 @@ pub struct QueryBtcAddressResponse {
 pub enum BtcPurpose {
     LiquidityDepositor(Principal), // multiple: ["btc", "liq_deposit", principal]
     LnInvoiceDeposit,              // SINGLE: ["btc", "ln_invoice"]
+    LiquidityPoolShared,           // SINGLE: ["btc", "lp_shared"] - shared LP BTC address
 }
 
 #[derive(CandidType, Deserialize, Clone)]
@@ -90,6 +91,9 @@ impl BtcPurpose {
             }
             BtcPurpose::LnInvoiceDeposit => {
                 vec![b"btc".to_vec(), b"ln_invoice".to_vec()]
+            }
+            BtcPurpose::LiquidityPoolShared => {
+                vec![b"btc".to_vec(), b"lp_shared".to_vec()]
             }
         }
     }
@@ -292,6 +296,72 @@ pub struct TotalLpBalanceResponse {
     pub total_ckbtc: Amount,
     pub total_btc: Amount,
     pub num_depositors: u64,
+}
+
+// =============================================================================
+// BTC Liquidity Pool Types (shared LP address - Option C)
+// =============================================================================
+
+/// Response for getting the shared LP BTC address
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcAddressResponse {
+    pub address: String,
+}
+
+/// Request to deposit BTC to LP (after sending to shared LP address)
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcDepositRequest {
+    /// The txid of the deposit transaction (for tracking)
+    pub txid: Option<Vec<u8>>,
+    /// Amount deposited in satoshis
+    pub amount_sat: u64,
+}
+
+/// Response for BTC LP deposit
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcDepositResponse {
+    pub success: bool,
+    pub credited_amount: Amount,
+    pub new_btc_balance: Amount,
+    pub error: Option<String>,
+}
+
+/// Request to withdraw BTC from LP
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcWithdrawRequest {
+    /// Amount to withdraw in satoshis
+    pub amount_sat: u64,
+    /// Destination BTC address
+    pub destination_address: String,
+}
+
+/// Response for BTC LP withdrawal
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcWithdrawResponse {
+    pub success: bool,
+    pub amount_withdrawn: Amount,
+    pub new_btc_balance: Amount,
+    pub txid: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Pending BTC deposit info (stored in canister state)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PendingBtcDeposit {
+    /// Principal who initiated the deposit claim
+    pub depositor: Principal,
+    /// Transaction ID
+    pub txid: Vec<u8>,
+    /// Output index
+    pub vout: u32,
+    /// Amount in satoshis
+    pub amount_sat: u64,
+    /// When the deposit was detected
+    pub detected_at: u64,
+    /// Number of confirmations when last checked
+    pub confirmations: u32,
+    /// Whether the deposit has been credited
+    pub credited: bool,
 }
 
 // =============================================================================

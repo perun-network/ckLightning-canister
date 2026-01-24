@@ -37,6 +37,9 @@ use crate::ic_types::{
     RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse, RegisteredState,
     SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, SignedCandidInvoice,
     Timestamp, TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    // BTC LP types
+    LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
+    LpBtcWithdrawRequest, LpBtcWithdrawResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;
