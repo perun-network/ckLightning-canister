@@ -257,6 +257,45 @@ pub struct HoldingsResponse {
     pub btc_amount: Amount,
 }
 
+// =============================================================================
+// Simplified Liquidity Pool Types
+// =============================================================================
+
+/// Response for LP balance queries
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBalanceResponse {
+    pub ckbtc_balance: Amount,
+    pub btc_balance: Amount,
+}
+
+/// Response for LP deposit operations
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpDepositResponse {
+    pub success: bool,
+    pub new_balance: Amount,
+    pub error: Option<String>,
+}
+
+/// Response for LP withdraw operations
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpWithdrawResponse {
+    pub success: bool,
+    pub amount_withdrawn: Amount,
+    pub new_balance: Amount,
+    pub block_index: Option<Nat>,
+    pub error: Option<String>,
+}
+
+/// Response for total LP balance query
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct TotalLpBalanceResponse {
+    pub total_ckbtc: Amount,
+    pub total_btc: Amount,
+    pub num_depositors: u64,
+}
+
+// =============================================================================
+
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 
 pub struct DepositorInfo {

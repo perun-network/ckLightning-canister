@@ -19,7 +19,10 @@ use crate::canister_state::{
     query_user_lp_holdings_impl, register_ln_channel_impl, register_swap_impl, send_btc_tx_impl,
     set_btc_address_impl, sign_ln_message_impl, transaction_notification_impl,
     trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
+    // New simplified LP functions
+    deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
 };
+use crate::ic_types::{LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse};
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
@@ -326,4 +329,49 @@ async fn get_ln_funding_pubkey() -> LnFundingPubkeyResponse {
 #[candid_method(update)]
 async fn sign_ln_message(request: LnSignRequest) -> LnSignResponse {
     sign_ln_message_impl(request).await
+}
+
+// =============================================================================
+// Simplified Liquidity Pool Endpoints
+// =============================================================================
+
+/// Deposit ckBTC into the liquidity pool
+///
+/// The caller must first approve the canister to spend their ckBTC using ICRC-2:
+/// 1. Call btcledger.icrc2_approve(canister_id, amount)
+/// 2. Call this function with the amount to deposit
+///
+/// The canister will pull ckBTC from the caller and credit their LP balance.
+#[update]
+#[candid_method(update)]
+async fn deposit_ckbtc(amount: Nat) -> LpDepositResponse {
+    deposit_ckbtc_impl(amount).await
+}
+
+/// Withdraw ckBTC from the liquidity pool
+///
+/// Withdraws the specified amount of ckBTC from the caller's LP balance.
+/// The ckBTC is transferred directly to the caller's principal.
+#[update]
+#[candid_method(update)]
+async fn withdraw_ckbtc(amount: Nat) -> LpWithdrawResponse {
+    withdraw_ckbtc_impl(amount).await
+}
+
+/// Get the caller's LP balance
+///
+/// Returns the caller's deposited ckBTC and BTC balances in the liquidity pool.
+#[query]
+#[candid_method(query)]
+fn get_my_lp_balance() -> LpBalanceResponse {
+    get_my_lp_balance_impl()
+}
+
+/// Get the total LP balance across all depositors
+///
+/// Returns the total ckBTC and BTC in the liquidity pool, plus the number of depositors.
+#[query]
+#[candid_method(query)]
+fn get_total_lp_balance() -> TotalLpBalanceResponse {
+    get_total_lp_balance_impl()
 }

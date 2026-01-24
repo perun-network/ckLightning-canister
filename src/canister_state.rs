@@ -26,7 +26,7 @@ use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DepositorInfo, Funding,
+    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
     NotifyArgs, PoolWithdrawal, RegisteredState, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressMsg,
     SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
@@ -51,25 +51,16 @@ use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_2};
 use bitcoin::script::Builder;
 use bitcoin::{Address, CompressedPublicKey, ScriptBuf};
-use bitcoin::{PublicKey, XOnlyPublicKey, consensus::serialize};
-use candid::Encode;
+use bitcoin::{PublicKey, consensus::serialize};
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
-use ic_cdk::{
-    bitcoin_canister::{
-        GetUtxosRequest, SendTransactionRequest, bitcoin_get_utxos, bitcoin_send_transaction,
-    },
-    trap, update,
+use ic_cdk::bitcoin_canister::{
+    GetUtxosRequest, SendTransactionRequest, bitcoin_get_utxos, bitcoin_send_transaction,
 };
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
-use k256::ecdsa::Signature;
-use k256::ecdsa::VerifyingKey;
-use k256::ecdsa::signature::Verifier;
-use k256::pkcs8::DecodePublicKey;
-use k256::sha2::{Digest, Sha256};
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::InvoiceBuilder;
 
@@ -646,10 +637,10 @@ where
 
     pub async fn withdraw_icrc(
         &mut self,
-        time: Timestamp,
+        _time: Timestamp,
         receiver: Principal,
         withdrawal: PoolWithdrawal,
-        signature_bytes: &[u8],
+        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         let PoolWithdrawal {
             asset,
@@ -658,62 +649,13 @@ where
             amount,
         } = &withdrawal;
 
-        // Retrieve depositor info
-        let depositor_info = self
-            .liq_pool
-            .depositors
-            .get_mut(depositor)
-            .ok_or_else(|| CklError::InsufficientLiquidity)?;
+        // Extract Principal from L1Account
+        let depositor_principal = depositor.0;
 
-        // Verify pubkey matches stored
-        if depositor_info.pubkey.as_slice() != pubkey_l1.as_slice() {
-            return Err(CklError::PubKeyMismatch);
-        }
+        // Use the simplified LP withdraw method
+        self.liq_pool.withdraw(depositor_principal, asset.clone(), amount.clone())?;
 
-        // Serialize the withdrawal data
-        let withdrawal_serialized =
-            Encode!(&withdrawal).map_err(|_| CklError::SerializationError)?;
-
-        // Hash the serialized data
-        let hash = Sha256::digest(&withdrawal_serialized);
-
-        // Verify signature using stored pubkey
-        let pubkey_bytes = &depositor_info.pubkey;
-        let verifying_key =
-            VerifyingKey::from_public_key_der(pubkey_bytes).map_err(|_| CklError::InvalidPubKey)?;
-        let signature =
-            Signature::try_from(signature_bytes).map_err(|_| CklError::InvalidSignature)?;
-
-        verifying_key
-            .verify(&hash, &signature)
-            .map_err(|_| CklError::SignatureVerificationFailed)?;
-
-        // Check depositor's balance
-        let depositor_balance = match &asset {
-            PoolAsset::CkBTC => &mut depositor_info.ckbtc_amount,
-            PoolAsset::BTC => &mut depositor_info.btc_amount,
-        };
-
-        if *depositor_balance < *amount {
-            return Err(CklError::InsufficientLiquidity);
-        }
-
-        // Check total pool holdings
-        let total_holding = self
-            .liq_pool
-            .holdings_total
-            .get_mut(&asset)
-            .ok_or_else(|| CklError::InsufficientLiquidity)?;
-
-        if *total_holding < *amount {
-            return Err(CklError::InsufficientLiquidity);
-        }
-
-        // Deduct from depositor and total holdings
-        *depositor_balance -= amount.clone();
-        *total_holding -= amount.clone();
-
-        // Placeholder: Send funds back to L1 address
+        // Send funds back to L1 address
         let _ = self
             .send_funds_to_l1(receiver, &pubkey_l1, amount.clone(), &asset)
             .await;
@@ -784,52 +726,13 @@ where
         amount: Amount,
         asset: PoolAsset,
         depositor: L1Account,
-        pubkey_bytes: Vec<u8>,
-        funding: &Funding,      // Added funding ref for verification
-        signature_bytes: &[u8], // Added signature bytes for verification
+        _pubkey_bytes: Vec<u8>,
+        _funding: &Funding,
+        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
-        // Step 1: Serialize funding exactly as signed
-        let funding_serialized = Encode!(funding).map_err(|_| CklError::SerializationError)?;
-
-        // Step 2: Hash serialized data with SHA-256
-        let hash = Sha256::digest(&funding_serialized);
-
-        // Step 3: Parse the public key from DER or raw bytes
-        let verifying_key = VerifyingKey::from_public_key_der(&pubkey_bytes)
-            .map_err(|_| CklError::InvalidPubKey)?;
-
-        // Step 4: Convert signature bytes (assumed DER encoded)
-        let signature =
-            Signature::try_from(signature_bytes).map_err(|_| CklError::InvalidSignature)?;
-
-        // Step 5: Verify the signature on the hashed data
-        verifying_key
-            .verify(&hash, &signature)
-            .map_err(|_| CklError::SignatureVerificationFailed)?;
-
-        // Step 6: Proceed with existing pubkey matching and depositing logic
-        use std::collections::hash_map::Entry;
-        match self.liq_pool.depositors.entry(depositor.clone()) {
-            Entry::Occupied(mut entry) => {
-                let depositor_info = entry.get_mut();
-                if depositor_info.pubkey != pubkey_bytes {
-                    return Err(CklError::PubKeyMismatch);
-                }
-                depositor_info.deposit(asset.clone(), amount.clone());
-            }
-            Entry::Vacant(entry) => {
-                let mut info = DepositorInfo {
-                    pubkey: pubkey_bytes.clone(),
-                    ckbtc_amount: Amount::default(),
-                    btc_amount: Amount::default(),
-                };
-                info.deposit(asset.clone(), amount.clone());
-                entry.insert(info);
-            }
-        }
-        // Update total holdings for the asset
-        *self.liq_pool.holdings_total.get_mut(&asset).unwrap() += amount.clone();
-
+        // Extract Principal from L1Account and use simplified LP deposit
+        let depositor_principal = depositor.0;
+        self.liq_pool.deposit(depositor_principal, asset, amount);
         Ok(())
     }
     pub fn deposit_icrc(
@@ -892,44 +795,25 @@ where
         &self,
         funding: FundingLPQueryArgs,
     ) -> std::result::Result<HoldingsResponse, CklError> {
-        let sig = funding.funding_query_sig.clone();
         let l1_account_principal = funding.funding_query.address.clone();
         let caller_principal = msg_caller();
 
+        // Verify caller matches the requested principal
         if l1_account_principal.0 != caller_principal {
             return Err(CklError::UnauthorizedCaller);
         }
 
-        let depositor_info = self
+        // Extract Principal from L1Account and look up balance
+        let depositor_principal = l1_account_principal.0;
+        let depositor_balance = self
             .liq_pool
             .depositors
-            .get(&funding.funding_query.address)
+            .get(&depositor_principal)
             .ok_or(CklError::NoHoldingsFound)?;
 
-        // 3. Serialize funding_query exactly as signed
-        let serialized_query =
-            Encode!(&funding.funding_query).map_err(|_| CklError::SerializationError)?;
-
-        // 4. Hash the serialized bytes with SHA256
-        let hash = Sha256::digest(&serialized_query);
-
-        // 5. Parse public key from stored DepositorInfo pubkey bytes (DER format)
-        let verifying_key = VerifyingKey::from_public_key_der(&depositor_info.pubkey)
-            .map_err(|_| CklError::InvalidPubKey)?;
-
-        // 6. Parse signature bytes (DER encoded)
-        let signature = Signature::try_from(funding.funding_query_sig.as_slice())
-            .map_err(|_| CklError::InvalidSignature)?;
-
-        // 7. Verify signature on the hash matches stored public key
-        verifying_key
-            .verify(&hash, &signature)
-            .map_err(|_| CklError::SignatureVerificationFailed)?;
-
-        // 8. Signature valid, return holdings for this depositor
         Ok(HoldingsResponse {
-            ckbtc_amount: depositor_info.ckbtc_amount.clone(),
-            btc_amount: depositor_info.btc_amount.clone(),
+            ckbtc_amount: depositor_balance.ckbtc_amount.clone(),
+            btc_amount: depositor_balance.btc_amount.clone(),
         })
     }
 
@@ -1241,6 +1125,24 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         };
     }
 
+    // Check LP has sufficient liquidity and deduct from pool
+    let amount_nat = Nat::from(amount_sat);
+    {
+        let mut state = STATE.write().unwrap();
+        if let Err(_) = state.liq_pool.deduct_from_pool(PoolAsset::CkBTC, amount_nat.clone()) {
+            if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                swap.state = SwapState::Failed {
+                    reason: "Insufficient LP liquidity".to_string(),
+                };
+            }
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some("Insufficient LP liquidity for swap".to_string()),
+            };
+        }
+    }
+
     // Execute ckBTC transfer
     let transfer_arg = TransferArg {
         from_subaccount: None,
@@ -1281,9 +1183,13 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                 }
             }
             Err(e) => {
-                // Mark as failed
+                // Restore LP balance and mark as failed
                 {
                     let mut state = STATE.write().unwrap();
+                    // Restore the deducted amount back to pool
+                    state.liq_pool.holdings_total
+                        .get_mut(&PoolAsset::CkBTC)
+                        .map(|total| *total += amount_nat.clone());
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                         swap.state = SwapState::Failed {
                             reason: format!("Transfer error: {:?}", e),
@@ -1298,9 +1204,13 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             }
         },
         Err((code, msg)) => {
-            // Mark as failed
+            // Restore LP balance and mark as failed
             {
                 let mut state = STATE.write().unwrap();
+                // Restore the deducted amount back to pool
+                state.liq_pool.holdings_total
+                    .get_mut(&PoolAsset::CkBTC)
+                    .map(|total| *total += amount_nat.clone());
                 if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                     swap.state = SwapState::Failed {
                         reason: format!("Call error: {:?} - {}", code, msg),
@@ -1721,5 +1631,197 @@ pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
         success: true,
         signature: Some(sig_bytes),
         error: None,
+    }
+}
+
+// =============================================================================
+// Simplified Liquidity Pool Implementation
+// =============================================================================
+
+use crate::ic_types::{LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse};
+
+/// Deposit ckBTC into the liquidity pool
+///
+/// The caller must have approved the canister to spend their ckBTC first via ICRC-2.
+/// This function pulls ckBTC from the caller and credits their LP balance.
+pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
+    let caller = msg_caller();
+    let canister_id = ic_cdk::api::canister_self();
+
+    if amount == Nat::from(0u64) {
+        return LpDepositResponse {
+            success: false,
+            new_balance: Nat::from(0u64),
+            error: Some("Amount must be greater than 0".to_string()),
+        };
+    }
+
+    // Pull ckBTC from caller using ICRC-2 transfer_from
+    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+    let transfer_from_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+        spender_subaccount: None,
+        from: Account {
+            owner: caller,
+            subaccount: None,
+        },
+        to: Account {
+            owner: canister_id,
+            subaccount: None,
+        },
+        amount: amount.clone(),
+        fee: None, // Use default fee
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
+    )> = ic_cdk::call(ckbtc_ledger_id, "icrc2_transfer_from", (transfer_from_args,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(_block_index) => {
+                // Credit the caller's LP balance
+                let mut state = STATE.write().unwrap();
+                state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
+
+                let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+
+                LpDepositResponse {
+                    success: true,
+                    new_balance,
+                    error: None,
+                }
+            }
+            Err(e) => LpDepositResponse {
+                success: false,
+                new_balance: Nat::from(0u64),
+                error: Some(format!("ICRC-2 transfer_from failed: {:?}", e)),
+            },
+        },
+        Err((code, msg)) => LpDepositResponse {
+            success: false,
+            new_balance: Nat::from(0u64),
+            error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+        },
+    }
+}
+
+/// Withdraw ckBTC from the liquidity pool
+///
+/// Checks the caller's LP balance and transfers ckBTC back to them.
+pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
+    let caller = msg_caller();
+
+    if amount == Nat::from(0u64) {
+        return LpWithdrawResponse {
+            success: false,
+            amount_withdrawn: Nat::from(0u64),
+            new_balance: Nat::from(0u64),
+            block_index: None,
+            error: Some("Amount must be greater than 0".to_string()),
+        };
+    }
+
+    // Check and deduct from LP balance
+    {
+        let mut state = STATE.write().unwrap();
+        if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::CkBTC, amount.clone()) {
+            let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+            return LpWithdrawResponse {
+                success: false,
+                amount_withdrawn: Nat::from(0u64),
+                new_balance: current_balance,
+                block_index: None,
+                error: Some(format!("Insufficient balance: {:?}", e)),
+            };
+        }
+    }
+
+    // Transfer ckBTC to caller
+    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: caller,
+            subaccount: None,
+        },
+        amount: amount.clone(),
+        fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => {
+                let state = STATE.read().unwrap();
+                let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+
+                LpWithdrawResponse {
+                    success: true,
+                    amount_withdrawn: amount,
+                    new_balance,
+                    block_index: Some(block_index),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                // Transfer failed - restore the LP balance
+                let mut state = STATE.write().unwrap();
+                state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
+                let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+
+                LpWithdrawResponse {
+                    success: false,
+                    amount_withdrawn: Nat::from(0u64),
+                    new_balance,
+                    block_index: None,
+                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            // Call failed - restore the LP balance
+            let mut state = STATE.write().unwrap();
+            state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
+            let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+
+            LpWithdrawResponse {
+                success: false,
+                amount_withdrawn: Nat::from(0u64),
+                new_balance,
+                block_index: None,
+                error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+            }
+        }
+    }
+}
+
+/// Get the caller's LP balance
+pub fn get_my_lp_balance_impl() -> LpBalanceResponse {
+    let caller = msg_caller();
+    let state = STATE.read().unwrap();
+
+    LpBalanceResponse {
+        ckbtc_balance: state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC),
+        btc_balance: state.liq_pool.get_balance(&caller, &PoolAsset::BTC),
+    }
+}
+
+/// Get the total LP balance across all depositors
+pub fn get_total_lp_balance_impl() -> TotalLpBalanceResponse {
+    let state = STATE.read().unwrap();
+
+    TotalLpBalanceResponse {
+        total_ckbtc: state.liq_pool.get_total(&PoolAsset::CkBTC),
+        total_btc: state.liq_pool.get_total(&PoolAsset::BTC),
+        num_depositors: state.liq_pool.depositors.len() as u64,
     }
 }
