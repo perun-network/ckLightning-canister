@@ -85,8 +85,67 @@ impl LiquidityPool {
         Ok(())
     }
 
-    /// Deduct from total pool (for swaps) - doesn't affect individual depositor balances
-    /// This is because swaps use fungible pool liquidity
+    /// Deduct from pool proportionally from all depositors
+    ///
+    /// When a swap happens, liquidity is taken proportionally from all depositors
+    /// based on their share of the total pool. For example:
+    /// - User1 has 25,000 sats (25% of 100,000 total)
+    /// - User2 has 75,000 sats (75% of 100,000 total)
+    /// - A 10,000 sat swap deducts 2,500 from User1 and 7,500 from User2
+    pub fn deduct_proportional(&mut self, asset: PoolAsset, amount: Amount) -> ResultCkl<()> {
+        let total = self.holdings_total.get(&asset)
+            .cloned()
+            .ok_or(CklError::InsufficientLiquidity)?;
+
+        if total < amount {
+            return Err(CklError::InsufficientLiquidity);
+        }
+
+        // Convert to u128 for calculation
+        let amount_u128: u128 = amount.0.clone().try_into().unwrap_or(0);
+        let total_u128: u128 = total.0.clone().try_into().unwrap_or(1);
+
+        if total_u128 == 0 {
+            return Err(CklError::InsufficientLiquidity);
+        }
+
+        // Calculate and deduct proportional amounts from each depositor
+        let mut total_deducted = Nat::from(0u64);
+        let depositor_keys: Vec<Principal> = self.depositors.keys().cloned().collect();
+
+        for depositor in depositor_keys {
+            if let Some(balance) = self.depositors.get_mut(&depositor) {
+                let depositor_balance = match asset {
+                    PoolAsset::CkBTC => &mut balance.ckbtc_amount,
+                    PoolAsset::BTC => &mut balance.btc_amount,
+                };
+
+                let depositor_u128: u128 = depositor_balance.0.clone().try_into().unwrap_or(0);
+
+                if depositor_u128 > 0 {
+                    // Calculate proportional deduction: amount * (depositor_balance / total)
+                    // Use integer math: (amount * depositor_balance) / total
+                    let deduction = (amount_u128 * depositor_u128) / total_u128;
+                    let deduction_nat = Nat::from(deduction);
+
+                    if *depositor_balance >= deduction_nat {
+                        *depositor_balance -= deduction_nat.clone();
+                        total_deducted += deduction_nat;
+                    }
+                }
+            }
+        }
+
+        // Deduct total from holdings (use actual deducted amount to handle rounding)
+        if let Some(holdings) = self.holdings_total.get_mut(&asset) {
+            *holdings -= total_deducted;
+        }
+
+        Ok(())
+    }
+
+    /// Deduct from total pool only (legacy - doesn't affect individual balances)
+    #[allow(dead_code)]
     pub fn deduct_from_pool(&mut self, asset: PoolAsset, amount: Amount) -> ResultCkl<()> {
         let total = self.holdings_total.get_mut(&asset)
             .ok_or(CklError::InsufficientLiquidity)?;

@@ -15,55 +15,61 @@ use crate::BtcPurpose;
 use crate::btc::address::get_balance;
 use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
-use crate::btc::common::PrimaryOutput;
 use crate::btc::common::get_fee_per_byte;
 use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
-use crate::btc::p2pkh;
 use crate::btc::p2wpkh;
 use crate::error::{BtcError, CklError, ResultBtc};
-use crate::ic_types::LnInvoiceRequest;
+use crate::helpers::{execute_ledger_transfer, send_btc_from_lp_address};
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
-use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
-    NotifyArgs, PoolWithdrawal, RegisteredState, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressMsg,
+    NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs, SetBtcAddressMsg,
     SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
 };
 use crate::ic_types::{
     CompleteSwapRequest, CompleteSwapResponse, RegisterSwapRequest, RegisterSwapResponse,
     SwapInfo, SwapState, PendingBtcDeposit, LpBtcAddressResponse, LpBtcDepositRequest,
     LpBtcDepositResponse, LpBtcWithdrawRequest, LpBtcWithdrawResponse,
+    // User BTC operations
+    SendFromDepositorRequest, SendFromDepositorResponse, DepositorBtcBalanceResponse,
+    // Onramp invoice request types
+    OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestInfo, OnrampRequestState,
+    PendingInvoiceRequest, SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
+    // Offramp types (ckBTC → Lightning)
+    OfframpRequest, OfframpResponse, OfframpRequestInfo, OfframpRequestState,
+    PendingOfframpRequest, CompleteOfframpRequest, CompleteOfframpResponse,
+    FailOfframpRequest, FailOfframpResponse, GetOfframpStatusResponse,
 };
 use crate::ic_types::{
-    BtcOutpoint, LnChannelInfo, LnChannelStatus, LnFundingPubkeyResponse, LnSignRequest,
-    LnSignResponse, QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
+    BtcOutpoint, LnChannelInfo, LnChannelStatus,
+    QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
     RegisterLnChannelResponse, VerifyLnChannelResponse,
+    // LP Liquidity types
+    LpBtcUtxo, GetFundingUtxosResponse,
+    UpdateChannelBalanceRequest, UpdateChannelBalanceResponse,
+    LpLiquidityStatus, LnChannelBalance,
+    // Channel funding types
+    FundChannelRequest, FundChannelResponse,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
-use lightning_invoice::Currency;
-use lightning_invoice::PaymentSecret;
 
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_2};
-use bitcoin::script::Builder;
-use bitcoin::{Address, CompressedPublicKey, ScriptBuf};
+use bitcoin::{Address, CompressedPublicKey};
 use bitcoin::{PublicKey, consensus::serialize};
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use ic_cdk::bitcoin_canister::{
-    GetUtxosRequest, SendTransactionRequest, bitcoin_get_utxos, bitcoin_send_transaction,
+    GetBalanceRequest, GetUtxosRequest, SendTransactionRequest,
+    bitcoin_get_balance, bitcoin_get_utxos, bitcoin_send_transaction,
 };
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
-use lightning_invoice::Bolt11Invoice;
-use lightning_invoice::InvoiceBuilder;
 
 use crate::error::ResultCkl;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
@@ -117,6 +123,26 @@ where
 
     // Lightning channel funding verification (channel_id -> LnChannelInfo)
     ln_channels: HashMap<[u8; 32], LnChannelInfo>,
+
+    // Onramp invoice requests (request_id -> OnrampRequestInfo)
+    onramp_requests: HashMap<String, OnrampRequestInfo>,
+
+    // Offramp requests (request_id -> OfframpRequestInfo)
+    offramp_requests: HashMap<String, OfframpRequestInfo>,
+
+    // ==========================================================================
+    // LP Liquidity Tracking (Canister-Controlled BTC for Lightning)
+    // ==========================================================================
+
+    // Channel balance tracking (channel_id -> LnChannelBalance)
+    channel_balances: HashMap<[u8; 32], LnChannelBalance>,
+
+    // LP BTC statistics
+    total_btc_deposited: u64,      // Lifetime total deposited by LP providers
+    total_btc_in_channels: u64,    // Total BTC currently locked in channels
+
+    // UTXOs reserved for pending channel opens (txid:vout -> channel_id)
+    reserved_utxos: HashMap<(Vec<u8>, u32), [u8; 32]>,
 }
 
 // pub struct CanisterState<Q>
@@ -163,152 +189,6 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
         address,
         already_existed: false,
     })
-}
-
-// This function is called inside canister_state.rs and delegates BTC-context logic to btc/calls.rs
-pub async fn send_btc_tx_impl(
-    destination_address_str: String,
-    from_address_type: BtcAddressType,
-    amount_in_satoshi: u64,
-) -> Result<SendBtcTxMsg, BtcError> {
-    if amount_in_satoshi == 0 {
-        ic_cdk::trap("Amount must be greater than 0");
-    }
-
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    // Parse destination address and check network
-    let dst_address = Address::from_str(&destination_address_str)
-        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
-        .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("Destination address network mismatch: {:?}", e)))?;
-
-    // Derive own address and public key according to address type
-    let derivation_path = match from_address_type {
-        BtcAddressType::P2PKH => crate::btc::common::DerivationPath::p2pkh(0, 0),
-        BtcAddressType::P2WPKH => crate::btc::common::DerivationPath::p2wpkh(0, 0),
-        BtcAddressType::P2TR => crate::btc::common::DerivationPath::p2tr(0, 0),
-    };
-
-    let public_key_bytes =
-        crate::btc::ecdsa::get_ecdsa_public_key(&ctx, derivation_path.to_vec_u8_path()).await;
-
-    // Prepare strings from public key bytes
-    let (own_address, own_public_key) = match from_address_type {
-        BtcAddressType::P2PKH => {
-            let pubkey = PublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
-            let address = Address::p2pkh(pubkey, ctx.bitcoin_network);
-            (address, pubkey)
-        }
-        BtcAddressType::P2WPKH => {
-            let compressed_key =
-                CompressedPublicKey::from_slice(&public_key_bytes).map_err(|e| {
-                    BtcError::Other(format!("Failed to parse compressed public key: {}", e))
-                })?;
-            let pubkey = PublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
-            let address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
-            (address, pubkey)
-        }
-        BtcAddressType::P2TR => {
-            todo!()
-            // let pubkey = PublicKey::from_slice(&public_key_bytes)
-            //     .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
-            // let xonly = XOnlyPublicKey::from(pubkey.inner);
-            // let address = Address::p2tr(&Secp256k1::new(), xonly, None, ctx.bitcoin_network);
-            // (address, pubkey)
-        }
-    };
-
-    // Fetch all UTXOs for own address
-    let own_utxos = bitcoin_get_utxos(&GetUtxosRequest {
-        address: own_address.to_string(),
-        network: ctx.network,
-        filter: None,
-    })
-    .await
-    .map_err(|e| BtcError::Other(format!("Failed to fetch UTXOs: {}", e)))?
-    .utxos;
-
-    // Get fee rate for transaction
-    let fee_per_byte = get_fee_per_byte(&ctx).await;
-
-    // Build, sign, send transaction based on address type
-    let txid = match from_address_type {
-        BtcAddressType::P2PKH => {
-            // Build transaction
-            let transaction = p2pkh::build_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                &own_utxos,
-                &PrimaryOutput::Address(dst_address, amount_in_satoshi),
-                fee_per_byte,
-            )
-            .await;
-
-            // Sign transaction
-            let signed_tx = p2pkh::sign_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                transaction,
-                derivation_path.to_vec_u8_path(),
-                crate::btc::ecdsa::sign_with_ecdsa,
-            )
-            .await;
-
-            // Send transaction to Bitcoin canister
-            bitcoin_send_transaction(&SendTransactionRequest {
-                network: ctx.network,
-                transaction: serialize(&signed_tx),
-            })
-            .await
-            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
-
-            signed_tx.compute_txid().to_string()
-        }
-        BtcAddressType::P2WPKH => {
-            // Build transaction with prevouts
-            let (transaction, prevouts) = p2wpkh::build_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                &own_utxos,
-                &dst_address,
-                amount_in_satoshi,
-                fee_per_byte,
-            )
-            .await;
-
-            // Sign transaction
-            let signed_tx = p2wpkh::sign_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                transaction,
-                &prevouts,
-                derivation_path.to_vec_u8_path(),
-                crate::btc::ecdsa::sign_with_ecdsa,
-            )
-            .await;
-
-            bitcoin_send_transaction(&SendTransactionRequest {
-                network: ctx.network,
-                transaction: serialize(&signed_tx),
-            })
-            .await
-            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
-
-            signed_tx.compute_txid().to_string()
-        }
-        BtcAddressType::P2TR => {
-            todo!()
-        }
-    };
-
-    Ok(SendBtcTxMsg::Success(txid))
 }
 
 pub async fn set_btc_address_impl(
@@ -381,88 +261,6 @@ pub async fn get_btc_balances_impl(
     };
 
     Ok(GetBtcBalancesResponse { balances, msg })
-}
-
-pub async fn get_ln_invoice_impl(
-    request: LnInvoiceRequest,
-) -> std::result::Result<SignedCandidInvoice, BtcError> {
-    // 1. Verify caller matches principal
-    let caller = msg_caller();
-    if caller != request.caller_principal {
-        return Err(BtcError::Other("Principal mismatch".to_string()));
-    }
-
-    // 2. Verify btc_address matches expected deposit address
-    let purpose = BtcPurpose::LnInvoiceDeposit; //LiquidityDepositor(caller);
-    let expected_deposit_addr = get_segwit_address(purpose).await?;
-    if request.btc_address != expected_deposit_addr {
-        return Err(BtcError::Other("BTC address mismatch".to_string()));
-    }
-
-    // 3. Payment hash: hash(principal || amount || time)
-    let mut hash_input = caller.as_slice().to_vec();
-    hash_input.extend_from_slice(&request.amount_msat.to_be_bytes());
-    hash_input.extend_from_slice(&blocktime().to_be_bytes());
-    let payment_hash = sha256::Hash::hash(&hash_input);
-
-    // 4. Payment secret: deterministic from principal + amount + time + salt
-    let mut secret_input = caller.as_slice().to_vec();
-    secret_input.extend_from_slice(&request.amount_msat.to_be_bytes());
-    secret_input.extend_from_slice(&blocktime().to_be_bytes());
-    secret_input.extend_from_slice(b"ln_payment_secret");
-    let payment_secret_bytes = sha256::Hash::hash(&secret_input).to_byte_array();
-    let payment_secret = PaymentSecret(payment_secret_bytes);
-
-    // 5. Timestamp from blocktime
-
-    let now_nanos = blocktime();
-    let now_secs = (now_nanos / 1_000_000_000) as u64; // Truncate to seconds
-    let timestamp_duration = std::time::Duration::from_secs(now_secs); // For InvoiceBuilder
-
-    // 6. Build and SIGN real invoice (exactly like nocandid_impl)
-    let secp_ctx = Secp256k1::new();
-    let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: proper key mgmt
-
-    let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
-        .description(format!("ckBTC_SWAP:{}", caller).into())
-        .payment_hash(payment_hash)
-        .payment_secret(payment_secret)
-        .duration_since_epoch(timestamp_duration)
-        .amount_milli_satoshis(request.amount_msat)
-        .expiry_time(timestamp_duration + std::time::Duration::from_secs(3600))
-        .build_raw()
-        .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
-
-    let signed_invoice = raw_invoice
-        .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
-        .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
-
-    let invoice = Bolt11Invoice::from_signed(signed_invoice.clone())
-        .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
-
-    // 7. Extract signature from signed invoice for storage/verification
-    // let signature = signed_invoice.signature().serialize_compact(); //.to_bytes().to_vec(); // ✅ Real invoice signature
-    let (recovery_id, signature_bytes) = signed_invoice.signature().serialize_compact();
-    let mut signature_serialized = Vec::with_capacity(65);
-    signature_serialized.push(recovery_id.to_i32() as u8); // RecoveryId as single byte (0-3)
-    signature_serialized.extend_from_slice(&signature_bytes); // 64 signature bytes
-    // 8. Build SignedCandidInvoice with real signed data
-    let currency = "Bitcoin".to_string();
-    let channel_id = vec![0u8; 32];
-
-    let signed_candid_invoice = SignedCandidInvoice {
-        invoice: invoice.to_string(), // ✅ Real signed BOLT11
-        amount_msat: Some(Nat::from(request.amount_msat)),
-        payment_hash: payment_hash.to_byte_array().to_vec(),
-        payment_secret: payment_secret.0.to_vec(),
-        timestamp: now_secs,
-        expiry_secs: Some(3600_u64),
-        currency,
-        channel_id,
-        signature: signature_serialized, // ✅ Signature of REAL invoice
-    };
-
-    Ok(signed_candid_invoice)
 }
 
 pub async fn get_ln_address_impl() -> Result<String, BtcError> {
@@ -631,8 +429,15 @@ where
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool: LiquidityPool::new(),
-            swaps: HashMap::new(),       // Lightning → ckBTC swaps
-            ln_channels: HashMap::new(), // Lightning channel funding verification
+            swaps: HashMap::new(),           // Lightning → ckBTC swaps
+            ln_channels: HashMap::new(),     // Lightning channel funding verification
+            onramp_requests: HashMap::new(), // Onramp invoice requests
+            offramp_requests: HashMap::new(), // Offramp requests (ckBTC → Lightning)
+            // LP Liquidity tracking
+            channel_balances: HashMap::new(),
+            total_btc_deposited: 0,
+            total_btc_in_channels: 0,
+            reserved_utxos: HashMap::new(),
         }
     }
 
@@ -957,39 +762,6 @@ where
     }
 }
 
-pub async fn execute_ledger_transfer(
-    req: &WithdrawalReq,
-    amount_u64: u64,
-) -> std::result::Result<Nat, CklError> {
-    let receiver = req.receiver;
-
-    let transfer_arg = TransferArg {
-        from_subaccount: None,
-        to: Account {
-            owner: receiver,
-            subaccount: None,
-        },
-        amount: Nat(amount_u64.into()),
-        fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: None,
-        created_at_time: None,
-    };
-
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
-
-    let call_result: CallResult<(
-        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
-        Ok((inner_result,)) => match inner_result {
-            Ok(block_height) => Ok(block_height),
-            Err(_e) => Err(CklError::LedgerError),
-        },
-        Err((_code, _msg)) => Err(CklError::LedgerError),
-    }
-}
-
 // =============================================================================
 // Lightning → ckBTC Swap Implementation
 // =============================================================================
@@ -1138,11 +910,11 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         };
     }
 
-    // Check LP has sufficient liquidity and deduct from pool
+    // Check LP has sufficient liquidity and deduct proportionally from all depositors
     let amount_nat = Nat::from(amount_sat);
     {
         let mut state = STATE.write().unwrap();
-        if let Err(_) = state.liq_pool.deduct_from_pool(PoolAsset::CkBTC, amount_nat.clone()) {
+        if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, amount_nat.clone()) {
             if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                 swap.state = SwapState::Failed {
                     reason: "Insufficient LP liquidity".to_string(),
@@ -1240,6 +1012,516 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 }
 
 // =============================================================================
+// Onramp Invoice Request Implementation (Canister-First Flow)
+// =============================================================================
+
+/// Request a new onramp invoice
+///
+/// Called by clients to initiate a Lightning → ckBTC swap.
+/// Creates a pending request that the relay will fulfill with an actual invoice.
+pub fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
+    // Validate amount
+    if request.amount_sats == 0 {
+        return OnrampInvoiceResponse {
+            request_id: String::new(),
+            success: false,
+            error: Some("Amount must be greater than 0".to_string()),
+        };
+    }
+
+    // Generate unique request ID (hash of recipient + amount + time)
+    let now = blocktime();
+    let mut hash_input = request.recipient.as_slice().to_vec();
+    hash_input.extend_from_slice(&request.amount_sats.to_be_bytes());
+    hash_input.extend_from_slice(&now.to_be_bytes());
+    let request_id_hash = sha256::Hash::hash(&hash_input);
+    // Convert first 16 bytes to hex string
+    let request_id = request_id_hash.as_byte_array()[..16]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
+    // Create the request info
+    let request_info = OnrampRequestInfo {
+        request_id: request_id.clone(),
+        recipient: request.recipient,
+        amount_sats: request.amount_sats,
+        created_at: now,
+        state: OnrampRequestState::Pending,
+        invoice: None,
+        payment_hash: None,
+        expiry_timestamp: None,
+    };
+
+    // Store the request
+    {
+        let mut state = STATE.write().unwrap();
+        state.onramp_requests.insert(request_id.clone(), request_info);
+    }
+
+    OnrampInvoiceResponse {
+        request_id,
+        success: true,
+        error: None,
+    }
+}
+
+/// Get all pending invoice requests for the relay to process
+///
+/// Called by the relay to find requests that need invoices created.
+pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
+    let state = STATE.read().unwrap();
+
+    state.onramp_requests
+        .values()
+        .filter(|req| matches!(req.state, OnrampRequestState::Pending))
+        .map(|req| PendingInvoiceRequest {
+            request_id: req.request_id.clone(),
+            recipient: req.recipient,
+            amount_sats: req.amount_sats,
+            amount_msat: req.amount_sats * 1000,
+            created_at: req.created_at,
+        })
+        .collect()
+}
+
+/// Submit a created invoice for a pending request
+///
+/// Called by the relay after creating a BOLT11 invoice.
+/// Also registers the swap so complete_swap works later.
+pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceResponse {
+    // Validate payment_hash length
+    if request.payment_hash.len() != 32 {
+        return SubmitInvoiceResponse {
+            success: false,
+            error: Some("Invalid payment_hash length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    let mut state = STATE.write().unwrap();
+
+    // Find the request
+    let request_info = match state.onramp_requests.get_mut(&request.request_id) {
+        Some(info) => info,
+        None => {
+            return SubmitInvoiceResponse {
+                success: false,
+                error: Some("Request not found".to_string()),
+            };
+        }
+    };
+
+    // Check state
+    if !matches!(request_info.state, OnrampRequestState::Pending) {
+        return SubmitInvoiceResponse {
+            success: false,
+            error: Some("Request is not in pending state".to_string()),
+        };
+    }
+
+    // Update the request with invoice info
+    request_info.invoice = Some(request.invoice);
+    request_info.payment_hash = Some(request.payment_hash.clone());
+    request_info.expiry_timestamp = Some(request.expiry_timestamp);
+    request_info.state = OnrampRequestState::Ready;
+
+    // Also register the swap (so complete_swap works)
+    let mut payment_hash_arr = [0u8; 32];
+    payment_hash_arr.copy_from_slice(&request.payment_hash);
+
+    let swap_info = SwapInfo {
+        payment_hash: request.payment_hash,
+        amount_msat: request_info.amount_sats * 1000,
+        recipient: request_info.recipient,
+        created_at: blocktime(),
+        expiry_timestamp: request.expiry_timestamp,
+        state: SwapState::Pending,
+    };
+
+    state.swaps.insert(payment_hash_arr, swap_info);
+
+    SubmitInvoiceResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Get the invoice for a request (client polling)
+///
+/// Called by clients to check if their invoice is ready.
+pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
+    let state = STATE.read().unwrap();
+
+    match state.onramp_requests.get(&request_id) {
+        Some(info) => GetInvoiceResponse {
+            state: info.state.clone(),
+            invoice: info.invoice.clone(),
+            error: None,
+        },
+        None => GetInvoiceResponse {
+            state: OnrampRequestState::Failed {
+                reason: "Request not found".to_string(),
+            },
+            invoice: None,
+            error: Some("Request not found".to_string()),
+        },
+    }
+}
+
+/// Mark an onramp request as completed (called after complete_swap)
+///
+/// Internal function to update onramp request state when swap completes.
+pub fn mark_onramp_completed_impl(payment_hash: &[u8], block_index: Nat) {
+    let mut state = STATE.write().unwrap();
+
+    // Find the request by payment_hash
+    for request in state.onramp_requests.values_mut() {
+        if let Some(ref ph) = request.payment_hash {
+            if ph.as_slice() == payment_hash {
+                request.state = OnrampRequestState::Completed { block_index };
+                break;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Offramp Implementation (ckBTC → Lightning)
+// =============================================================================
+
+/// Request an offramp (ckBTC → Lightning)
+///
+/// Called by a user who wants to pay a Lightning invoice using their ckBTC.
+/// The canister takes custody of the ckBTC via ICRC-2 transfer_from.
+/// The relay then pays the invoice and reports success/failure.
+pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
+    let caller = msg_caller();
+
+    // Parse the invoice to extract amount and payment_hash
+    let invoice = match lightning_invoice::Bolt11Invoice::from_str(&request.invoice) {
+        Ok(inv) => inv,
+        Err(e) => {
+            return OfframpResponse {
+                request_id: String::new(),
+                success: false,
+                amount_sats: None,
+                error: Some(format!("Invalid invoice: {}", e)),
+            };
+        }
+    };
+
+    // Get amount in millisatoshis
+    let amount_msat = match invoice.amount_milli_satoshis() {
+        Some(amt) => amt,
+        None => {
+            return OfframpResponse {
+                request_id: String::new(),
+                success: false,
+                amount_sats: None,
+                error: Some("Invoice has no amount specified".to_string()),
+            };
+        }
+    };
+
+    let amount_sats = amount_msat / 1000;
+
+    // Extract payment hash
+    let payment_hash_slice: &[u8] = invoice.payment_hash().as_ref();
+    let payment_hash = payment_hash_slice.to_vec();
+
+    // Get invoice expiry
+    let invoice_expiry = invoice.expires_at()
+        .map(|d| d.as_secs())
+        .unwrap_or(ic_cdk::api::time() / 1_000_000_000 + 3600); // Default 1 hour
+
+    // Generate request_id from payment_hash
+    let request_id = payment_hash.iter()
+        .take(16)
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
+    // Take custody of user's ckBTC via ICRC-2 transfer_from
+    // User must have called icrc2_approve(ckLightning canister, amount + fee) first
+    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+    let canister_principal = canister_self();
+
+    // Transfer ckBTC from user to canister
+    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+        spender_subaccount: None,
+        from: icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        },
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: canister_principal,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(amount_sats),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
+    )> = ic_cdk::call(ckbtc_ledger, "icrc2_transfer_from", (transfer_args,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(_block_index) => {
+                // Success - store the offramp request
+                let now = ic_cdk::api::time();
+
+                let request_info = OfframpRequestInfo {
+                    request_id: request_id.clone(),
+                    user: caller,
+                    invoice: request.invoice.clone(),
+                    amount_sats,
+                    amount_msat,
+                    payment_hash: payment_hash.clone(),
+                    invoice_expiry,
+                    fallback_btc_address: request.fallback_btc_address,
+                    created_at: now,
+                    state: OfframpRequestState::Pending,
+                    preimage: None,
+                };
+
+                {
+                    let mut state = STATE.write().unwrap();
+                    state.offramp_requests.insert(request_id.clone(), request_info);
+                }
+
+                OfframpResponse {
+                    request_id,
+                    success: true,
+                    amount_sats: Some(amount_sats),
+                    error: None,
+                }
+            }
+            Err(err) => {
+                OfframpResponse {
+                    request_id: String::new(),
+                    success: false,
+                    amount_sats: Some(amount_sats),
+                    error: Some(format!("Failed to take custody of ckBTC: {:?}", err)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            OfframpResponse {
+                request_id: String::new(),
+                success: false,
+                amount_sats: Some(amount_sats),
+                error: Some(format!("ICRC-2 transfer_from failed: {:?} - {}", code, msg)),
+            }
+        }
+    }
+}
+
+/// Get all pending offramp requests for the relay to process
+///
+/// Called by the relay to find requests that need invoices paid.
+pub fn get_pending_offramp_requests_impl() -> Vec<PendingOfframpRequest> {
+    let state = STATE.read().unwrap();
+
+    state.offramp_requests
+        .values()
+        .filter(|req| matches!(req.state, OfframpRequestState::Pending))
+        .map(|req| PendingOfframpRequest {
+            request_id: req.request_id.clone(),
+            invoice: req.invoice.clone(),
+            amount_msat: req.amount_msat,
+            payment_hash: req.payment_hash.clone(),
+            created_at: req.created_at,
+            invoice_expiry: req.invoice_expiry,
+        })
+        .collect()
+}
+
+/// Mark an offramp request as payment in progress
+///
+/// Called by the relay when it starts attempting to pay the invoice.
+pub fn mark_offramp_in_progress_impl(request_id: &str) -> bool {
+    let mut state = STATE.write().unwrap();
+
+    if let Some(request) = state.offramp_requests.get_mut(request_id) {
+        if matches!(request.state, OfframpRequestState::Pending) {
+            request.state = OfframpRequestState::PaymentInProgress;
+            return true;
+        }
+    }
+    false
+}
+
+/// Complete an offramp request after successful payment
+///
+/// Called by the relay after successfully paying the Lightning invoice.
+pub fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
+    // Validate preimage length
+    if request.preimage.len() != 32 {
+        return CompleteOfframpResponse {
+            success: false,
+            error: Some("Preimage must be 32 bytes".to_string()),
+        };
+    }
+
+    // Verify preimage matches payment_hash
+    let computed_hash = bitcoin::hashes::sha256::Hash::hash(&request.preimage);
+    let computed_hash_bytes = computed_hash.as_byte_array();
+
+    let mut state = STATE.write().unwrap();
+
+    let request_info = match state.offramp_requests.get_mut(&request.request_id) {
+        Some(info) => info,
+        None => {
+            return CompleteOfframpResponse {
+                success: false,
+                error: Some("Request not found".to_string()),
+            };
+        }
+    };
+
+    // Verify payment_hash matches
+    if request_info.payment_hash.as_slice() != computed_hash_bytes {
+        return CompleteOfframpResponse {
+            success: false,
+            error: Some("Preimage does not match payment_hash".to_string()),
+        };
+    }
+
+    // Check state
+    if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+        return CompleteOfframpResponse {
+            success: false,
+            error: Some(format!("Invalid state for completion: {:?}", request_info.state)),
+        };
+    }
+
+    // Mark as completed
+    request_info.state = OfframpRequestState::Completed {
+        preimage: request.preimage.clone(),
+    };
+    request_info.preimage = Some(request.preimage);
+
+    CompleteOfframpResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Fail an offramp request and initiate refund
+///
+/// Called by the relay when it fails to pay the Lightning invoice.
+/// The ckBTC is refunded to the user.
+pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpResponse {
+    let (user, amount_sats) = {
+        let mut state = STATE.write().unwrap();
+
+        let request_info = match state.offramp_requests.get_mut(&request.request_id) {
+            Some(info) => info,
+            None => {
+                return FailOfframpResponse {
+                    success: false,
+                    refund_block_index: None,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+        };
+
+        // Check state
+        if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+            return FailOfframpResponse {
+                success: false,
+                refund_block_index: None,
+                error: Some(format!("Invalid state for failure: {:?}", request_info.state)),
+            };
+        }
+
+        // Mark as failed first
+        request_info.state = OfframpRequestState::Failed {
+            reason: request.reason.clone(),
+        };
+
+        (request_info.user, request_info.amount_sats)
+    };
+
+    // Refund ckBTC to user
+    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+
+    let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: user,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(amount_sats),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_args,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => {
+                // Update state to refunded
+                let mut state = STATE.write().unwrap();
+                if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
+                    request_info.state = OfframpRequestState::Refunded {
+                        block_index: block_index.clone(),
+                    };
+                }
+
+                FailOfframpResponse {
+                    success: true,
+                    refund_block_index: Some(block_index),
+                    error: None,
+                }
+            }
+            Err(err) => {
+                FailOfframpResponse {
+                    success: false,
+                    refund_block_index: None,
+                    error: Some(format!("Refund transfer failed: {:?}", err)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            FailOfframpResponse {
+                success: false,
+                refund_block_index: None,
+                error: Some(format!("Refund call failed: {:?} - {}", code, msg)),
+            }
+        }
+    }
+}
+
+/// Get the status of an offramp request
+///
+/// Called by users to check the status of their offramp.
+pub fn get_offramp_status_impl(request_id: String) -> GetOfframpStatusResponse {
+    let state = STATE.read().unwrap();
+
+    match state.offramp_requests.get(&request_id) {
+        Some(info) => GetOfframpStatusResponse {
+            state: info.state.clone(),
+            amount_sats: info.amount_sats,
+            error: None,
+        },
+        None => GetOfframpStatusResponse {
+            state: OfframpRequestState::Failed {
+                reason: "Request not found".to_string(),
+            },
+            amount_sats: 0,
+            error: Some("Request not found".to_string()),
+        },
+    }
+}
+
+// =============================================================================
 // Lightning Channel Funding Verification Implementation
 // =============================================================================
 
@@ -1319,45 +1601,6 @@ pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLn
         success: true,
         error: None,
     }
-}
-
-/// Build a 2-of-2 multisig witness script for Lightning channel funding.
-///
-/// The script is: OP_2 <pubkey1> <pubkey2> OP_2 OP_CHECKMULTISIG
-/// Where pubkeys are sorted lexicographically (by byte comparison).
-fn build_funding_witness_script(pubkey1: &[u8], pubkey2: &[u8]) -> Result<ScriptBuf, String> {
-    // Validate pubkey lengths (33 bytes for compressed)
-    if pubkey1.len() != 33 || pubkey2.len() != 33 {
-        return Err("Invalid pubkey length (must be 33 bytes compressed)".to_string());
-    }
-
-    // Convert to fixed-size arrays
-    let pk1: [u8; 33] = pubkey1.try_into().map_err(|_| "Invalid pubkey1")?;
-    let pk2: [u8; 33] = pubkey2.try_into().map_err(|_| "Invalid pubkey2")?;
-
-    // Sort pubkeys lexicographically (as per Lightning BOLT spec)
-    let (first, second) = if pk1 < pk2 { (pk1, pk2) } else { (pk2, pk1) };
-
-    // Build 2-of-2 multisig script
-    let script = Builder::new()
-        .push_opcode(OP_PUSHNUM_2)
-        .push_slice(first)
-        .push_slice(second)
-        .push_opcode(OP_PUSHNUM_2)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-
-    Ok(script)
-}
-
-/// Derive the P2WSH funding address from two pubkeys.
-fn derive_funding_address(
-    pubkey1: &[u8],
-    pubkey2: &[u8],
-    network: bitcoin::Network,
-) -> Result<Address, String> {
-    let witness_script = build_funding_witness_script(pubkey1, pubkey2)?;
-    Ok(Address::p2wsh(&witness_script, network))
 }
 
 /// Verify a Lightning channel's funding UTXO on-chain
@@ -1564,86 +1807,6 @@ pub fn update_ln_channel_status_impl(channel_id: Vec<u8>, status: LnChannelStatu
         true
     } else {
         false
-    }
-}
-
-// =============================================================================
-// Lightning Signing Endpoints (Chainkey ECDSA)
-// =============================================================================
-
-/// Derivation path for the canister's Lightning funding key.
-/// Using a single key for all channels for simplicity.
-const LN_FUNDING_DERIVATION_PATH: &[&[u8]] = &[b"lightning", b"funding"];
-
-/// Get the canister's Lightning funding public key.
-///
-/// This key is derived via threshold ECDSA (chainkey) and is used as one of the
-/// two keys in the 2-of-2 multisig funding address for Lightning channels.
-/// The counterparty provides the other key.
-pub async fn get_ln_funding_pubkey_impl() -> LnFundingPubkeyResponse {
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
-        .iter()
-        .map(|s| s.to_vec())
-        .collect();
-
-    let pubkey = get_ecdsa_public_key(&ctx, derivation_path).await;
-
-    LnFundingPubkeyResponse {
-        pubkey,
-        address: None, // Address requires counterparty's pubkey
-    }
-}
-
-/// Sign a message hash for Lightning channel operations.
-///
-/// This is called by the relay when it needs a signature for:
-/// - Commitment transactions
-/// - HTLC transactions
-/// - Closing transactions
-///
-/// The canister signs using its Lightning funding key derived via chainkey ECDSA.
-pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
-    // Validate message hash length (must be 32 bytes for ECDSA)
-    if request.message_hash.len() != 32 {
-        return LnSignResponse {
-            success: false,
-            signature: None,
-            error: Some(format!(
-                "Invalid message_hash length: expected 32 bytes, got {}",
-                request.message_hash.len()
-            )),
-        };
-    }
-
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
-        .iter()
-        .map(|s| s.to_vec())
-        .collect();
-
-    // Log the signing request for auditing
-    if let Some(purpose) = &request.purpose {
-        ic_cdk::println!("Signing LN message for purpose: {}", purpose);
-    }
-
-    // Sign using chainkey ECDSA
-    let signature = sign_with_ecdsa(
-        ctx.key_name.to_string(),
-        derivation_path,
-        request.message_hash,
-    )
-    .await;
-
-    // Convert signature to bytes (compact 64-byte format: r || s)
-    let sig_bytes = signature.serialize_compact().to_vec();
-
-    LnSignResponse {
-        success: true,
-        signature: Some(sig_bytes),
-        error: None,
     }
 }
 
@@ -2083,52 +2246,164 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
     }
 }
 
-/// Send BTC from the shared LP address to a destination
-///
-/// Uses the LiquidityPoolShared derivation path for signing.
-async fn send_btc_from_lp_address(
-    destination_address: String,
-    amount_sat: u64,
-) -> Result<String, BtcError> {
+// =============================================================================
+// User BTC Operations (from depositor address)
+// =============================================================================
+
+/// Get the caller's BTC balance at their depositor address
+pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
+    let caller = msg_caller();
+
+    // Get or derive the caller's depositor address
+    let address = {
+        let state = STATE.read().unwrap();
+        state.btc_liquidity_addresses.get(&caller).cloned()
+    };
+
+    let address = match address {
+        Some(addr) => addr,
+        None => {
+            // Derive the address if not yet stored
+            let purpose = BtcPurpose::LiquidityDepositor(caller);
+            match get_segwit_address(purpose).await {
+                Ok(addr) => {
+                    // Store it for future use
+                    let mut state = STATE.write().unwrap();
+                    state.btc_liquidity_addresses.insert(caller, addr.clone());
+                    addr
+                }
+                Err(e) => {
+                    return DepositorBtcBalanceResponse {
+                        address: String::new(),
+                        balance_sat: 0,
+                        error: Some(format!("Failed to derive address: {:?}", e)),
+                    };
+                }
+            }
+        }
+    };
+
+    // Get balance from Bitcoin canister
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+    let balance = match bitcoin_get_balance(&GetBalanceRequest {
+        address: address.clone(),
+        network: ctx.network,
+        min_confirmations: Some(1),
+    })
+    .await
+    {
+        Ok(bal) => bal,
+        Err(e) => {
+            return DepositorBtcBalanceResponse {
+                address,
+                balance_sat: 0,
+                error: Some(format!("Failed to get balance: {:?}", e)),
+            };
+        }
+    };
+
+    DepositorBtcBalanceResponse {
+        address,
+        balance_sat: balance,
+        error: None,
+    }
+}
+
+/// Send BTC from the caller's depositor address to a destination
+pub async fn send_btc_from_depositor_address_impl(
+    request: SendFromDepositorRequest,
+) -> SendFromDepositorResponse {
+    let caller = msg_caller();
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
-    // Parse and validate destination address
-    let dst_address = Address::from_str(&destination_address)
-        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
-        .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("Address network mismatch: {:?}", e)))?;
+    if request.amount_sat == 0 {
+        return SendFromDepositorResponse {
+            success: false,
+            txid: None,
+            error: Some("Amount must be greater than 0".to_string()),
+        };
+    }
 
-    // Get the derivation path for the shared LP address
-    let purpose = BtcPurpose::LiquidityPoolShared;
+    // Parse and validate destination address
+    let dst_address = match Address::from_str(&request.destination_address) {
+        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
+            Ok(a) => a,
+            Err(e) => {
+                return SendFromDepositorResponse {
+                    success: false,
+                    txid: None,
+                    error: Some(format!("Address network mismatch: {:?}", e)),
+                };
+            }
+        },
+        Err(e) => {
+            return SendFromDepositorResponse {
+                success: false,
+                txid: None,
+                error: Some(format!("Invalid destination address: {}", e)),
+            };
+        }
+    };
+
+    // Get derivation path for caller's depositor address
+    let purpose = BtcPurpose::LiquidityDepositor(caller);
     let derivation_path = purpose.derivation_path();
 
     // Get our public key
     let public_key_bytes = get_ecdsa_public_key(&ctx, derivation_path.clone()).await;
-    let compressed_key = CompressedPublicKey::from_slice(&public_key_bytes)
-        .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
-    let public_key = PublicKey::from_slice(&public_key_bytes)
-        .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+    let compressed_key = match CompressedPublicKey::from_slice(&public_key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            return SendFromDepositorResponse {
+                success: false,
+                txid: None,
+                error: Some(format!("Failed to parse public key: {}", e)),
+            };
+        }
+    };
+    let public_key = match PublicKey::from_slice(&public_key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            return SendFromDepositorResponse {
+                success: false,
+                txid: None,
+                error: Some(format!("Failed to parse public key: {}", e)),
+            };
+        }
+    };
 
     // Generate our address (P2WPKH)
     let own_address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
 
     // Fetch UTXOs
-    let own_utxos = bitcoin_get_utxos(&GetUtxosRequest {
+    let own_utxos = match bitcoin_get_utxos(&GetUtxosRequest {
         address: own_address.to_string(),
         network: ctx.network,
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to fetch UTXOs: {:?}", e)))?
-    .utxos;
+    {
+        Ok(resp) => resp.utxos,
+        Err(e) => {
+            return SendFromDepositorResponse {
+                success: false,
+                txid: None,
+                error: Some(format!("Failed to fetch UTXOs: {:?}", e)),
+            };
+        }
+    };
 
     // Check we have enough funds
     let total_available: u64 = own_utxos.iter().map(|u| u.value).sum();
-    if total_available < amount_sat {
-        return Err(BtcError::Other(format!(
-            "Insufficient BTC in LP address: available {} sats, requested {} sats",
-            total_available, amount_sat
-        )));
+    if total_available < request.amount_sat {
+        return SendFromDepositorResponse {
+            success: false,
+            txid: None,
+            error: Some(format!(
+                "Insufficient BTC: available {} sats, requested {} sats",
+                total_available, request.amount_sat
+            )),
+        };
     }
 
     // Get fee rate
@@ -2141,7 +2416,7 @@ async fn send_btc_from_lp_address(
         &own_address,
         &own_utxos,
         &dst_address,
-        amount_sat,
+        request.amount_sat,
         fee_per_byte,
     )
     .await;
@@ -2159,12 +2434,402 @@ async fn send_btc_from_lp_address(
     .await;
 
     // Send transaction
-    bitcoin_send_transaction(&SendTransactionRequest {
+    match bitcoin_send_transaction(&SendTransactionRequest {
         network: ctx.network,
         transaction: serialize(&signed_tx),
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {:?}", e)))?;
+    {
+        Ok(_) => SendFromDepositorResponse {
+            success: true,
+            txid: Some(signed_tx.compute_txid().to_string()),
+            error: None,
+        },
+        Err(e) => SendFromDepositorResponse {
+            success: false,
+            txid: None,
+            error: Some(format!("Failed to send transaction: {:?}", e)),
+        },
+    }
+}
 
-    Ok(signed_tx.compute_txid().to_string())
+/// Fund a Lightning channel from LP BTC
+/// Builds and signs a transaction but does NOT broadcast it
+/// The relay passes this to LDK which handles the broadcast timing
+pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelResponse {
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    if request.amount_sat == 0 {
+        return FundChannelResponse {
+            success: false,
+            signed_tx: None,
+            txid: None,
+            error: Some("Amount must be greater than 0".to_string()),
+        };
+    }
+
+    // Parse and validate funding address
+    let funding_address = match Address::from_str(&request.funding_address) {
+        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
+            Ok(a) => a,
+            Err(e) => {
+                return FundChannelResponse {
+                    success: false,
+                    signed_tx: None,
+                    txid: None,
+                    error: Some(format!("Funding address network mismatch: {:?}", e)),
+                };
+            }
+        },
+        Err(e) => {
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some(format!("Invalid funding address: {}", e)),
+            };
+        }
+    };
+
+    // Get the derivation path for the shared LP address
+    let purpose = BtcPurpose::LiquidityPoolShared;
+    let derivation_path = purpose.derivation_path();
+
+    // Get our public key
+    let public_key_bytes = get_ecdsa_public_key(&ctx, derivation_path.clone()).await;
+    let compressed_key = match CompressedPublicKey::from_slice(&public_key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some(format!("Failed to parse public key: {}", e)),
+            };
+        }
+    };
+    let public_key = match PublicKey::from_slice(&public_key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some(format!("Failed to parse public key: {}", e)),
+            };
+        }
+    };
+
+    // Generate our address (P2WPKH)
+    let own_address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
+
+    // Fetch UTXOs
+    let own_utxos = match bitcoin_get_utxos(&GetUtxosRequest {
+        address: own_address.to_string(),
+        network: ctx.network,
+        filter: None,
+    })
+    .await
+    {
+        Ok(response) => response.utxos,
+        Err(e) => {
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some(format!("Failed to fetch UTXOs: {:?}", e)),
+            };
+        }
+    };
+
+    // Check we have enough funds (with some margin for fees)
+    let total_available: u64 = own_utxos.iter().map(|u| u.value).sum();
+    let fee_margin = 5000u64; // 5000 sats buffer for fees
+    if total_available < request.amount_sat + fee_margin {
+        return FundChannelResponse {
+            success: false,
+            signed_tx: None,
+            txid: None,
+            error: Some(format!(
+                "Insufficient BTC in LP: available {} sats, requested {} sats (+ ~{} fees)",
+                total_available, request.amount_sat, fee_margin
+            )),
+        };
+    }
+
+    // Get fee rate
+    let fee_per_byte = get_fee_per_byte(&ctx).await;
+
+    // Build transaction with prevouts (for P2WPKH)
+    let (transaction, prevouts) = p2wpkh::build_transaction(
+        &ctx,
+        &public_key,
+        &own_address,
+        &own_utxos,
+        &funding_address,
+        request.amount_sat,
+        fee_per_byte,
+    )
+    .await;
+
+    // Sign transaction
+    let signed_tx = p2wpkh::sign_transaction(
+        &ctx,
+        &public_key,
+        &own_address,
+        transaction,
+        &prevouts,
+        derivation_path,
+        sign_with_ecdsa,
+    )
+    .await;
+
+    // Serialize the transaction for return
+    let tx_bytes = serialize(&signed_tx);
+    let txid = signed_tx.compute_txid().to_string();
+
+    // Track the funding in canister state
+    {
+        let mut state = STATE.write().unwrap();
+        // Deduct from total LP BTC (it will go into channel)
+        state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(request.amount_sat);
+    }
+
+    FundChannelResponse {
+        success: true,
+        signed_tx: Some(tx_bytes),
+        txid: Some(txid),
+        error: None,
+    }
+}
+
+// =============================================================================
+// LP Liquidity Management (Canister-Controlled BTC for Lightning)
+// =============================================================================
+
+/// Get available UTXOs from the LP's BTC address for channel funding
+pub async fn get_funding_utxos_impl(min_amount_sats: u64) -> Result<GetFundingUtxosResponse, BtcError> {
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    // Get the LP BTC address
+    let lp_address = {
+        let state = STATE.read().unwrap();
+        state.lp_btc_address.clone()
+    };
+
+    let lp_address = match lp_address {
+        Some(addr) => addr,
+        None => {
+            return Ok(GetFundingUtxosResponse {
+                utxos: vec![],
+                total_sats: 0,
+                lp_address: None,
+            });
+        }
+    };
+
+    // Parse address
+    let address = Address::from_str(&lp_address)
+        .map_err(|e| BtcError::Other(format!("Invalid LP address: {}", e)))?
+        .require_network(ctx.bitcoin_network)
+        .map_err(|e| BtcError::Other(format!("LP address network mismatch: {:?}", e)))?;
+
+    // Fetch UTXOs from Bitcoin canister
+    let utxo_response = bitcoin_get_utxos(&GetUtxosRequest {
+        address: lp_address.clone(),
+        network: ctx.network,
+        filter: None,
+    })
+    .await
+    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+
+    // Get reserved UTXOs to exclude
+    let reserved = {
+        let state = STATE.read().unwrap();
+        state.reserved_utxos.clone()
+    };
+
+    // Filter out reserved UTXOs and convert to our type
+    let mut available_utxos = Vec::new();
+    let mut total_sats = 0u64;
+
+    for utxo in utxo_response.utxos {
+        let key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
+        if !reserved.contains_key(&key) {
+            total_sats += utxo.value;
+            available_utxos.push(LpBtcUtxo {
+                txid: utxo.outpoint.txid,
+                vout: utxo.outpoint.vout,
+                value_sats: utxo.value,
+                height: utxo.height,
+            });
+        }
+    }
+
+    // Sort by value descending (prefer larger UTXOs)
+    available_utxos.sort_by(|a, b| b.value_sats.cmp(&a.value_sats));
+
+    Ok(GetFundingUtxosResponse {
+        utxos: available_utxos,
+        total_sats,
+        lp_address: Some(lp_address),
+    })
+}
+
+/// Update channel balance after payment activity
+pub fn update_channel_balance_impl(request: UpdateChannelBalanceRequest) -> UpdateChannelBalanceResponse {
+    let channel_id: [u8; 32] = match request.channel_id.try_into() {
+        Ok(id) => id,
+        Err(_) => {
+            return UpdateChannelBalanceResponse {
+                success: false,
+                error: Some("Invalid channel_id length".to_string()),
+            };
+        }
+    };
+
+    let mut state = STATE.write().unwrap();
+
+    // Check if channel exists and get capacity for potential new entry
+    let channel_capacity = match state.ln_channels.get(&channel_id) {
+        Some(info) => info.capacity_sats,
+        None => {
+            return UpdateChannelBalanceResponse {
+                success: false,
+                error: Some("Channel not registered".to_string()),
+            };
+        }
+    };
+
+    // Update or insert channel balance
+    let balance = state.channel_balances.entry(channel_id).or_insert_with(|| {
+        LnChannelBalance {
+            channel_id: channel_id.to_vec(),
+            capacity_sats: channel_capacity,
+            our_balance_sats: channel_capacity, // Initially we funded it
+            their_balance_sats: 0,
+            is_active: true,
+            last_updated: blocktime(),
+        }
+    });
+
+    balance.our_balance_sats = request.our_balance_sats;
+    balance.their_balance_sats = request.their_balance_sats;
+    balance.last_updated = blocktime();
+
+    UpdateChannelBalanceResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Get overall LP liquidity status
+pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcError> {
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    // Get on-chain BTC balance
+    let (lp_address, channel_balances, total_btc_deposited, total_btc_in_channels) = {
+        let state = STATE.read().unwrap();
+        (
+            state.lp_btc_address.clone(),
+            state.channel_balances.clone(),
+            state.total_btc_deposited,
+            state.total_btc_in_channels,
+        )
+    };
+
+    // Get on-chain UTXOs
+    let (btc_onchain_sats, btc_utxo_count) = if let Some(addr) = &lp_address {
+        let utxo_response = bitcoin_get_utxos(&GetUtxosRequest {
+            address: addr.clone(),
+            network: ctx.network,
+            filter: None,
+        })
+        .await
+        .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+
+        let total: u64 = utxo_response.utxos.iter().map(|u| u.value).sum();
+        (total, utxo_response.utxos.len() as u32)
+    } else {
+        (0, 0)
+    };
+
+    // Calculate channel liquidity
+    let mut channel_total_capacity_sats = 0u64;
+    let mut channel_outbound_sats = 0u64;
+    let mut channel_inbound_sats = 0u64;
+    let mut channel_count = 0u32;
+
+    for balance in channel_balances.values() {
+        if balance.is_active {
+            channel_total_capacity_sats += balance.capacity_sats;
+            channel_outbound_sats += balance.our_balance_sats;
+            channel_inbound_sats += balance.their_balance_sats;
+            channel_count += 1;
+        }
+    }
+
+    // Get ckBTC pool balance from liquidity pool
+    let ckbtc_pool_sats = {
+        let state = STATE.read().unwrap();
+        state.liq_pool.get_total(&PoolAsset::CkBTC).0.try_into().unwrap_or(0)
+    };
+
+    Ok(LpLiquidityStatus {
+        ckbtc_pool_sats,
+        btc_onchain_sats,
+        btc_utxo_count,
+        channel_total_capacity_sats,
+        channel_outbound_sats,
+        channel_inbound_sats,
+        channel_count,
+        total_btc_deposited,
+        total_btc_in_channels,
+    })
+}
+
+/// Reserve UTXOs for a pending channel open
+pub fn reserve_utxos_for_channel_impl(utxos: &[LpBtcUtxo], channel_id: [u8; 32]) {
+    let mut state = STATE.write().unwrap();
+    for utxo in utxos {
+        let key = (utxo.txid.clone(), utxo.vout);
+        state.reserved_utxos.insert(key, channel_id);
+    }
+}
+
+/// Release reserved UTXOs (on channel open failure)
+pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
+    let mut state = STATE.write().unwrap();
+    state.reserved_utxos.retain(|_, v| *v != channel_id);
+}
+
+/// Called when a channel is successfully funded - update tracking
+pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
+    let mut state = STATE.write().unwrap();
+
+    // Remove from reserved UTXOs
+    state.reserved_utxos.retain(|_, v| *v != channel_id);
+
+    // Update total BTC in channels
+    state.total_btc_in_channels += capacity_sats;
+
+    // Initialize channel balance
+    state.channel_balances.insert(channel_id, LnChannelBalance {
+        channel_id: channel_id.to_vec(),
+        capacity_sats,
+        our_balance_sats: capacity_sats, // We funded it, so initially all ours
+        their_balance_sats: 0,
+        is_active: true,
+        last_updated: blocktime(),
+    });
+}
+
+/// Called when a channel is closed - update tracking
+pub fn channel_closed_impl(channel_id: [u8; 32]) {
+    let mut state = STATE.write().unwrap();
+
+    if let Some(balance) = state.channel_balances.get_mut(&channel_id) {
+        balance.is_active = false;
+        // Note: total_btc_in_channels should be reduced when we receive the closing tx funds
+    }
 }

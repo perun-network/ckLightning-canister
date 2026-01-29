@@ -32,16 +32,44 @@ type CklError = variant {
   ConfirmationError;
   SerializationError;
 };
+type CompleteOfframpRequest = record {
+  request_id : text;
+  payment_hash : blob;
+  preimage : blob;
+};
+type CompleteOfframpResponse = record { error : opt text; success : bool };
 type CompleteSwapRequest = record { payment_hash : blob; preimage : blob };
 type CompleteSwapResponse = record {
   block_index : opt nat;
   error : opt text;
   success : bool;
 };
+type DepositorBtcBalanceResponse = record {
+  error : opt text;
+  address : text;
+  balance_sat : nat64;
+};
 type Event = variant {
   Disputed : record { state : RegisteredState; timestamp : nat64 };
   Funded : record { who : blob; total : nat; timestamp : nat64 };
   Concluded : record { state : RegisteredState; timestamp : nat64 };
+};
+type FailOfframpRequest = record {
+  request_id : text;
+  payment_hash : blob;
+  reason : text;
+};
+type FailOfframpResponse = record {
+  error : opt text;
+  success : bool;
+  refund_block_index : opt nat;
+};
+type FundChannelRequest = record { funding_address : text; amount_sat : nat64 };
+type FundChannelResponse = record {
+  txid : opt text;
+  signed_tx : opt blob;
+  error : opt text;
+  success : bool;
 };
 type Funding = variant { Pool : PoolFunding; Channel : ChannelFunding };
 type FundingLPArgs = record { signature : blob; pool_funding : PoolFunding };
@@ -57,6 +85,21 @@ type FundingLPQueryArgs = record {
 type GetBtcBalancesResponse = record {
   msg : SetBtcAddressMsg;
   balances : vec record { principal; opt nat64 };
+};
+type GetFundingUtxosResponse = record {
+  lp_address : opt text;
+  total_sats : nat64;
+  utxos : vec LpBtcUtxo;
+};
+type GetInvoiceResponse = record {
+  invoice : opt text;
+  error : opt text;
+  state : OnrampRequestState;
+};
+type GetOfframpStatusResponse = record {
+  error : opt text;
+  state : OfframpRequestState;
+  amount_sats : nat64;
 };
 type GetUtxosResponse = record {
   next_page : opt blob;
@@ -114,6 +157,12 @@ type LpBtcDepositResponse = record {
   error : opt text;
   success : bool;
 };
+type LpBtcUtxo = record {
+  height : nat32;
+  value_sats : nat64;
+  txid : blob;
+  vout : nat32;
+};
 type LpBtcWithdrawRequest = record {
   destination_address : text;
   amount_sat : nat64;
@@ -130,6 +179,17 @@ type LpDepositResponse = record {
   new_balance : nat;
   success : bool;
 };
+type LpLiquidityStatus = record {
+  total_btc_in_channels : nat64;
+  channel_count : nat32;
+  channel_total_capacity_sats : nat64;
+  channel_outbound_sats : nat64;
+  btc_onchain_sats : nat64;
+  channel_inbound_sats : nat64;
+  total_btc_deposited : nat64;
+  btc_utxo_count : nat32;
+  ckbtc_pool_sats : nat64;
+};
 type LpWithdrawResponse = record {
   amount_withdrawn : nat;
   block_index : opt nat;
@@ -143,7 +203,55 @@ type NotifyArgs = record {
   block_height : nat64;
   funding : Funding;
 };
+type OfframpRequest = record {
+  fallback_btc_address : opt text;
+  invoice : text;
+};
+type OfframpRequestState = variant {
+  Failed : record { reason : text };
+  Refunded : record { block_index : nat };
+  PaymentInProgress;
+  Completed : record { preimage : blob };
+  Pending;
+};
+type OfframpResponse = record {
+  request_id : text;
+  error : opt text;
+  amount_sats : opt nat64;
+  success : bool;
+};
+type OnrampInvoiceRequest = record {
+  recipient : principal;
+  amount_sats : nat64;
+};
+type OnrampInvoiceResponse = record {
+  request_id : text;
+  error : opt text;
+  success : bool;
+};
+type OnrampRequestState = variant {
+  Failed : record { reason : text };
+  Ready;
+  Completed : record { block_index : nat };
+  Expired;
+  Pending;
+};
 type Outpoint = record { txid : blob; vout : nat32 };
+type PendingInvoiceRequest = record {
+  request_id : text;
+  recipient : principal;
+  created_at : nat64;
+  amount_msat : nat64;
+  amount_sats : nat64;
+};
+type PendingOfframpRequest = record {
+  request_id : text;
+  payment_hash : blob;
+  invoice_expiry : nat64;
+  invoice : text;
+  created_at : nat64;
+  amount_msat : nat64;
+};
 type PoolAsset = variant { BTC; CkBTC };
 type PoolFunding = record {
   depositor : principal;
@@ -169,7 +277,6 @@ type RegisterLnChannelRequest = record {
   remote_node_id : blob;
   local_node_id : blob;
 };
-type RegisterLnChannelResponse = record { error : opt text; success : bool };
 type RegisterSwapRequest = record {
   payment_hash : blob;
   recipient : principal;
@@ -178,27 +285,42 @@ type RegisterSwapRequest = record {
 };
 type RegisterSwapResponse = record { error : opt text; success : bool };
 type RegisteredState = record { state : State; timeout : nat64 };
-type Result = variant { Ok; Err : CklError };
-type Result_1 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
-type Result_10 = variant {
+type Result = variant { Ok; Err : text };
+type Result_1 = variant { Ok; Err : CklError };
+type Result_10 = variant { Ok : SendBtcTxMsg; Err : BtcError };
+type Result_11 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
+type Result_12 = variant {
+  Ok : SetLiquidityBtcAddressResponse;
+  Err : BtcError;
+};
+type Result_13 = variant {
   Ok : TransactionICRCNotification;
   Err : ICPReceiverError;
 };
-type Result_11 = variant { Ok : nat; Err : CklError };
-type Result_2 = variant { Ok : text; Err : BtcError };
-type Result_3 = variant { Ok : LpBtcAddressResponse; Err : BtcError };
-type Result_4 = variant { Ok : GetUtxosResponse; Err : text };
-type Result_5 = variant { Ok : SignedCandidInvoice; Err : BtcError };
-type Result_6 = variant { Ok : HoldingsResponse; Err : CklError };
-type Result_7 = variant { Ok : SendBtcTxMsg; Err : BtcError };
-type Result_8 = variant { Ok : SetBtcAddressResponse; Err : BtcError };
-type Result_9 = variant { Ok : SetLiquidityBtcAddressResponse; Err : BtcError };
+type Result_14 = variant { Ok : nat; Err : CklError };
+type Result_2 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
+type Result_3 = variant { Ok : text; Err : BtcError };
+type Result_4 = variant { Ok : GetFundingUtxosResponse; Err : BtcError };
+type Result_5 = variant { Ok : LpBtcAddressResponse; Err : BtcError };
+type Result_6 = variant { Ok : LpLiquidityStatus; Err : BtcError };
+type Result_7 = variant { Ok : GetUtxosResponse; Err : text };
+type Result_8 = variant { Ok : SignedCandidInvoice; Err : BtcError };
+type Result_9 = variant { Ok : HoldingsResponse; Err : CklError };
 type SendBtcTxArgs = record {
   recipient : text;
   from_address_type : BtcAddressType;
   amount : nat64;
 };
 type SendBtcTxMsg = variant { Fail; Success : text };
+type SendFromDepositorRequest = record {
+  destination_address : text;
+  amount_sat : nat64;
+};
+type SendFromDepositorResponse = record {
+  txid : opt text;
+  error : opt text;
+  success : bool;
+};
 type SendRequest = record {
   destination_address : text;
   amount_in_satoshi : nat64;
@@ -239,6 +361,12 @@ type State = record {
   allocation : vec nat;
   channel : blob;
 };
+type SubmitInvoiceRequest = record {
+  request_id : text;
+  payment_hash : blob;
+  invoice : text;
+  expiry_timestamp : nat64;
+};
 type TotalLpBalanceResponse = record {
   total_btc : nat;
   num_depositors : nat64;
@@ -250,6 +378,11 @@ type TransactionICRCNotification = record {
   memo : blob;
   timestamp : opt nat64;
   amount : nat64;
+};
+type UpdateChannelBalanceRequest = record {
+  channel_id : blob;
+  our_balance_sats : nat64;
+  their_balance_sats : nat64;
 };
 type Utxo = record { height : nat32; value : nat64; outpoint : Outpoint };
 type VerifyLnChannelResponse = record {
@@ -269,6 +402,23 @@ type WithdrawalReq = record {
   receiver : principal;
 };
 service : (Network) -> {
+  // Called when a channel is closed
+  // 
+  // The relay calls this when a channel is closed (cooperative or force).
+  // Updates LP accounting to mark the channel as inactive.
+  __candid_method_channel_closed : (blob) -> (Result);
+  // Called when a channel is successfully funded
+  // 
+  // The relay calls this after a channel funding transaction is confirmed.
+  // Updates LP accounting to track BTC locked in channels.
+  __candid_method_channel_funded : (blob, nat64) -> (Result);
+  // Complete an offramp request after successful payment
+  // 
+  // Called by the relay after successfully paying the Lightning invoice.
+  // Requires the payment preimage as proof of payment.
+  __candid_method_complete_offramp : (CompleteOfframpRequest) -> (
+      CompleteOfframpResponse,
+    );
   // Complete a Lightning → ckBTC swap after payment received
   // 
   // Called by the relay node when a Lightning payment is received and claimed.
@@ -287,7 +437,7 @@ service : (Network) -> {
   // The canister will scan UTXOs at the LP address and credit new deposits
   // to the caller's LP balance.
   __candid_method_deposit_btc : (LpBtcDepositRequest) -> (LpBtcDepositResponse);
-  __candid_method_deposit_channel : (ChannelFunding, blob) -> (Result);
+  __candid_method_deposit_channel : (ChannelFunding, blob) -> (Result_1);
   // Deposit ckBTC into the liquidity pool
   // 
   // The caller must first approve the canister to spend their ckBTC using ICRC-2:
@@ -296,10 +446,38 @@ service : (Network) -> {
   // 
   // The canister will pull ckBTC from the caller and credit their LP balance.
   __candid_method_deposit_ckbtc : (nat) -> (LpDepositResponse);
-  __candid_method_deposit_lp : (FundingLPArgs) -> (Result);
-  __candid_method_get_btc_balance : (opt nat64) -> (Result_1);
-  __candid_method_get_btc_liquidity_address_for_caller : () -> (Result_2);
-  __candid_method_get_ln_address : () -> (Result_2);
+  __candid_method_deposit_lp : (FundingLPArgs) -> (Result_1);
+  // Fail an offramp request and initiate refund
+  // 
+  // Called by the relay when it fails to pay the Lightning invoice.
+  // The ckBTC is refunded to the user.
+  __candid_method_fail_offramp : (FailOfframpRequest) -> (FailOfframpResponse);
+  // Fund a Lightning channel from LP BTC
+  // 
+  // Builds and signs a transaction from LP UTXOs to the channel funding address.
+  // The transaction is NOT broadcast - it's returned to the relay which passes
+  // it to LDK for proper broadcast timing and channel setup.
+  __candid_method_fund_channel : (FundChannelRequest) -> (FundChannelResponse);
+  __candid_method_get_btc_balance : (opt nat64) -> (Result_2);
+  __candid_method_get_btc_liquidity_address_for_caller : () -> (Result_3);
+  // Get the caller's BTC balance at their depositor address
+  // 
+  // Returns the caller's BTC address (derived via threshold ECDSA) and its balance.
+  // The address is derived from the caller's principal using BtcPurpose::LiquidityDepositor.
+  __candid_method_get_depositor_btc_balance : () -> (
+      DepositorBtcBalanceResponse,
+    );
+  // Get available UTXOs from the LP's BTC address for channel funding
+  // 
+  // The relay calls this to get UTXOs it can use to fund Lightning channels.
+  // Only returns UTXOs that are not reserved for pending channel opens.
+  __candid_method_get_funding_utxos : (nat64) -> (Result_4);
+  // Get the invoice for a request (client polling)
+  // 
+  // Called by clients to check if their invoice is ready.
+  // Returns the current state and the invoice if available.
+  __candid_method_get_invoice_by_request : (text) -> (GetInvoiceResponse) query;
+  __candid_method_get_ln_address : () -> (Result_3);
   // Get the canister's Lightning funding public key
   // 
   // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
@@ -309,17 +487,45 @@ service : (Network) -> {
   // 
   // Returns the single shared Bitcoin address for LP BTC deposits.
   // All users deposit to this address, then call deposit_btc() to claim.
-  __candid_method_get_lp_btc_address : () -> (Result_3);
+  __candid_method_get_lp_btc_address : () -> (Result_5);
+  // Get overall LP liquidity status
+  // 
+  // Returns the current state of both ckBTC pool and BTC/Lightning liquidity.
+  // Useful for monitoring available capacity for onramp/offramp operations.
+  __candid_method_get_lp_liquidity_status : () -> (Result_6);
   // Get the caller's LP balance
   // 
   // Returns the caller's deposited ckBTC and BTC balances in the liquidity pool.
   __candid_method_get_my_lp_balance : () -> (LpBalanceResponse) query;
+  // Get the status of an offramp request
+  // 
+  // Called by users to check the status of their offramp.
+  __candid_method_get_offramp_status : (text) -> (
+      GetOfframpStatusResponse,
+    ) query;
+  // Get all pending invoice requests for the relay to process
+  // 
+  // Called by the relay to find requests that need invoices created.
+  // The relay should poll this periodically and create invoices for pending requests.
+  __candid_method_get_pending_invoice_requests : () -> (
+      vec PendingInvoiceRequest,
+    ) query;
+  // Get all pending offramp requests for the relay to process
+  // 
+  // Called by the relay to find offramp requests that need invoices paid.
+  __candid_method_get_pending_offramp_requests : () -> (
+      vec PendingOfframpRequest,
+    ) query;
   // Get the total LP balance across all depositors
   // 
   // Returns the total ckBTC and BTC in the liquidity pool, plus the number of depositors.
   __candid_method_get_total_lp_balance : () -> (TotalLpBalanceResponse) query;
   // Debug: Get raw UTXOs for an address from the Bitcoin canister
-  __candid_method_get_utxos_for_address : (text) -> (Result_4);
+  __candid_method_get_utxos_for_address : (text) -> (Result_7);
+  // Mark an offramp request as payment in progress
+  // 
+  // Called by the relay when it starts attempting to pay the invoice.
+  __candid_method_mark_offramp_in_progress : (text) -> (bool);
   __candid_method_query_events : (ChannelTime) -> (text) query;
   // Query a specific Lightning channel by ID
   __candid_method_query_ln_channel : (QueryLnChannelRequest) -> (
@@ -327,13 +533,13 @@ service : (Network) -> {
     ) query;
   // Query all registered Lightning channels
   __candid_method_query_ln_channels : () -> (QueryLnChannelsResponse) query;
-  __candid_method_query_ln_invoice : (LnInvoiceRequest) -> (Result_5);
+  __candid_method_query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
   __candid_method_query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
-      Result_6,
+      Result_9,
     ) query;
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
@@ -342,7 +548,7 @@ service : (Network) -> {
   // Called by the relay node when a channel is opened.
   // Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
   __candid_method_register_ln_channel : (RegisterLnChannelRequest) -> (
-      RegisterLnChannelResponse,
+      CompleteOfframpResponse,
     );
   // Register a new Lightning → ckBTC swap
   // 
@@ -351,9 +557,40 @@ service : (Network) -> {
   __candid_method_register_swap : (RegisterSwapRequest) -> (
       RegisterSwapResponse,
     );
-  __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_7);
-  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_8);
-  __candid_method_set_btc_liquidity_address : () -> (Result_9);
+  // Request an offramp (ckBTC → Lightning)
+  // 
+  // Called by a user who wants to pay a Lightning invoice using their ckBTC.
+  // User must first call icrc2_approve on ckBTC ledger for the canister.
+  // The canister takes custody of the ckBTC and the relay pays the invoice.
+  __candid_method_request_offramp : (OfframpRequest) -> (OfframpResponse);
+  // Request a new onramp invoice for Lightning → ckBTC swap
+  // 
+  // Called by clients to initiate a swap. Returns a request_id that can be
+  // used to poll for the invoice once the relay creates it.
+  // 
+  // Flow:
+  // 1. Client calls this endpoint with (recipient, amount)
+  // 2. Canister creates pending request, returns request_id
+  // 3. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
+  // 4. Relay calls submit_invoice with the invoice
+  // 5. Client polls get_invoice_by_request until invoice is ready
+  // 6. Client pays the invoice
+  // 7. Relay receives payment, calls complete_swap
+  __candid_method_request_onramp_invoice : (OnrampInvoiceRequest) -> (
+      OnrampInvoiceResponse,
+    );
+  // Send BTC from the caller's depositor address to a destination
+  // 
+  // The caller must have BTC at their depositor address (derived from their principal).
+  // The canister signs the transaction using threshold ECDSA.
+  // 
+  // Use this to send BTC to the LP address for depositing to the liquidity pool.
+  __candid_method_send_btc_from_depositor_address : (
+      SendFromDepositorRequest,
+    ) -> (SendFromDepositorResponse);
+  __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_10);
+  __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_11);
+  __candid_method_set_btc_liquidity_address : () -> (Result_12);
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
@@ -361,8 +598,22 @@ service : (Network) -> {
   // Lightning funding key derived via chainkey ECDSA.
   __candid_method_sign_ln_message : (LnSignRequest) -> (LnSignResponse);
   __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
-  __candid_method_transaction_notification : (NotifyArgs) -> (Result_10);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_11);
+  // Submit a created invoice for a pending request
+  // 
+  // Called by the relay after creating a BOLT11 invoice for a pending request.
+  // This also registers the swap internally so complete_swap will work.
+  __candid_method_submit_invoice : (SubmitInvoiceRequest) -> (
+      RegisterSwapResponse,
+    );
+  __candid_method_transaction_notification : (NotifyArgs) -> (Result_13);
+  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_14);
+  // Update channel balance after Lightning payment activity
+  // 
+  // The relay calls this to report updated channel balances after payments.
+  // This allows the canister to track available outbound/inbound capacity.
+  __candid_method_update_channel_balance : (UpdateChannelBalanceRequest) -> (
+      RegisterSwapResponse,
+    );
   // Verify a Lightning channel's funding UTXO on-chain
   // 
   // Queries the Bitcoin canister to check if the funding UTXO exists
@@ -382,8 +633,23 @@ service : (Network) -> {
   // Withdraws the specified amount of ckBTC from the caller's LP balance.
   // The ckBTC is transferred directly to the caller's principal.
   __candid_method_withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
-  __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result);
+  __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
+  // Called when a channel is closed
+  // 
+  // The relay calls this when a channel is closed (cooperative or force).
+  // Updates LP accounting to mark the channel as inactive.
+  channel_closed : (blob) -> (Result);
+  // Called when a channel is successfully funded
+  // 
+  // The relay calls this after a channel funding transaction is confirmed.
+  // Updates LP accounting to track BTC locked in channels.
+  channel_funded : (blob, nat64) -> (Result);
   clear : () -> ();
+  // Complete an offramp request after successful payment
+  // 
+  // Called by the relay after successfully paying the Lightning invoice.
+  // Requires the payment preimage as proof of payment.
+  complete_offramp : (CompleteOfframpRequest) -> (RegisterSwapResponse);
   // Complete a Lightning → ckBTC swap after payment received
   // 
   // Called by the relay node when a Lightning payment is received and claimed.
@@ -400,7 +666,7 @@ service : (Network) -> {
   // The canister will scan UTXOs at the LP address and credit new deposits
   // to the caller's LP balance.
   deposit_btc : (LpBtcDepositRequest) -> (LpBtcDepositResponse);
-  deposit_channel : (ChannelFunding, blob) -> (Result);
+  deposit_channel : (ChannelFunding, blob) -> (Result_1);
   // Deposit ckBTC into the liquidity pool
   // 
   // The caller must first approve the canister to spend their ckBTC using ICRC-2:
@@ -409,14 +675,40 @@ service : (Network) -> {
   // 
   // The canister will pull ckBTC from the caller and credit their LP balance.
   deposit_ckbtc : (nat) -> (LpDepositResponse);
-  deposit_lp : (FundingLPArgs) -> (Result);
+  deposit_lp : (FundingLPArgs) -> (Result_1);
   dequeue : () -> (opt text);
   enqueue : (text) -> ();
+  // Fail an offramp request and initiate refund
+  // 
+  // Called by the relay when it fails to pay the Lightning invoice.
+  // The ckBTC is refunded to the user.
+  fail_offramp : (FailOfframpRequest) -> (FailOfframpResponse);
+  // Fund a Lightning channel from LP BTC
+  // 
+  // Builds and signs a transaction from LP UTXOs to the channel funding address.
+  // The transaction is NOT broadcast - it's returned to the relay which passes
+  // it to LDK for proper broadcast timing and channel setup.
+  fund_channel : (FundChannelRequest) -> (FundChannelResponse);
   // Returns the balance of the given bitcoin address.
   get_balance : (text) -> (nat64);
-  get_btc_balance : (opt nat64) -> (Result_1);
-  get_btc_liquidity_address_for_caller : () -> (Result_2);
-  get_ln_address : () -> (Result_2);
+  get_btc_balance : (opt nat64) -> (Result_2);
+  get_btc_liquidity_address_for_caller : () -> (Result_3);
+  // Get the caller's BTC balance at their depositor address
+  // 
+  // Returns the caller's BTC address (derived via threshold ECDSA) and its balance.
+  // The address is derived from the caller's principal using BtcPurpose::LiquidityDepositor.
+  get_depositor_btc_balance : () -> (DepositorBtcBalanceResponse);
+  // Get available UTXOs from the LP's BTC address for channel funding
+  // 
+  // The relay calls this to get UTXOs it can use to fund Lightning channels.
+  // Only returns UTXOs that are not reserved for pending channel opens.
+  get_funding_utxos : (nat64) -> (Result_4);
+  // Get the invoice for a request (client polling)
+  // 
+  // Called by clients to check if their invoice is ready.
+  // Returns the current state and the invoice if available.
+  get_invoice_by_request : (text) -> (GetInvoiceResponse) query;
+  get_ln_address : () -> (Result_3);
   // Get the canister's Lightning funding public key
   // 
   // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
@@ -426,41 +718,63 @@ service : (Network) -> {
   // 
   // Returns the single shared Bitcoin address for LP BTC deposits.
   // All users deposit to this address, then call deposit_btc() to claim.
-  get_lp_btc_address : () -> (Result_3);
+  get_lp_btc_address : () -> (Result_5);
+  // Get overall LP liquidity status
+  // 
+  // Returns the current state of both ckBTC pool and BTC/Lightning liquidity.
+  // Useful for monitoring available capacity for onramp/offramp operations.
+  get_lp_liquidity_status : () -> (Result_6);
   // Get the caller's LP balance
   // 
   // Returns the caller's deposited ckBTC and BTC balances in the liquidity pool.
   get_my_lp_balance : () -> (LpBalanceResponse) query;
+  // Get the status of an offramp request
+  // 
+  // Called by users to check the status of their offramp.
+  get_offramp_status : (text) -> (GetOfframpStatusResponse) query;
   // Returns a legacy P2PKH (Pay-to-PubKey-Hash) address for this smart contract.
   // 
   // This address uses an ECDSA public key and encodes it in the legacy Base58 format.
   // It is supported by all bitcoin wallets and full nodes.
-  get_p2pkh_address : () -> (Result_2);
+  get_p2pkh_address : () -> (Result_3);
   // Returns a Taproot (P2TR) address of this smart contract that supports **key path spending only**.
   // 
   // This address does not commit to a script path (it commits to an unspendable path per BIP-341).
   // It allows spending using a single Schnorr signature corresponding to the internal key.
-  get_p2tr_key_path_only_address : () -> (Result_2);
-  get_p2wpkh_address : () -> (Result_2);
-  get_segwit_address : (BtcPurpose) -> (Result_2);
+  get_p2tr_key_path_only_address : () -> (Result_3);
+  get_p2wpkh_address : () -> (Result_3);
+  // Get all pending invoice requests for the relay to process
+  // 
+  // Called by the relay to find requests that need invoices created.
+  // The relay should poll this periodically and create invoices for pending requests.
+  get_pending_invoice_requests : () -> (vec PendingInvoiceRequest) query;
+  // Get all pending offramp requests for the relay to process
+  // 
+  // Called by the relay to find offramp requests that need invoices paid.
+  get_pending_offramp_requests : () -> (vec PendingOfframpRequest) query;
+  get_segwit_address : (BtcPurpose) -> (Result_3);
   // Get the total LP balance across all depositors
   // 
   // Returns the total ckBTC and BTC in the liquidity pool, plus the number of depositors.
   get_total_lp_balance : () -> (TotalLpBalanceResponse) query;
   // Debug: Get raw UTXOs for an address from the Bitcoin canister
-  get_utxos_for_address : (text) -> (Result_4);
+  get_utxos_for_address : (text) -> (Result_7);
+  // Mark an offramp request as payment in progress
+  // 
+  // Called by the relay when it starts attempting to pay the invoice.
+  mark_offramp_in_progress : (text) -> (bool);
   peek : () -> (opt text) query;
   query_events : (ChannelTime) -> (text) query;
   // Query a specific Lightning channel by ID
   query_ln_channel : (QueryLnChannelRequest) -> (opt LnChannelInfo) query;
   // Query all registered Lightning channels
   query_ln_channels : () -> (QueryLnChannelsResponse) query;
-  query_ln_invoice : (LnInvoiceRequest) -> (Result_5);
+  query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
   query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
-  query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_6) query;
+  query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_9) query;
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
@@ -473,10 +787,39 @@ service : (Network) -> {
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
   register_swap : (RegisterSwapRequest) -> (RegisterSwapResponse);
-  send_btc_tx : (SendBtcTxArgs) -> (Result_7);
+  // Request an offramp (ckBTC → Lightning)
+  // 
+  // Called by a user who wants to pay a Lightning invoice using their ckBTC.
+  // User must first call icrc2_approve on ckBTC ledger for the canister.
+  // The canister takes custody of the ckBTC and the relay pays the invoice.
+  request_offramp : (OfframpRequest) -> (OfframpResponse);
+  // Request a new onramp invoice for Lightning → ckBTC swap
+  // 
+  // Called by clients to initiate a swap. Returns a request_id that can be
+  // used to poll for the invoice once the relay creates it.
+  // 
+  // Flow:
+  // 1. Client calls this endpoint with (recipient, amount)
+  // 2. Canister creates pending request, returns request_id
+  // 3. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
+  // 4. Relay calls submit_invoice with the invoice
+  // 5. Client polls get_invoice_by_request until invoice is ready
+  // 6. Client pays the invoice
+  // 7. Relay receives payment, calls complete_swap
+  request_onramp_invoice : (OnrampInvoiceRequest) -> (OnrampInvoiceResponse);
+  // Send BTC from the caller's depositor address to a destination
+  // 
+  // The caller must have BTC at their depositor address (derived from their principal).
+  // The canister signs the transaction using threshold ECDSA.
+  // 
+  // Use this to send BTC to the LP address for depositing to the liquidity pool.
+  send_btc_from_depositor_address : (LpBtcWithdrawRequest) -> (
+      SendFromDepositorResponse,
+    );
+  send_btc_tx : (SendBtcTxArgs) -> (Result_10);
   send_from_p2pkh_address : (SendRequest) -> (text);
-  set_btc_address : (SetBtcAddressArgs) -> (Result_8);
-  set_btc_liquidity_address : () -> (Result_9);
+  set_btc_address : (SetBtcAddressArgs) -> (Result_11);
+  set_btc_liquidity_address : () -> (Result_12);
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
@@ -485,8 +828,20 @@ service : (Network) -> {
   sign_ln_message : (LnSignRequest) -> (LnSignResponse);
   simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
-  transaction_notification : (NotifyArgs) -> (Result_10);
-  trigger_withdraw : (WithdrawalReq) -> (Result_11);
+  // Submit a created invoice for a pending request
+  // 
+  // Called by the relay after creating a BOLT11 invoice for a pending request.
+  // This also registers the swap internally so complete_swap will work.
+  submit_invoice : (SubmitInvoiceRequest) -> (RegisterSwapResponse);
+  transaction_notification : (NotifyArgs) -> (Result_13);
+  trigger_withdraw : (WithdrawalReq) -> (Result_14);
+  // Update channel balance after Lightning payment activity
+  // 
+  // The relay calls this to report updated channel balances after payments.
+  // This allows the canister to track available outbound/inbound capacity.
+  update_channel_balance : (UpdateChannelBalanceRequest) -> (
+      RegisterSwapResponse,
+    );
   // Verify a Lightning channel's funding UTXO on-chain
   // 
   // Queries the Bitcoin canister to check if the funding UTXO exists
@@ -502,5 +857,5 @@ service : (Network) -> {
   // Withdraws the specified amount of ckBTC from the caller's LP balance.
   // The ckBTC is transferred directly to the caller's principal.
   withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
-  withdraw_lp : (WithdrawalLPArgs) -> (Result);
+  withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
 }
