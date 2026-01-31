@@ -69,6 +69,7 @@ pub struct QueryBtcAddressResponse {
 pub enum BtcPurpose {
     LiquidityDepositor(Principal), // multiple: ["btc", "liq_deposit", principal]
     LnInvoiceDeposit,              // SINGLE: ["btc", "ln_invoice"]
+    LiquidityPoolShared,           // SINGLE: ["btc", "lp_shared"] - shared LP BTC address
 }
 
 #[derive(CandidType, Deserialize, Clone)]
@@ -90,6 +91,9 @@ impl BtcPurpose {
             }
             BtcPurpose::LnInvoiceDeposit => {
                 vec![b"btc".to_vec(), b"ln_invoice".to_vec()]
+            }
+            BtcPurpose::LiquidityPoolShared => {
+                vec![b"btc".to_vec(), b"lp_shared".to_vec()]
             }
         }
     }
@@ -256,6 +260,163 @@ pub struct HoldingsResponse {
     pub ckbtc_amount: Amount,
     pub btc_amount: Amount,
 }
+
+// =============================================================================
+// Simplified Liquidity Pool Types
+// =============================================================================
+
+/// Response for LP balance queries
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBalanceResponse {
+    pub ckbtc_balance: Amount,
+    pub btc_balance: Amount,
+}
+
+/// Response for LP deposit operations
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpDepositResponse {
+    pub success: bool,
+    pub new_balance: Amount,
+    pub error: Option<String>,
+}
+
+/// Response for LP withdraw operations
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpWithdrawResponse {
+    pub success: bool,
+    pub amount_withdrawn: Amount,
+    pub new_balance: Amount,
+    pub block_index: Option<Nat>,
+    pub error: Option<String>,
+}
+
+/// Response for total LP balance query
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct TotalLpBalanceResponse {
+    pub total_ckbtc: Amount,
+    pub total_btc: Amount,
+    pub num_depositors: u64,
+}
+
+// =============================================================================
+// BTC Liquidity Pool Types (shared LP address - Option C)
+// =============================================================================
+
+/// Response for getting the shared LP BTC address
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcAddressResponse {
+    pub address: String,
+}
+
+/// Request to deposit BTC to LP (after sending to shared LP address)
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcDepositRequest {
+    /// The txid of the deposit transaction (for tracking)
+    pub txid: Option<Vec<u8>>,
+    /// Amount deposited in satoshis
+    pub amount_sat: u64,
+}
+
+/// Response for BTC LP deposit
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcDepositResponse {
+    pub success: bool,
+    pub credited_amount: Amount,
+    pub new_btc_balance: Amount,
+    pub error: Option<String>,
+}
+
+/// Request to withdraw BTC from LP
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcWithdrawRequest {
+    /// Amount to withdraw in satoshis
+    pub amount_sat: u64,
+    /// Destination BTC address
+    pub destination_address: String,
+}
+
+/// Response for BTC LP withdrawal
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct LpBtcWithdrawResponse {
+    pub success: bool,
+    pub amount_withdrawn: Amount,
+    pub new_btc_balance: Amount,
+    pub txid: Option<String>,
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// User BTC Operations (from depositor address)
+// =============================================================================
+
+/// Request to send BTC from the caller's depositor address
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct SendFromDepositorRequest {
+    /// Amount to send in satoshis
+    pub amount_sat: u64,
+    /// Destination BTC address
+    pub destination_address: String,
+}
+
+/// Response for sending BTC from depositor address
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct SendFromDepositorResponse {
+    pub success: bool,
+    pub txid: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Response for getting depositor BTC balance
+#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Debug)]
+pub struct DepositorBtcBalanceResponse {
+    pub address: String,
+    pub balance_sat: u64,
+    pub error: Option<String>,
+}
+
+/// Request to fund a Lightning channel from LP BTC
+/// The canister will build and sign a transaction but NOT broadcast it
+/// The relay is responsible for passing it to LDK which handles broadcasting
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FundChannelRequest {
+    /// Amount to fund in satoshis
+    pub amount_sat: u64,
+    /// The funding output address (2-of-2 multisig P2WSH address)
+    pub funding_address: String,
+}
+
+/// Response for channel funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FundChannelResponse {
+    pub success: bool,
+    /// The signed funding transaction bytes (ready for broadcast)
+    pub signed_tx: Option<Vec<u8>>,
+    /// Transaction ID (for tracking)
+    pub txid: Option<String>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Pending BTC deposit info (stored in canister state)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PendingBtcDeposit {
+    /// Principal who initiated the deposit claim
+    pub depositor: Principal,
+    /// Transaction ID
+    pub txid: Vec<u8>,
+    /// Output index
+    pub vout: u32,
+    /// Amount in satoshis
+    pub amount_sat: u64,
+    /// When the deposit was detected
+    pub detected_at: u64,
+    /// Number of confirmations when last checked
+    pub confirmations: u32,
+    /// Whether the deposit has been credited
+    pub credited: bool,
+}
+
+// =============================================================================
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 
@@ -558,6 +719,252 @@ pub struct SwapInfo {
 }
 
 // =============================================================================
+// Onramp Invoice Request Types (Canister-First Flow)
+// =============================================================================
+
+/// State of an onramp invoice request
+#[derive(Clone, Debug, CandidType, Deserialize, PartialEq)]
+pub enum OnrampRequestState {
+    /// Request created, waiting for relay to create invoice
+    Pending,
+    /// Invoice created by relay, ready for client to pay
+    Ready,
+    /// Invoice paid, swap completed
+    Completed { block_index: Nat },
+    /// Request expired
+    Expired,
+    /// Request failed
+    Failed { reason: String },
+}
+
+/// Request to create an onramp invoice (client → canister)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OnrampInvoiceRequest {
+    /// IC Principal to receive ckBTC
+    pub recipient: Principal,
+    /// Amount in satoshis
+    pub amount_sats: u64,
+}
+
+/// Response from requesting an onramp invoice
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OnrampInvoiceResponse {
+    /// Unique request ID (used to poll for invoice)
+    pub request_id: String,
+    /// Whether the request was accepted
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Pending invoice request (for relay to process)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PendingInvoiceRequest {
+    /// Unique request ID
+    pub request_id: String,
+    /// IC Principal to receive ckBTC
+    pub recipient: Principal,
+    /// Amount in satoshis
+    pub amount_sats: u64,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// When the request was created (Unix nanoseconds)
+    pub created_at: u64,
+}
+
+/// Request from relay to submit a created invoice
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SubmitInvoiceRequest {
+    /// Request ID this invoice fulfills
+    pub request_id: String,
+    /// BOLT11 invoice string
+    pub invoice: String,
+    /// Payment hash from the invoice (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Expiry timestamp (Unix seconds)
+    pub expiry_timestamp: u64,
+}
+
+/// Response from submitting an invoice
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SubmitInvoiceResponse {
+    /// Whether the invoice was accepted
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Response when querying for an invoice by request ID
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetInvoiceResponse {
+    /// Current state of the request
+    pub state: OnrampRequestState,
+    /// BOLT11 invoice (if ready)
+    pub invoice: Option<String>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Internal storage for onramp invoice requests
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OnrampRequestInfo {
+    /// Unique request ID
+    pub request_id: String,
+    /// IC Principal to receive ckBTC
+    pub recipient: Principal,
+    /// Amount in satoshis
+    pub amount_sats: u64,
+    /// When the request was created (Unix nanoseconds)
+    pub created_at: u64,
+    /// Current state
+    pub state: OnrampRequestState,
+    /// BOLT11 invoice (when ready)
+    pub invoice: Option<String>,
+    /// Payment hash (when invoice created)
+    pub payment_hash: Option<Vec<u8>>,
+    /// Expiry timestamp (Unix seconds, when invoice created)
+    pub expiry_timestamp: Option<u64>,
+}
+
+// =============================================================================
+// Offramp Types (ckBTC → Lightning)
+// =============================================================================
+
+/// State of an offramp request
+#[derive(Clone, Debug, CandidType, Deserialize, PartialEq)]
+pub enum OfframpRequestState {
+    /// Request created, ckBTC taken into custody, waiting for relay to pay
+    Pending,
+    /// Relay is attempting to pay the invoice
+    PaymentInProgress,
+    /// Invoice paid successfully
+    Completed { preimage: Vec<u8> },
+    /// Payment failed, refund initiated
+    Failed { reason: String },
+    /// ckBTC refunded to user
+    Refunded { block_index: Nat },
+}
+
+/// Request to offramp ckBTC to Lightning (user → canister)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OfframpRequest {
+    /// BOLT11 invoice to pay
+    pub invoice: String,
+    /// Fallback BTC address if Lightning payment fails
+    pub fallback_btc_address: Option<String>,
+}
+
+/// Response from requesting an offramp
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OfframpResponse {
+    /// Unique request ID
+    pub request_id: String,
+    /// Whether the request was accepted and ckBTC taken into custody
+    pub success: bool,
+    /// Amount in satoshis (parsed from invoice)
+    pub amount_sats: Option<u64>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Pending offramp request (for relay to poll)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PendingOfframpRequest {
+    /// Unique request ID
+    pub request_id: String,
+    /// BOLT11 invoice to pay
+    pub invoice: String,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// Payment hash from the invoice (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// When the request was created (Unix nanoseconds)
+    pub created_at: u64,
+    /// Expiry timestamp of the invoice (Unix seconds)
+    pub invoice_expiry: u64,
+}
+
+/// Request from relay to report successful payment
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CompleteOfframpRequest {
+    /// Request ID
+    pub request_id: String,
+    /// Payment hash (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Payment preimage (32 bytes) - proves payment was made
+    pub preimage: Vec<u8>,
+}
+
+/// Response from completing an offramp
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CompleteOfframpResponse {
+    /// Whether the completion was recorded
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Request from relay to report failed payment
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FailOfframpRequest {
+    /// Request ID
+    pub request_id: String,
+    /// Payment hash (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Reason for failure
+    pub reason: String,
+}
+
+/// Response from failing an offramp (triggers refund)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FailOfframpResponse {
+    /// Whether the failure was recorded
+    pub success: bool,
+    /// Refund block index (if ckBTC refunded)
+    pub refund_block_index: Option<Nat>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Response when querying offramp status
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetOfframpStatusResponse {
+    /// Current state of the request
+    pub state: OfframpRequestState,
+    /// Amount in satoshis
+    pub amount_sats: u64,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+/// Internal storage for offramp requests
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct OfframpRequestInfo {
+    /// Unique request ID
+    pub request_id: String,
+    /// User who initiated the offramp
+    pub user: Principal,
+    /// BOLT11 invoice to pay
+    pub invoice: String,
+    /// Amount in satoshis
+    pub amount_sats: u64,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// Payment hash from invoice (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Invoice expiry timestamp (Unix seconds)
+    pub invoice_expiry: u64,
+    /// Fallback BTC address
+    pub fallback_btc_address: Option<String>,
+    /// When the request was created (Unix nanoseconds)
+    pub created_at: u64,
+    /// Current state
+    pub state: OfframpRequestState,
+    /// Preimage (when completed)
+    pub preimage: Option<Vec<u8>>,
+}
+
+// =============================================================================
 // Lightning Channel Funding Verification Types
 // =============================================================================
 
@@ -689,6 +1096,130 @@ pub struct LnSignResponse {
     pub signature: Option<Vec<u8>>,
     /// Error message if signing failed
     pub error: Option<String>,
+}
+
+// =============================================================================
+// LP Liquidity Types (Canister-Controlled BTC for Lightning)
+// =============================================================================
+
+/// A UTXO available for channel funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LpBtcUtxo {
+    /// Transaction ID (32 bytes)
+    pub txid: Vec<u8>,
+    /// Output index
+    pub vout: u32,
+    /// Value in satoshis
+    pub value_sats: u64,
+    /// Block height when confirmed (0 if unconfirmed)
+    pub height: u32,
+}
+
+/// Request to get available UTXOs for channel funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetFundingUtxosRequest {
+    /// Minimum amount needed in satoshis
+    pub min_amount_sats: u64,
+}
+
+/// Response with available UTXOs for channel funding
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetFundingUtxosResponse {
+    /// Available UTXOs
+    pub utxos: Vec<LpBtcUtxo>,
+    /// Total value available
+    pub total_sats: u64,
+    /// The LP's BTC address (for change outputs)
+    pub lp_address: Option<String>,
+}
+
+/// Request to sign a channel funding transaction
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignFundingTxRequest {
+    /// The unsigned transaction (serialized)
+    pub unsigned_tx: Vec<u8>,
+    /// UTXOs being spent (for signing context)
+    pub input_utxos: Vec<LpBtcUtxo>,
+    /// Channel ID being funded
+    pub channel_id: Vec<u8>,
+    /// Expected channel capacity
+    pub capacity_sats: u64,
+}
+
+/// Response from signing a funding transaction
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignFundingTxResponse {
+    /// Whether signing succeeded
+    pub success: bool,
+    /// The signed transaction (serialized)
+    pub signed_tx: Option<Vec<u8>>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Request to update channel balance (from relay)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateChannelBalanceRequest {
+    /// Channel ID
+    pub channel_id: Vec<u8>,
+    /// Our (canister's) balance in satoshis
+    pub our_balance_sats: u64,
+    /// Their (counterparty's) balance in satoshis
+    pub their_balance_sats: u64,
+}
+
+/// Response from updating channel balance
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateChannelBalanceResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Overall LP liquidity status
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LpLiquidityStatus {
+    // ckBTC Pool (for onramp payouts)
+    /// Total ckBTC in the LP pool
+    pub ckbtc_pool_sats: u64,
+
+    // BTC Pool (for Lightning channel funding)
+    /// Total on-chain BTC in canister-controlled UTXOs
+    pub btc_onchain_sats: u64,
+    /// Number of unspent UTXOs available
+    pub btc_utxo_count: u32,
+
+    // Lightning Channel Liquidity
+    /// Total capacity across all channels
+    pub channel_total_capacity_sats: u64,
+    /// Our (outbound) balance - available for offramp payments
+    pub channel_outbound_sats: u64,
+    /// Their (inbound) balance - available for onramp receipts
+    pub channel_inbound_sats: u64,
+    /// Number of active channels
+    pub channel_count: u32,
+
+    // Tracking
+    /// Total BTC deposited by LP providers (lifetime)
+    pub total_btc_deposited: u64,
+    /// Total BTC used for channel funding (lifetime)
+    pub total_btc_in_channels: u64,
+}
+
+/// Enhanced channel info with balance tracking
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct LnChannelBalance {
+    /// Channel ID
+    pub channel_id: Vec<u8>,
+    /// Channel capacity
+    pub capacity_sats: u64,
+    /// Our balance (outbound capacity)
+    pub our_balance_sats: u64,
+    /// Their balance (inbound capacity)
+    pub their_balance_sats: u64,
+    /// Is channel active/usable
+    pub is_active: bool,
+    /// Last balance update timestamp
+    pub last_updated: u64,
 }
 
 #[derive(Deserialize, CandidType, Clone)]

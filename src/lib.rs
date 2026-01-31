@@ -17,6 +17,7 @@ pub mod canister_state;
 pub mod deq;
 pub mod error;
 pub mod events;
+pub mod helpers;
 pub mod htlc;
 pub mod ic_types;
 pub mod liquidity_pool;
@@ -32,10 +33,28 @@ use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
     BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
     FundingLPQueryArgs, HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest,
-    LnSignResponse, NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
-    RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
-    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
-    SignedCandidInvoice, Timestamp, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    LnSignResponse, LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, NotifyArgs,
+    QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
+    RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse, RegisteredState,
+    SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, SignedCandidInvoice,
+    Timestamp, TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    // BTC LP types
+    LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
+    LpBtcWithdrawRequest, LpBtcWithdrawResponse,
+    FundChannelRequest, FundChannelResponse,
+    // User BTC operations
+    SendFromDepositorRequest, SendFromDepositorResponse, DepositorBtcBalanceResponse,
+    // Onramp invoice request types
+    OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestState, PendingInvoiceRequest,
+    SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
+    // Offramp types (ckBTC → Lightning)
+    OfframpRequest, OfframpResponse, OfframpRequestState, PendingOfframpRequest,
+    CompleteOfframpRequest, CompleteOfframpResponse, FailOfframpRequest, FailOfframpResponse,
+    GetOfframpStatusResponse, OfframpRequestInfo,
+    // LP Liquidity types
+    LpBtcUtxo, GetFundingUtxosRequest, GetFundingUtxosResponse,
+    UpdateChannelBalanceRequest, UpdateChannelBalanceResponse,
+    LpLiquidityStatus, LnChannelBalance,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;
