@@ -466,6 +466,210 @@ impl Default for DepositorInfo {
 
 /// An amount of a currency.
 pub type Amount = Nat;
+
+// =============================================================================
+// HTLC Types (Hash Time-Locked Contracts)
+// =============================================================================
+
+/// Request to create a new HTLC
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CreateHtlcRequest {
+    /// SHA256 hash of the preimage (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// Absolute block height for timeout (CLTV)
+    pub cltv_expiry: u32,
+    /// Sender's public key (33 bytes compressed)
+    pub sender_pubkey: Vec<u8>,
+    /// Receiver's public key (33 bytes compressed)
+    pub receiver_pubkey: Vec<u8>,
+}
+
+/// Response from creating an HTLC
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CreateHtlcResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Request to fulfill an HTLC with preimage
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FulfillHtlcRequest {
+    /// The preimage that hashes to the payment_hash (32 bytes)
+    pub preimage: Vec<u8>,
+}
+
+/// Response from fulfilling an HTLC
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct FulfillHtlcResponse {
+    pub success: bool,
+    pub payment_hash: Option<Vec<u8>>,
+    pub amount_msat: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Request to timeout an HTLC
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct TimeoutHtlcRequest {
+    /// The payment hash of the HTLC to timeout (32 bytes)
+    pub payment_hash: Vec<u8>,
+}
+
+/// Response from timing out an HTLC
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct TimeoutHtlcResponse {
+    pub success: bool,
+    pub amount_msat: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// HTLC info returned by queries
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct HtlcInfo {
+    pub payment_hash: Vec<u8>,
+    pub amount_msat: u64,
+    pub cltv_expiry: u32,
+    /// "Pending", "Fulfilled", "TimedOut", or "Failed"
+    pub state: String,
+    pub sender_pubkey: Vec<u8>,
+    pub receiver_pubkey: Vec<u8>,
+}
+
+// =============================================================================
+// Channel Secrets (Phase 2: Full channel control by canister)
+// =============================================================================
+
+/// All secrets needed to control a Lightning channel.
+///
+/// These are stored in canister state (NOT threshold-protected).
+/// Security tradeoff: Subnet nodes (~13) could theoretically extract these,
+/// but this is accepted per HTLC_SECRET_IMPL.md research.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ChannelSecrets {
+    /// Channel identifier (32 bytes)
+    pub channel_id: Vec<u8>,
+    /// HTLC base secret - signs HTLC-Success and HTLC-Timeout transactions
+    pub htlc_base_secret: Vec<u8>,
+    /// Revocation base secret - signs justice/penalty transactions
+    pub revocation_base_secret: Vec<u8>,
+    /// Delayed payment base secret - signs timelocked outputs after channel close
+    pub delayed_payment_base_secret: Vec<u8>,
+    /// Payment secret - signs to_remote outputs after channel close
+    pub payment_secret: Vec<u8>,
+    /// Commitment seed - derives per-commitment secrets
+    pub commitment_seed: Vec<u8>,
+}
+
+/// Request to register channel secrets (called by relay when channel opens)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterChannelSecretsRequest {
+    pub secrets: ChannelSecrets,
+}
+
+/// Response from registering channel secrets
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterChannelSecretsResponse {
+    pub success: bool,
+    /// Public keys derived from the secrets (for verification)
+    pub htlc_basepoint: Option<Vec<u8>>,
+    pub revocation_basepoint: Option<Vec<u8>>,
+    pub delayed_payment_basepoint: Option<Vec<u8>>,
+    pub payment_point: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+/// Query channel secrets status
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ChannelSecretsInfo {
+    pub channel_id: Vec<u8>,
+    pub has_secrets: bool,
+    /// Public keys (secrets are never exposed)
+    pub htlc_basepoint: Vec<u8>,
+    pub revocation_basepoint: Vec<u8>,
+    pub delayed_payment_basepoint: Vec<u8>,
+    pub payment_point: Vec<u8>,
+}
+
+// =============================================================================
+// HTLC Transaction Details (for signing - stored when HTLC is created)
+// =============================================================================
+
+/// Extended HTLC creation request with transaction details for later signing.
+///
+/// This follows approach A: store full HTLC transaction details in canister
+/// so signing doesn't require relay to provide all details again.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CreateHtlcWithTxDetailsRequest {
+    /// SHA256 hash of the preimage (32 bytes)
+    pub payment_hash: Vec<u8>,
+    /// Amount in millisatoshis
+    pub amount_msat: u64,
+    /// Absolute block height for timeout (CLTV)
+    pub cltv_expiry: u32,
+    /// Sender's public key (33 bytes compressed)
+    pub sender_pubkey: Vec<u8>,
+    /// Receiver's public key (33 bytes compressed)
+    pub receiver_pubkey: Vec<u8>,
+    /// Channel ID this HTLC belongs to (32 bytes)
+    pub channel_id: Vec<u8>,
+    /// The HTLC output's outpoint (txid:vout) - where the HTLC is locked
+    pub htlc_outpoint_txid: Vec<u8>,
+    pub htlc_outpoint_vout: u32,
+    /// The HTLC output amount in satoshis
+    pub htlc_amount_sat: u64,
+    /// Receiver's address for HTLC-Success (where funds go when claimed)
+    pub receiver_address: String,
+    /// Sender's address for HTLC-Timeout (where funds return on timeout)
+    pub sender_address: String,
+    /// Per-commitment point for this HTLC (33 bytes, for key derivation)
+    pub per_commitment_point: Vec<u8>,
+}
+
+/// Response from creating an HTLC with transaction details
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct CreateHtlcWithTxDetailsResponse {
+    pub success: bool,
+    /// The witness script for this HTLC (P2WSH)
+    pub witness_script: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// HTLC Signing Requests/Responses
+// =============================================================================
+
+/// Request to sign an HTLC-Success transaction (receiver claims with preimage)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHtlcSuccessRequest {
+    /// The payment hash identifying the HTLC
+    pub payment_hash: Vec<u8>,
+    /// The preimage (32 bytes) - proves receiver knows the secret
+    pub preimage: Vec<u8>,
+    /// Fee in satoshis for the HTLC-Success transaction
+    pub fee_sat: u64,
+}
+
+/// Request to sign an HTLC-Timeout transaction (sender reclaims after expiry)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHtlcTimeoutRequest {
+    /// The payment hash identifying the HTLC
+    pub payment_hash: Vec<u8>,
+    /// Fee in satoshis for the HTLC-Timeout transaction
+    pub fee_sat: u64,
+}
+
+/// Response containing a signed HTLC transaction
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHtlcResponse {
+    pub success: bool,
+    /// The fully signed transaction (serialized, ready to broadcast)
+    pub signed_tx: Option<Vec<u8>>,
+    /// The transaction ID (txid)
+    pub txid: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
 /// Duration in nanoseconds (same as ICP timestamps).
 pub type Duration = u64;
 /// Timestamp in nanoseconds (same as ICP timestamps).
