@@ -36,6 +36,13 @@ use crate::canister_state::{
     channel_funded_impl, channel_closed_impl,
     // Channel funding from LP BTC
     fund_channel_impl,
+    // HTLC functions
+    create_htlc_impl, fulfill_htlc_impl, timeout_htlc_impl,
+    get_htlc_impl, get_pending_htlcs_impl,
+    // Channel secrets functions (Phase 2)
+    register_channel_secrets_impl, get_channel_secrets_info_impl,
+    // HTLC signing functions (Phase 2)
+    create_htlc_with_tx_details_impl, sign_htlc_success_impl, sign_htlc_timeout_impl,
 };
 use crate::helpers::{
     get_ln_funding_pubkey_impl, get_ln_invoice_impl, send_btc_tx_impl, sign_ln_message_impl,
@@ -47,6 +54,17 @@ use crate::ic_types::{
     FundChannelRequest, FundChannelResponse,
     // User BTC operations
     SendFromDepositorRequest, SendFromDepositorResponse, DepositorBtcBalanceResponse,
+    // HTLC types
+    CreateHtlcRequest, CreateHtlcResponse,
+    FulfillHtlcRequest, FulfillHtlcResponse,
+    TimeoutHtlcRequest, TimeoutHtlcResponse,
+    HtlcInfo,
+    // Channel secrets types (Phase 2)
+    RegisterChannelSecretsRequest, RegisterChannelSecretsResponse,
+    ChannelSecretsInfo,
+    // HTLC signing types (Phase 2)
+    CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
+    SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
@@ -663,4 +681,129 @@ fn channel_closed(channel_id: Vec<u8>) -> Result<(), String> {
         .map_err(|_| "Invalid channel_id length")?;
     channel_closed_impl(channel_id);
     Ok(())
+}
+
+// =============================================================================
+// HTLC Endpoints (Hash Time-Locked Contracts)
+// =============================================================================
+
+/// Create a new HTLC
+///
+/// Called by the relay when an HTLC is added to a commitment transaction.
+/// The canister tracks the HTLC state for later fulfillment or timeout.
+#[update]
+#[candid_method(update)]
+fn create_htlc(request: CreateHtlcRequest) -> CreateHtlcResponse {
+    create_htlc_impl(request)
+}
+
+/// Fulfill an HTLC by revealing the preimage
+///
+/// Called by the relay when a preimage is received (payment successful).
+/// Returns the payment_hash and amount for confirmation.
+#[update]
+#[candid_method(update)]
+fn fulfill_htlc(request: FulfillHtlcRequest) -> FulfillHtlcResponse {
+    fulfill_htlc_impl(request)
+}
+
+/// Timeout an HTLC after CLTV expiry
+///
+/// Called by the relay when an HTLC has expired without being fulfilled.
+/// The sender can reclaim the funds.
+#[update]
+#[candid_method(update)]
+fn timeout_htlc(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
+    timeout_htlc_impl(request)
+}
+
+/// Get an HTLC by payment hash
+#[query]
+#[candid_method(query)]
+fn get_htlc(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
+    get_htlc_impl(payment_hash)
+}
+
+/// Get all pending HTLCs
+#[query]
+#[candid_method(query)]
+fn get_pending_htlcs() -> Vec<HtlcInfo> {
+    get_pending_htlcs_impl()
+}
+
+// =============================================================================
+// Channel Secrets Endpoints (Phase 2)
+// =============================================================================
+
+/// Register channel secrets for a Lightning channel.
+///
+/// Called by the relay when a channel is opened. Stores the secrets in canister
+/// state for later use in HTLC signing operations.
+///
+/// Security note: These secrets are stored in canister memory, which is readable
+/// by subnet nodes. This is an accepted tradeoff - the funding key remains on
+/// chainkey (threshold ECDSA) for maximum security.
+#[update]
+#[candid_method(update)]
+fn register_channel_secrets(request: RegisterChannelSecretsRequest) -> RegisterChannelSecretsResponse {
+    register_channel_secrets_impl(request)
+}
+
+/// Query channel secrets info (public keys only, secrets are never exposed).
+#[query]
+#[candid_method(query)]
+fn get_channel_secrets_info(channel_id: Vec<u8>) -> Option<ChannelSecretsInfo> {
+    get_channel_secrets_info_impl(channel_id)
+}
+
+// =============================================================================
+// HTLC with Transaction Details Endpoints (Phase 2)
+// =============================================================================
+
+/// Create an HTLC with full transaction details for later signing.
+///
+/// This is an extended version of create_htlc that stores all information
+/// needed to construct and sign HTLC-Success and HTLC-Timeout transactions.
+#[update]
+#[candid_method(update)]
+fn create_htlc_with_tx_details(
+    request: CreateHtlcWithTxDetailsRequest,
+) -> CreateHtlcWithTxDetailsResponse {
+    create_htlc_with_tx_details_impl(request)
+}
+
+// =============================================================================
+// HTLC Signing Endpoints (Phase 2)
+// =============================================================================
+
+/// Sign an HTLC-Success transaction (receiver claims with preimage).
+///
+/// Builds the HTLC-Success transaction using stored HTLC details,
+/// signs it with the channel's HTLC key, and returns the fully signed
+/// transaction ready for broadcast.
+///
+/// Requirements:
+/// - Channel secrets must be registered via register_channel_secrets()
+/// - HTLC must be created via create_htlc_with_tx_details()
+/// - Preimage must match the payment hash
+#[update]
+#[candid_method(update)]
+fn sign_htlc_success(request: SignHtlcSuccessRequest) -> SignHtlcResponse {
+    sign_htlc_success_impl(request)
+}
+
+/// Sign an HTLC-Timeout transaction (sender reclaims after CLTV expiry).
+///
+/// Builds the HTLC-Timeout transaction using stored HTLC details,
+/// signs it with the channel's HTLC key, and returns the fully signed
+/// transaction ready for broadcast.
+///
+/// Requirements:
+/// - Channel secrets must be registered via register_channel_secrets()
+/// - HTLC must be created via create_htlc_with_tx_details()
+/// - Current block height must be >= HTLC's cltv_expiry (enforced by Bitcoin, not here)
+#[update]
+#[candid_method(update)]
+fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
+    sign_htlc_timeout_impl(request)
 }

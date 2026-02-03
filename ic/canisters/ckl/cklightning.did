@@ -10,6 +10,22 @@ type BtcPurpose = variant {
   LiquidityPoolShared;
 };
 type ChannelFunding = record { participant : blob; channel : blob };
+type ChannelSecrets = record {
+  channel_id : blob;
+  delayed_payment_base_secret : blob;
+  htlc_base_secret : blob;
+  commitment_seed : blob;
+  revocation_base_secret : blob;
+  payment_secret : blob;
+};
+type ChannelSecretsInfo = record {
+  channel_id : blob;
+  has_secrets : bool;
+  payment_point : blob;
+  revocation_basepoint : blob;
+  htlc_basepoint : blob;
+  delayed_payment_basepoint : blob;
+};
 type ChannelTime = record { time : nat64; chanid : blob };
 type CklChannelAction = variant { Depositing; Idle; Withdrawing };
 type CklError = variant {
@@ -44,6 +60,33 @@ type CompleteSwapResponse = record {
   error : opt text;
   success : bool;
 };
+type CreateHtlcRequest = record {
+  payment_hash : blob;
+  receiver_pubkey : blob;
+  cltv_expiry : nat32;
+  sender_pubkey : blob;
+  amount_msat : nat64;
+};
+type CreateHtlcResponse = record { error : opt text; success : bool };
+type CreateHtlcWithTxDetailsRequest = record {
+  channel_id : blob;
+  payment_hash : blob;
+  receiver_pubkey : blob;
+  cltv_expiry : nat32;
+  sender_address : text;
+  sender_pubkey : blob;
+  receiver_address : text;
+  per_commitment_point : blob;
+  amount_msat : nat64;
+  htlc_outpoint_txid : blob;
+  htlc_outpoint_vout : nat32;
+  htlc_amount_sat : nat64;
+};
+type CreateHtlcWithTxDetailsResponse = record {
+  witness_script : opt blob;
+  error : opt text;
+  success : bool;
+};
 type DepositorBtcBalanceResponse = record {
   error : opt text;
   address : text;
@@ -63,6 +106,13 @@ type FailOfframpResponse = record {
   error : opt text;
   success : bool;
   refund_block_index : opt nat;
+};
+type FulfillHtlcRequest = record { preimage : blob };
+type FulfillHtlcResponse = record {
+  payment_hash : opt blob;
+  error : opt text;
+  amount_msat : opt nat64;
+  success : bool;
 };
 type FundChannelRequest = record { funding_address : text; amount_sat : nat64 };
 type FundChannelResponse = record {
@@ -108,6 +158,14 @@ type GetUtxosResponse = record {
   utxos : vec Utxo;
 };
 type HoldingsResponse = record { btc_amount : nat; ckbtc_amount : nat };
+type HtlcInfo = record {
+  payment_hash : blob;
+  receiver_pubkey : blob;
+  cltv_expiry : nat32;
+  sender_pubkey : blob;
+  state : text;
+  amount_msat : nat64;
+};
 type ICPReceiverError = variant {
   TxMapNotFound;
   TxAmountNotFound;
@@ -211,7 +269,7 @@ type OfframpRequestState = variant {
   Failed : record { reason : text };
   Refunded : record { block_index : nat };
   PaymentInProgress;
-  Completed : record { preimage : blob };
+  Completed : FulfillHtlcRequest;
   Pending;
 };
 type OfframpResponse = record {
@@ -268,6 +326,15 @@ type PoolWithdrawal = record {
 type QueryLnChannelRequest = record { channel_id : blob };
 type QueryLnChannelsResponse = record { channels : vec LnChannelInfo };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
+type RegisterChannelSecretsRequest = record { secrets : ChannelSecrets };
+type RegisterChannelSecretsResponse = record {
+  error : opt text;
+  payment_point : opt blob;
+  revocation_basepoint : opt blob;
+  success : bool;
+  htlc_basepoint : opt blob;
+  delayed_payment_basepoint : opt blob;
+};
 type RegisterLnChannelRequest = record {
   channel_id : blob;
   funding_address : text;
@@ -283,7 +350,6 @@ type RegisterSwapRequest = record {
   expiry_timestamp : nat64;
   amount_msat : nat64;
 };
-type RegisterSwapResponse = record { error : opt text; success : bool };
 type RegisteredState = record { state : State; timeout : nat64 };
 type Result = variant { Ok; Err : text };
 type Result_1 = variant { Ok; Err : CklError };
@@ -342,6 +408,18 @@ type SetLiquidityBtcAddressResponse = record {
   already_existed : bool;
   address : text;
 };
+type SignHtlcResponse = record {
+  txid : opt blob;
+  signed_tx : opt blob;
+  error : opt text;
+  success : bool;
+};
+type SignHtlcSuccessRequest = record {
+  payment_hash : blob;
+  fee_sat : nat64;
+  preimage : blob;
+};
+type SignHtlcTimeoutRequest = record { payment_hash : blob; fee_sat : nat64 };
 type SignedCandidInvoice = record {
   channel_id : blob;
   payment_hash : blob;
@@ -366,6 +444,12 @@ type SubmitInvoiceRequest = record {
   payment_hash : blob;
   invoice : text;
   expiry_timestamp : nat64;
+};
+type TimeoutHtlcRequest = record { payment_hash : blob };
+type TimeoutHtlcResponse = record {
+  error : opt text;
+  amount_msat : opt nat64;
+  success : bool;
 };
 type TotalLpBalanceResponse = record {
   total_btc : nat;
@@ -426,6 +510,18 @@ service : (Network) -> {
   __candid_method_complete_swap : (CompleteSwapRequest) -> (
       CompleteSwapResponse,
     );
+  // Create a new HTLC
+  // 
+  // Called by the relay when an HTLC is added to a commitment transaction.
+  // The canister tracks the HTLC state for later fulfillment or timeout.
+  __candid_method_create_htlc : (CreateHtlcRequest) -> (CreateHtlcResponse);
+  // Create an HTLC with full transaction details for later signing.
+  // 
+  // This is an extended version of create_htlc that stores all information
+  // needed to construct and sign HTLC-Success and HTLC-Timeout transactions.
+  __candid_method_create_htlc_with_tx_details : (
+      CreateHtlcWithTxDetailsRequest,
+    ) -> (CreateHtlcWithTxDetailsResponse);
   // Deposit BTC to the liquidity pool
   // 
   // Flow:
@@ -452,6 +548,11 @@ service : (Network) -> {
   // Called by the relay when it fails to pay the Lightning invoice.
   // The ckBTC is refunded to the user.
   __candid_method_fail_offramp : (FailOfframpRequest) -> (FailOfframpResponse);
+  // Fulfill an HTLC by revealing the preimage
+  // 
+  // Called by the relay when a preimage is received (payment successful).
+  // Returns the payment_hash and amount for confirmation.
+  __candid_method_fulfill_htlc : (FulfillHtlcRequest) -> (FulfillHtlcResponse);
   // Fund a Lightning channel from LP BTC
   // 
   // Builds and signs a transaction from LP UTXOs to the channel funding address.
@@ -460,6 +561,10 @@ service : (Network) -> {
   __candid_method_fund_channel : (FundChannelRequest) -> (FundChannelResponse);
   __candid_method_get_btc_balance : (opt nat64) -> (Result_2);
   __candid_method_get_btc_liquidity_address_for_caller : () -> (Result_3);
+  // Query channel secrets info (public keys only, secrets are never exposed).
+  __candid_method_get_channel_secrets_info : (blob) -> (
+      opt ChannelSecretsInfo,
+    ) query;
   // Get the caller's BTC balance at their depositor address
   // 
   // Returns the caller's BTC address (derived via threshold ECDSA) and its balance.
@@ -472,6 +577,8 @@ service : (Network) -> {
   // The relay calls this to get UTXOs it can use to fund Lightning channels.
   // Only returns UTXOs that are not reserved for pending channel opens.
   __candid_method_get_funding_utxos : (nat64) -> (Result_4);
+  // Get an HTLC by payment hash
+  __candid_method_get_htlc : (blob) -> (opt HtlcInfo) query;
   // Get the invoice for a request (client polling)
   // 
   // Called by clients to check if their invoice is ready.
@@ -503,6 +610,8 @@ service : (Network) -> {
   __candid_method_get_offramp_status : (text) -> (
       GetOfframpStatusResponse,
     ) query;
+  // Get all pending HTLCs
+  __candid_method_get_pending_htlcs : () -> (vec HtlcInfo) query;
   // Get all pending invoice requests for the relay to process
   // 
   // Called by the relay to find requests that need invoices created.
@@ -541,6 +650,17 @@ service : (Network) -> {
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
       Result_9,
     ) query;
+  // Register channel secrets for a Lightning channel.
+  // 
+  // Called by the relay when a channel is opened. Stores the secrets in canister
+  // state for later use in HTLC signing operations.
+  // 
+  // Security note: These secrets are stored in canister memory, which is readable
+  // by subnet nodes. This is an accepted tradeoff - the funding key remains on
+  // chainkey (threshold ECDSA) for maximum security.
+  __candid_method_register_channel_secrets : (
+      RegisterChannelSecretsRequest,
+    ) -> (RegisterChannelSecretsResponse);
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
@@ -548,15 +668,13 @@ service : (Network) -> {
   // Called by the relay node when a channel is opened.
   // Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
   __candid_method_register_ln_channel : (RegisterLnChannelRequest) -> (
-      CompleteOfframpResponse,
+      CreateHtlcResponse,
     );
   // Register a new Lightning → ckBTC swap
   // 
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
-  __candid_method_register_swap : (RegisterSwapRequest) -> (
-      RegisterSwapResponse,
-    );
+  __candid_method_register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
   // Request an offramp (ckBTC → Lightning)
   // 
   // Called by a user who wants to pay a Lightning invoice using their ckBTC.
@@ -591,6 +709,32 @@ service : (Network) -> {
   __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_10);
   __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   __candid_method_set_btc_liquidity_address : () -> (Result_12);
+  // Sign an HTLC-Success transaction (receiver claims with preimage).
+  // 
+  // Builds the HTLC-Success transaction using stored HTLC details,
+  // signs it with the channel's HTLC key, and returns the fully signed
+  // transaction ready for broadcast.
+  // 
+  // Requirements:
+  // - Channel secrets must be registered via register_channel_secrets()
+  // - HTLC must be created via create_htlc_with_tx_details()
+  // - Preimage must match the payment hash
+  __candid_method_sign_htlc_success : (SignHtlcSuccessRequest) -> (
+      SignHtlcResponse,
+    );
+  // Sign an HTLC-Timeout transaction (sender reclaims after CLTV expiry).
+  // 
+  // Builds the HTLC-Timeout transaction using stored HTLC details,
+  // signs it with the channel's HTLC key, and returns the fully signed
+  // transaction ready for broadcast.
+  // 
+  // Requirements:
+  // - Channel secrets must be registered via register_channel_secrets()
+  // - HTLC must be created via create_htlc_with_tx_details()
+  // - Current block height must be >= HTLC's cltv_expiry (enforced by Bitcoin, not here)
+  __candid_method_sign_htlc_timeout : (SignHtlcTimeoutRequest) -> (
+      SignHtlcResponse,
+    );
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
@@ -603,8 +747,13 @@ service : (Network) -> {
   // Called by the relay after creating a BOLT11 invoice for a pending request.
   // This also registers the swap internally so complete_swap will work.
   __candid_method_submit_invoice : (SubmitInvoiceRequest) -> (
-      RegisterSwapResponse,
+      CreateHtlcResponse,
     );
+  // Timeout an HTLC after CLTV expiry
+  // 
+  // Called by the relay when an HTLC has expired without being fulfilled.
+  // The sender can reclaim the funds.
+  __candid_method_timeout_htlc : (TimeoutHtlcRequest) -> (TimeoutHtlcResponse);
   __candid_method_transaction_notification : (NotifyArgs) -> (Result_13);
   __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_14);
   // Update channel balance after Lightning payment activity
@@ -612,7 +761,7 @@ service : (Network) -> {
   // The relay calls this to report updated channel balances after payments.
   // This allows the canister to track available outbound/inbound capacity.
   __candid_method_update_channel_balance : (UpdateChannelBalanceRequest) -> (
-      RegisterSwapResponse,
+      CreateHtlcResponse,
     );
   // Verify a Lightning channel's funding UTXO on-chain
   // 
@@ -649,12 +798,24 @@ service : (Network) -> {
   // 
   // Called by the relay after successfully paying the Lightning invoice.
   // Requires the payment preimage as proof of payment.
-  complete_offramp : (CompleteOfframpRequest) -> (RegisterSwapResponse);
+  complete_offramp : (CompleteOfframpRequest) -> (CreateHtlcResponse);
   // Complete a Lightning → ckBTC swap after payment received
   // 
   // Called by the relay node when a Lightning payment is received and claimed.
   // Verifies the preimage matches the payment_hash, then transfers ckBTC.
   complete_swap : (CompleteSwapRequest) -> (CompleteSwapResponse);
+  // Create a new HTLC
+  // 
+  // Called by the relay when an HTLC is added to a commitment transaction.
+  // The canister tracks the HTLC state for later fulfillment or timeout.
+  create_htlc : (CreateHtlcRequest) -> (CreateHtlcResponse);
+  // Create an HTLC with full transaction details for later signing.
+  // 
+  // This is an extended version of create_htlc that stores all information
+  // needed to construct and sign HTLC-Success and HTLC-Timeout transactions.
+  create_htlc_with_tx_details : (CreateHtlcWithTxDetailsRequest) -> (
+      CreateHtlcWithTxDetailsResponse,
+    );
   // Deposit BTC to the liquidity pool
   // 
   // Flow:
@@ -683,6 +844,11 @@ service : (Network) -> {
   // Called by the relay when it fails to pay the Lightning invoice.
   // The ckBTC is refunded to the user.
   fail_offramp : (FailOfframpRequest) -> (FailOfframpResponse);
+  // Fulfill an HTLC by revealing the preimage
+  // 
+  // Called by the relay when a preimage is received (payment successful).
+  // Returns the payment_hash and amount for confirmation.
+  fulfill_htlc : (FulfillHtlcRequest) -> (FulfillHtlcResponse);
   // Fund a Lightning channel from LP BTC
   // 
   // Builds and signs a transaction from LP UTXOs to the channel funding address.
@@ -693,6 +859,8 @@ service : (Network) -> {
   get_balance : (text) -> (nat64);
   get_btc_balance : (opt nat64) -> (Result_2);
   get_btc_liquidity_address_for_caller : () -> (Result_3);
+  // Query channel secrets info (public keys only, secrets are never exposed).
+  get_channel_secrets_info : (blob) -> (opt ChannelSecretsInfo) query;
   // Get the caller's BTC balance at their depositor address
   // 
   // Returns the caller's BTC address (derived via threshold ECDSA) and its balance.
@@ -703,6 +871,8 @@ service : (Network) -> {
   // The relay calls this to get UTXOs it can use to fund Lightning channels.
   // Only returns UTXOs that are not reserved for pending channel opens.
   get_funding_utxos : (nat64) -> (Result_4);
+  // Get an HTLC by payment hash
+  get_htlc : (blob) -> (opt HtlcInfo) query;
   // Get the invoice for a request (client polling)
   // 
   // Called by clients to check if their invoice is ready.
@@ -743,6 +913,8 @@ service : (Network) -> {
   // It allows spending using a single Schnorr signature corresponding to the internal key.
   get_p2tr_key_path_only_address : () -> (Result_3);
   get_p2wpkh_address : () -> (Result_3);
+  // Get all pending HTLCs
+  get_pending_htlcs : () -> (vec HtlcInfo) query;
   // Get all pending invoice requests for the relay to process
   // 
   // Called by the relay to find requests that need invoices created.
@@ -775,18 +947,29 @@ service : (Network) -> {
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_9) query;
+  // Register channel secrets for a Lightning channel.
+  // 
+  // Called by the relay when a channel is opened. Stores the secrets in canister
+  // state for later use in HTLC signing operations.
+  // 
+  // Security note: These secrets are stored in canister memory, which is readable
+  // by subnet nodes. This is an accepted tradeoff - the funding key remains on
+  // chainkey (threshold ECDSA) for maximum security.
+  register_channel_secrets : (RegisterChannelSecretsRequest) -> (
+      RegisterChannelSecretsResponse,
+    );
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
   // 
   // Called by the relay node when a channel is opened.
   // Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
-  register_ln_channel : (RegisterLnChannelRequest) -> (RegisterSwapResponse);
+  register_ln_channel : (RegisterLnChannelRequest) -> (CreateHtlcResponse);
   // Register a new Lightning → ckBTC swap
   // 
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
-  register_swap : (RegisterSwapRequest) -> (RegisterSwapResponse);
+  register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
   // Request an offramp (ckBTC → Lightning)
   // 
   // Called by a user who wants to pay a Lightning invoice using their ckBTC.
@@ -820,6 +1003,28 @@ service : (Network) -> {
   send_from_p2pkh_address : (SendRequest) -> (text);
   set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   set_btc_liquidity_address : () -> (Result_12);
+  // Sign an HTLC-Success transaction (receiver claims with preimage).
+  // 
+  // Builds the HTLC-Success transaction using stored HTLC details,
+  // signs it with the channel's HTLC key, and returns the fully signed
+  // transaction ready for broadcast.
+  // 
+  // Requirements:
+  // - Channel secrets must be registered via register_channel_secrets()
+  // - HTLC must be created via create_htlc_with_tx_details()
+  // - Preimage must match the payment hash
+  sign_htlc_success : (SignHtlcSuccessRequest) -> (SignHtlcResponse);
+  // Sign an HTLC-Timeout transaction (sender reclaims after CLTV expiry).
+  // 
+  // Builds the HTLC-Timeout transaction using stored HTLC details,
+  // signs it with the channel's HTLC key, and returns the fully signed
+  // transaction ready for broadcast.
+  // 
+  // Requirements:
+  // - Channel secrets must be registered via register_channel_secrets()
+  // - HTLC must be created via create_htlc_with_tx_details()
+  // - Current block height must be >= HTLC's cltv_expiry (enforced by Bitcoin, not here)
+  sign_htlc_timeout : (SignHtlcTimeoutRequest) -> (SignHtlcResponse);
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
@@ -832,7 +1037,12 @@ service : (Network) -> {
   // 
   // Called by the relay after creating a BOLT11 invoice for a pending request.
   // This also registers the swap internally so complete_swap will work.
-  submit_invoice : (SubmitInvoiceRequest) -> (RegisterSwapResponse);
+  submit_invoice : (SubmitInvoiceRequest) -> (CreateHtlcResponse);
+  // Timeout an HTLC after CLTV expiry
+  // 
+  // Called by the relay when an HTLC has expired without being fulfilled.
+  // The sender can reclaim the funds.
+  timeout_htlc : (TimeoutHtlcRequest) -> (TimeoutHtlcResponse);
   transaction_notification : (NotifyArgs) -> (Result_13);
   trigger_withdraw : (WithdrawalReq) -> (Result_14);
   // Update channel balance after Lightning payment activity
@@ -840,7 +1050,7 @@ service : (Network) -> {
   // The relay calls this to report updated channel balances after payments.
   // This allows the canister to track available outbound/inbound capacity.
   update_channel_balance : (UpdateChannelBalanceRequest) -> (
-      RegisterSwapResponse,
+      CreateHtlcResponse,
     );
   // Verify a Lightning channel's funding UTXO on-chain
   // 

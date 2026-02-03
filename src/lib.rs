@@ -55,6 +55,17 @@ use crate::ic_types::{
     LpBtcUtxo, GetFundingUtxosRequest, GetFundingUtxosResponse,
     UpdateChannelBalanceRequest, UpdateChannelBalanceResponse,
     LpLiquidityStatus, LnChannelBalance,
+    // HTLC types
+    CreateHtlcRequest, CreateHtlcResponse,
+    FulfillHtlcRequest, FulfillHtlcResponse,
+    TimeoutHtlcRequest, TimeoutHtlcResponse,
+    HtlcInfo,
+    // Channel secrets types (Phase 2)
+    ChannelSecrets, RegisterChannelSecretsRequest, RegisterChannelSecretsResponse,
+    ChannelSecretsInfo,
+    // HTLC signing types (Phase 2)
+    CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
+    SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;
