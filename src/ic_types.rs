@@ -22,10 +22,15 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use std::collections::HashMap;
 
 pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+pub const DEVNET_ICP_LEDGER: &str = "ufxgi-4p777-77774-qaadq-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "u6s2n-gx777-77774-qaaba-cai";
 pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
 pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
+
+// Anti-DDoS ICP fee constants
+pub const ICP_DDOS_FEE_E8S: u64 = 2_000_000_000; // 20 ICP in e8s
+pub const ICP_TRANSFER_FEE_E8S: u64 = 10_000;     // 0.0001 ICP in e8s
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
@@ -1028,6 +1033,12 @@ pub struct OnrampRequestInfo {
     pub payment_hash: Option<Vec<u8>>,
     /// Expiry timestamp (Unix seconds, when invoice created)
     pub expiry_timestamp: Option<u64>,
+    /// Principal who paid the ICP anti-DDoS fee (caller)
+    pub icp_fee_payer: Option<Principal>,
+    /// Block index of the ICP fee transfer
+    pub icp_fee_block_index: Option<Nat>,
+    /// Whether the ICP fee has been refunded (on success)
+    pub icp_fee_refunded: bool,
 }
 
 // =============================================================================
@@ -1166,6 +1177,10 @@ pub struct OfframpRequestInfo {
     pub state: OfframpRequestState,
     /// Preimage (when completed)
     pub preimage: Option<Vec<u8>>,
+    /// Block index of the ICP fee transfer
+    pub icp_fee_block_index: Option<Nat>,
+    /// Whether the ICP fee has been refunded (on success)
+    pub icp_fee_refunded: bool,
 }
 
 // =============================================================================

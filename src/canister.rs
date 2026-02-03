@@ -311,19 +311,22 @@ async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
 ///
 /// Called by clients to initiate a swap. Returns a request_id that can be
 /// used to poll for the invoice once the relay creates it.
+/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
 ///
 /// Flow:
-/// 1. Client calls this endpoint with (recipient, amount)
-/// 2. Canister creates pending request, returns request_id
-/// 3. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
-/// 4. Relay calls submit_invoice with the invoice
-/// 5. Client polls get_invoice_by_request until invoice is ready
-/// 6. Client pays the invoice
-/// 7. Relay receives payment, calls complete_swap
+/// 1. Client approves 20 ICP for canister via ICP ledger icrc2_approve
+/// 2. Client calls this endpoint with (recipient, amount)
+/// 3. Canister takes 20 ICP fee, creates pending request, returns request_id
+/// 4. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
+/// 5. Relay calls submit_invoice with the invoice
+/// 6. Client polls get_invoice_by_request until invoice is ready
+/// 7. Client pays the invoice
+/// 8. Relay receives payment, calls complete_swap
+/// 9. Canister transfers ckBTC AND refunds 20 ICP to user
 #[update]
 #[candid_method(update)]
-fn request_onramp_invoice(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
-    request_onramp_invoice_impl(request)
+async fn request_onramp_invoice(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
+    request_onramp_invoice_impl(request).await
 }
 
 /// Get all pending invoice requests for the relay to process
@@ -393,10 +396,11 @@ fn mark_offramp_in_progress(request_id: String) -> bool {
 ///
 /// Called by the relay after successfully paying the Lightning invoice.
 /// Requires the payment preimage as proof of payment.
+/// Refunds the 20 ICP anti-DDoS fee to the user on success.
 #[update]
 #[candid_method(update)]
-fn complete_offramp(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
-    complete_offramp_impl(request)
+async fn complete_offramp(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
+    complete_offramp_impl(request).await
 }
 
 /// Fail an offramp request and initiate refund

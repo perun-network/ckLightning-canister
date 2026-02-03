@@ -30,7 +30,8 @@ use crate::htlc::{
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
-    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, Funding,
+    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
+    ICP_DDOS_FEE_E8S, ICP_TRANSFER_FEE_E8S, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
     NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs, SetBtcAddressMsg,
     SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
@@ -1011,15 +1012,48 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     match call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                // Mark swap as completed
-                {
+                // Mark swap as completed and get ICP fee payer
+                let icp_fee_payer = {
                     let mut state = STATE.write().unwrap();
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                         swap.state = SwapState::Completed {
                             block_index: block_index.clone(),
                         };
                     }
+                    // Find the onramp request by payment_hash and get ICP fee payer
+                    let mut fee_payer = None;
+                    for request in state.onramp_requests.values_mut() {
+                        if let Some(ref ph) = request.payment_hash {
+                            if ph.as_slice() == payment_hash_arr.as_slice() {
+                                request.state = OnrampRequestState::Completed { block_index: block_index.clone() };
+                                fee_payer = request.icp_fee_payer;
+                                break;
+                            }
+                        }
+                    }
+                    fee_payer
+                };
+
+                // Refund ICP fee to the fee payer (if there was one)
+                if let Some(fee_payer) = icp_fee_payer {
+                    let refund_result = refund_icp_fee(fee_payer).await;
+                    if let Err(e) = refund_result {
+                        ic_cdk::println!("Warning: Failed to refund ICP fee: {}", e);
+                        // Don't fail the swap - ckBTC was already transferred successfully
+                    } else {
+                        // Mark ICP fee as refunded
+                        let mut state = STATE.write().unwrap();
+                        for request in state.onramp_requests.values_mut() {
+                            if let Some(ref ph) = request.payment_hash {
+                                if ph.as_slice() == payment_hash_arr.as_slice() {
+                                    request.icp_fee_refunded = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
+
                 CompleteSwapResponse {
                     success: true,
                     block_index: Some(block_index),
@@ -1070,6 +1104,38 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     }
 }
 
+/// Helper function to refund ICP anti-DDoS fee to a recipient
+async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> {
+    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+
+    // Refund 20 ICP minus the transfer fee
+    let refund_amount = ICP_DDOS_FEE_E8S - ICP_TRANSFER_FEE_E8S;
+
+    let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(refund_amount),
+        fee: Some(candid::Nat::from(ICP_TRANSFER_FEE_E8S)),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(icp_ledger, "icrc1_transfer", (transfer_args,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => Ok(block_index),
+            Err(e) => Err(format!("ICP transfer failed: {:?}", e)),
+        },
+        Err((code, msg)) => Err(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+    }
+}
+
 // =============================================================================
 // Onramp Invoice Request Implementation (Canister-First Flow)
 // =============================================================================
@@ -1078,7 +1144,10 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 ///
 /// Called by clients to initiate a Lightning → ckBTC swap.
 /// Creates a pending request that the relay will fulfill with an actual invoice.
-pub fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
+/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
+pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
+    let caller = msg_caller();
+
     // Validate amount
     if request.amount_sats == 0 {
         return OnrampInvoiceResponse {
@@ -1087,6 +1156,50 @@ pub fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoi
             error: Some("Amount must be greater than 0".to_string()),
         };
     }
+
+    // Collect ICP anti-DDoS fee upfront via ICRC-2 transfer_from
+    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let canister_principal = canister_self();
+
+    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+        spender_subaccount: None,
+        from: icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        },
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: canister_principal,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(ICP_DDOS_FEE_E8S),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
+    )> = ic_cdk::call(icp_ledger, "icrc2_transfer_from", (transfer_args,)).await;
+
+    let icp_fee_block_index = match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => block_index,
+            Err(err) => {
+                return OnrampInvoiceResponse {
+                    request_id: String::new(),
+                    success: false,
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve 20 ICP?", err)),
+                };
+            }
+        },
+        Err((code, msg)) => {
+            return OnrampInvoiceResponse {
+                request_id: String::new(),
+                success: false,
+                error: Some(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+            };
+        }
+    };
 
     // Generate unique request ID (hash of recipient + amount + time)
     let now = blocktime();
@@ -1100,7 +1213,7 @@ pub fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoi
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
-    // Create the request info
+    // Create the request info with ICP fee tracking
     let request_info = OnrampRequestInfo {
         request_id: request_id.clone(),
         recipient: request.recipient,
@@ -1110,6 +1223,9 @@ pub fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoi
         invoice: None,
         payment_hash: None,
         expiry_timestamp: None,
+        icp_fee_payer: Some(caller),
+        icp_fee_block_index: Some(icp_fee_block_index),
+        icp_fee_refunded: false,
     };
 
     // Store the request
@@ -1251,8 +1367,10 @@ pub fn mark_onramp_completed_impl(payment_hash: &[u8], block_index: Nat) {
 /// Request an offramp (ckBTC → Lightning)
 ///
 /// Called by a user who wants to pay a Lightning invoice using their ckBTC.
-/// The canister takes custody of the ckBTC via ICRC-2 transfer_from.
-/// The relay then pays the invoice and reports success/failure.
+/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee + ckBTC amount.
+/// The canister takes custody of ICP fee first, then ckBTC.
+/// If ckBTC collection fails, ICP fee is NOT refunded (this is the DDoS protection).
+/// ICP fee is only refunded on successful Lightning payment completion.
 pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     let caller = msg_caller();
 
@@ -1299,13 +1417,58 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
-    // Take custody of user's ckBTC via ICRC-2 transfer_from
-    // User must have called icrc2_approve(ckLightning canister, amount + fee) first
-    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
     let canister_principal = canister_self();
 
+    // STEP 1: Collect ICP anti-DDoS fee first
+    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let icp_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+        spender_subaccount: None,
+        from: icrc_ledger_types::icrc1::account::Account {
+            owner: caller,
+            subaccount: None,
+        },
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: canister_principal,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(ICP_DDOS_FEE_E8S),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let icp_call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
+    )> = ic_cdk::call(icp_ledger, "icrc2_transfer_from", (icp_transfer_args,)).await;
+
+    let icp_fee_block_index = match icp_call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => block_index,
+            Err(err) => {
+                return OfframpResponse {
+                    request_id: String::new(),
+                    success: false,
+                    amount_sats: Some(amount_sats),
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve 20 ICP?", err)),
+                };
+            }
+        },
+        Err((code, msg)) => {
+            return OfframpResponse {
+                request_id: String::new(),
+                success: false,
+                amount_sats: Some(amount_sats),
+                error: Some(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+            };
+        }
+    };
+
+    // STEP 2: Take custody of user's ckBTC via ICRC-2 transfer_from
+    // User must have called icrc2_approve(ckLightning canister, amount + fee) first
+    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+
     // Transfer ckBTC from user to canister
-    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+    let ckbtc_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
         spender_subaccount: None,
         from: icrc_ledger_types::icrc1::account::Account {
             owner: caller,
@@ -1321,14 +1484,14 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         created_at_time: None,
     };
 
-    let call_result: CallResult<(
+    let ckbtc_call_result: CallResult<(
         Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(ckbtc_ledger, "icrc2_transfer_from", (transfer_args,)).await;
+    )> = ic_cdk::call(ckbtc_ledger, "icrc2_transfer_from", (ckbtc_transfer_args,)).await;
 
-    match call_result {
+    match ckbtc_call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(_block_index) => {
-                // Success - store the offramp request
+                // Success - store the offramp request with ICP fee info
                 let now = ic_cdk::api::time();
 
                 let request_info = OfframpRequestInfo {
@@ -1343,6 +1506,8 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                     created_at: now,
                     state: OfframpRequestState::Pending,
                     preimage: None,
+                    icp_fee_block_index: Some(icp_fee_block_index),
+                    icp_fee_refunded: false,
                 };
 
                 {
@@ -1358,20 +1523,24 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                 }
             }
             Err(err) => {
+                // ckBTC collection failed - ICP fee is NOT refunded (DDoS protection)
+                ic_cdk::println!("ckBTC collection failed, ICP fee (block {}) not refunded", icp_fee_block_index);
                 OfframpResponse {
                     request_id: String::new(),
                     success: false,
                     amount_sats: Some(amount_sats),
-                    error: Some(format!("Failed to take custody of ckBTC: {:?}", err)),
+                    error: Some(format!("Failed to take custody of ckBTC: {:?}. ICP fee was collected and is NOT refunded.", err)),
                 }
             }
         },
         Err((code, msg)) => {
+            // ckBTC ledger call failed - ICP fee is NOT refunded (DDoS protection)
+            ic_cdk::println!("ckBTC ledger call failed, ICP fee (block {}) not refunded", icp_fee_block_index);
             OfframpResponse {
                 request_id: String::new(),
                 success: false,
                 amount_sats: Some(amount_sats),
-                error: Some(format!("ICRC-2 transfer_from failed: {:?} - {}", code, msg)),
+                error: Some(format!("ckBTC ICRC-2 transfer_from failed: {:?} - {}. ICP fee was collected and is NOT refunded.", code, msg)),
             }
         }
     }
@@ -1415,7 +1584,8 @@ pub fn mark_offramp_in_progress_impl(request_id: &str) -> bool {
 /// Complete an offramp request after successful payment
 ///
 /// Called by the relay after successfully paying the Lightning invoice.
-pub fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
+/// Refunds the 20 ICP anti-DDoS fee to the user on success.
+pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
     // Validate preimage length
     if request.preimage.len() != 32 {
         return CompleteOfframpResponse {
@@ -1428,39 +1598,57 @@ pub fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteOfframp
     let computed_hash = bitcoin::hashes::sha256::Hash::hash(&request.preimage);
     let computed_hash_bytes = computed_hash.as_byte_array();
 
-    let mut state = STATE.write().unwrap();
+    // Get the user and verify state, mark as completed
+    let user = {
+        let mut state = STATE.write().unwrap();
 
-    let request_info = match state.offramp_requests.get_mut(&request.request_id) {
-        Some(info) => info,
-        None => {
+        let request_info = match state.offramp_requests.get_mut(&request.request_id) {
+            Some(info) => info,
+            None => {
+                return CompleteOfframpResponse {
+                    success: false,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+        };
+
+        // Verify payment_hash matches
+        if request_info.payment_hash.as_slice() != computed_hash_bytes {
             return CompleteOfframpResponse {
                 success: false,
-                error: Some("Request not found".to_string()),
+                error: Some("Preimage does not match payment_hash".to_string()),
             };
         }
+
+        // Check state
+        if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+            return CompleteOfframpResponse {
+                success: false,
+                error: Some(format!("Invalid state for completion: {:?}", request_info.state)),
+            };
+        }
+
+        // Mark as completed
+        request_info.state = OfframpRequestState::Completed {
+            preimage: request.preimage.clone(),
+        };
+        request_info.preimage = Some(request.preimage);
+
+        request_info.user
     };
 
-    // Verify payment_hash matches
-    if request_info.payment_hash.as_slice() != computed_hash_bytes {
-        return CompleteOfframpResponse {
-            success: false,
-            error: Some("Preimage does not match payment_hash".to_string()),
-        };
+    // Refund ICP fee to the user (on success)
+    let refund_result = refund_icp_fee(user).await;
+    if let Err(e) = refund_result {
+        ic_cdk::println!("Warning: Failed to refund ICP fee for offramp: {}", e);
+        // Don't fail the completion - Lightning payment was successful
+    } else {
+        // Mark ICP fee as refunded
+        let mut state = STATE.write().unwrap();
+        if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
+            request_info.icp_fee_refunded = true;
+        }
     }
-
-    // Check state
-    if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
-        return CompleteOfframpResponse {
-            success: false,
-            error: Some(format!("Invalid state for completion: {:?}", request_info.state)),
-        };
-    }
-
-    // Mark as completed
-    request_info.state = OfframpRequestState::Completed {
-        preimage: request.preimage.clone(),
-    };
-    request_info.preimage = Some(request.preimage);
 
     CompleteOfframpResponse {
         success: true,
