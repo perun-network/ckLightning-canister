@@ -31,7 +31,7 @@ use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
     Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
-    ICP_DDOS_FEE_E8S, ICP_TRANSFER_FEE_E8S, Funding,
+    ICP_DDOS_FEE_E8S, ICP_TRANSFER_FEE_E8S, ONRAMP_TIMEOUT_NS, OFFRAMP_TIMEOUT_NS, Funding,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse, HoldingsResponse,
     NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs, SetBtcAddressMsg,
     SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
@@ -71,6 +71,11 @@ use crate::ic_types::{
     // HTLC signing types (Phase 2)
     CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
     SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
+    // Relay registration types
+    RelayRegistration, RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
+    // Rate limiting types
+    RateLimitInfo, RateLimitStatus,
+    RATE_LIMIT_WINDOW_NS, MAX_ONRAMP_REQUESTS_PER_WINDOW, MAX_OFFRAMP_REQUESTS_PER_WINDOW,
 };
 use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
@@ -175,6 +180,31 @@ where
 
     // HTLC transaction details for signing (payment_hash -> details)
     htlc_tx_details: HashMap<[u8; 32], HtlcTxDetails>,
+
+    // ==========================================================================
+    // Test Configuration (for E2E testing only)
+    // ==========================================================================
+
+    // Override timeout values for testing (None = use defaults)
+    test_onramp_timeout_ns: Option<u64>,
+    test_offramp_timeout_ns: Option<u64>,
+
+    // ==========================================================================
+    // Relay Registration (for invoice verification)
+    // ==========================================================================
+
+    // Registered relay info (node pubkey for invoice verification)
+    registered_relay: Option<RelayRegistration>,
+
+    // ==========================================================================
+    // Rate Limiting
+    // ==========================================================================
+
+    // Rate limit tracking for onramp requests (principal -> RateLimitInfo)
+    onramp_rate_limits: HashMap<Principal, RateLimitInfo>,
+
+    // Rate limit tracking for offramp requests (principal -> RateLimitInfo)
+    offramp_rate_limits: HashMap<Principal, RateLimitInfo>,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -498,6 +528,14 @@ where
             // Channel secrets (Phase 2)
             channel_secrets: HashMap::new(),
             htlc_tx_details: HashMap::new(),
+            // Test configuration
+            test_onramp_timeout_ns: None,
+            test_offramp_timeout_ns: None,
+            // Relay registration
+            registered_relay: None,
+            // Rate limiting
+            onramp_rate_limits: HashMap::new(),
+            offramp_rate_limits: HashMap::new(),
         }
     }
 
@@ -1148,6 +1186,15 @@ async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> {
 pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
     let caller = msg_caller();
 
+    // Check rate limit FIRST (before collecting fee)
+    if let Err(e) = check_onramp_rate_limit(caller) {
+        return OnrampInvoiceResponse {
+            request_id: String::new(),
+            success: false,
+            error: Some(e),
+        };
+    }
+
     // Validate amount
     if request.amount_sats == 0 {
         return OnrampInvoiceResponse {
@@ -1264,12 +1311,26 @@ pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
 ///
 /// Called by the relay after creating a BOLT11 invoice.
 /// Also registers the swap so complete_swap works later.
+///
+/// **Security:** Verifies that the invoice was created by the registered relay node.
+/// This prevents invoice substitution attacks where a malicious relay could redirect
+/// payments to a different node.
 pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceResponse {
     // Validate payment_hash length
     if request.payment_hash.len() != 32 {
         return SubmitInvoiceResponse {
             success: false,
             error: Some("Invalid payment_hash length (must be 32 bytes)".to_string()),
+        };
+    }
+
+    // SECURITY: Verify the invoice was created by the registered relay node
+    // This prevents invoice substitution attacks
+    if let Err(e) = verify_invoice_node_pubkey(&request.invoice) {
+        ic_cdk::println!("Invoice verification FAILED: {}", e);
+        return SubmitInvoiceResponse {
+            success: false,
+            error: Some(format!("Invoice verification failed: {}", e)),
         };
     }
 
@@ -1294,7 +1355,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
         };
     }
 
-    // Update the request with invoice info
+    // Update the request with invoice info (verified)
     request_info.invoice = Some(request.invoice);
     request_info.payment_hash = Some(request.payment_hash.clone());
     request_info.expiry_timestamp = Some(request.expiry_timestamp);
@@ -1373,6 +1434,16 @@ pub fn mark_onramp_completed_impl(payment_hash: &[u8], block_index: Nat) {
 /// ICP fee is only refunded on successful Lightning payment completion.
 pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     let caller = msg_caller();
+
+    // Check rate limit FIRST (before collecting fee)
+    if let Err(e) = check_offramp_rate_limit(caller) {
+        return OfframpResponse {
+            request_id: String::new(),
+            success: false,
+            amount_sats: None,
+            error: Some(e),
+        };
+    }
 
     // Parse the invoice to extract amount and payment_hash
     let invoice = match lightning_invoice::Bolt11Invoice::from_str(&request.invoice) {
@@ -2134,6 +2205,8 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
 /// Withdraw ckBTC from the liquidity pool
 ///
 /// Checks the caller's LP balance and transfers ckBTC back to them.
+/// Additionally, checks that the requested amount doesn't exceed available ckBTC
+/// (total LP ckBTC minus ckBTC reserved for pending onramp requests).
 pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     let caller = msg_caller();
 
@@ -2147,9 +2220,39 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         };
     }
 
-    // Check and deduct from LP balance
+    // Check available ckBTC (not reserved for pending swaps) and deduct from LP balance
     {
         let mut state = STATE.write().unwrap();
+
+        // Calculate ckBTC reserved for pending onramp requests
+        // These are requests where invoice is created but payment not yet completed
+        let reserved_for_onramps: u64 = state.onramp_requests
+            .values()
+            .filter(|req| matches!(req.state,
+                OnrampRequestState::Pending | OnrampRequestState::Ready))
+            .map(|req| req.amount_sats)
+            .sum();
+
+        // Calculate available ckBTC = total LP ckBTC - reserved for pending swaps
+        let total_lp_ckbtc: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC)
+            .0.clone().try_into().unwrap_or(0);
+        let available_ckbtc = total_lp_ckbtc.saturating_sub(reserved_for_onramps);
+
+        let amount_u64: u64 = amount.0.clone().try_into().unwrap_or(u64::MAX);
+        if amount_u64 > available_ckbtc {
+            let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
+            return LpWithdrawResponse {
+                success: false,
+                amount_withdrawn: Nat::from(0u64),
+                new_balance: current_balance,
+                block_index: None,
+                error: Some(format!(
+                    "Insufficient available ckBTC: {} sats requested but only {} sats available (total {} sats, {} sats reserved for pending swaps)",
+                    amount_u64, available_ckbtc, total_lp_ckbtc, reserved_for_onramps
+                )),
+            };
+        }
+
         if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::CkBTC, amount.clone()) {
             let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
             return LpWithdrawResponse {
@@ -2417,6 +2520,8 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
 ///
 /// Sends BTC from the shared LP address to the user's destination address.
 /// The caller's LP BTC balance must be sufficient for the withdrawal.
+/// Additionally, the requested amount must not exceed available on-chain BTC
+/// (total LP BTC minus BTC locked in Lightning channels).
 pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawResponse {
     let caller = msg_caller();
 
@@ -2432,9 +2537,30 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
 
     let amount_nat = Nat::from(request.amount_sat);
 
-    // Check and deduct from LP balance
+    // Check available BTC (not locked in channels) and deduct from LP balance
     {
         let mut state = STATE.write().unwrap();
+
+        // Calculate available BTC = total LP BTC - BTC locked in channels
+        let total_lp_btc: u64 = state.liq_pool.get_total(&PoolAsset::BTC)
+            .0.clone().try_into().unwrap_or(0);
+        let btc_in_channels = state.total_btc_in_channels;
+        let available_btc = total_lp_btc.saturating_sub(btc_in_channels);
+
+        if request.amount_sat > available_btc {
+            let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
+            return LpBtcWithdrawResponse {
+                success: false,
+                amount_withdrawn: Nat::from(0u64),
+                new_btc_balance: current_balance,
+                txid: None,
+                error: Some(format!(
+                    "Insufficient available BTC: {} sats requested but only {} sats available (total {} sats, {} sats locked in channels)",
+                    request.amount_sat, available_btc, total_lp_btc, btc_in_channels
+                )),
+            };
+        }
+
         if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::BTC, amount_nat.clone()) {
             let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
             return LpBtcWithdrawResponse {
@@ -3838,5 +3964,435 @@ pub fn sign_htlc_timeout_impl(request: SignHtlcTimeoutRequest) -> SignHtlcRespon
         signed_tx: Some(signed_tx),
         txid: Some(result_txid),
         error: None,
+    }
+}
+
+// =============================================================================
+// Swap Timeout Handling
+// =============================================================================
+
+/// Check for expired swap requests and handle them appropriately.
+///
+/// - Onramp: Mark as Expired, DO NOT refund ICP fee (anti-DDoS)
+/// - Offramp: Mark as Expired, refund ckBTC to user (not LP!)
+///
+/// This function is called periodically by the heartbeat.
+pub async fn check_expired_swaps_impl() {
+    let now = blocktime();
+
+    // Get timeout values (use test overrides if set)
+    let (onramp_timeout, offramp_timeout) = {
+        let state = STATE.read().unwrap();
+        (
+            state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
+            state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
+        )
+    };
+
+    // First, collect expired onramp request IDs
+    let expired_onramp_ids: Vec<String> = {
+        let state = STATE.read().unwrap();
+        state.onramp_requests
+            .iter()
+            .filter(|(_, req)| {
+                matches!(req.state, OnrampRequestState::Pending | OnrampRequestState::Ready)
+                    && now > req.created_at + onramp_timeout
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+
+    // Mark expired onramp requests
+    if !expired_onramp_ids.is_empty() {
+        let mut state = STATE.write().unwrap();
+        for id in &expired_onramp_ids {
+            if let Some(req) = state.onramp_requests.get_mut(id) {
+                req.state = OnrampRequestState::Expired;
+                ic_cdk::println!("Onramp request {} expired (ICP fee not refunded)", id);
+            }
+        }
+    }
+
+    // Collect expired offramp requests that need refunds
+    let expired_offramp_requests: Vec<(String, Principal, u64)> = {
+        let state = STATE.read().unwrap();
+        state.offramp_requests
+            .iter()
+            .filter(|(_, req)| {
+                matches!(req.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress)
+                    && now > req.created_at + offramp_timeout
+            })
+            .map(|(id, req)| (id.clone(), req.user, req.amount_sats))
+            .collect()
+    };
+
+    // Process offramp expirations one at a time (each requires async refund)
+    for (request_id, user, amount_sats) in expired_offramp_requests {
+        // Mark as expired first
+        {
+            let mut state = STATE.write().unwrap();
+            if let Some(req) = state.offramp_requests.get_mut(&request_id) {
+                // Double-check state hasn't changed
+                if !matches!(req.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+                    continue;
+                }
+                req.state = OfframpRequestState::Expired { refund_block_index: None };
+                ic_cdk::println!("Offramp request {} expired, initiating ckBTC refund to user", request_id);
+            }
+        }
+
+        // Refund ckBTC to user (not to LP!)
+        let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+
+        let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+            from_subaccount: None,
+            to: icrc_ledger_types::icrc1::account::Account {
+                owner: user,
+                subaccount: None,
+            },
+            amount: candid::Nat::from(amount_sats),
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        };
+
+        let call_result: CallResult<(
+            Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+        )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_args,)).await;
+
+        match call_result {
+            Ok((inner_result,)) => match inner_result {
+                Ok(block_index) => {
+                    let mut state = STATE.write().unwrap();
+                    if let Some(req) = state.offramp_requests.get_mut(&request_id) {
+                        req.state = OfframpRequestState::Expired {
+                            refund_block_index: Some(block_index.clone()),
+                        };
+                        ic_cdk::println!(
+                            "Offramp {} ckBTC refunded to user, block_index: {}",
+                            request_id,
+                            block_index
+                        );
+                    }
+                }
+                Err(err) => {
+                    ic_cdk::println!(
+                        "Failed to refund ckBTC for expired offramp {}: {:?}",
+                        request_id,
+                        err
+                    );
+                }
+            },
+            Err((code, msg)) => {
+                ic_cdk::println!(
+                    "ckBTC refund call failed for offramp {}: {:?} - {}",
+                    request_id,
+                    code,
+                    msg
+                );
+            }
+        }
+    }
+}
+
+/// Get count of expired swaps for monitoring
+pub fn get_expired_swap_counts() -> (u64, u64) {
+    let state = STATE.read().unwrap();
+
+    let expired_onramp = state.onramp_requests
+        .values()
+        .filter(|r| matches!(r.state, OnrampRequestState::Expired))
+        .count() as u64;
+
+    let expired_offramp = state.offramp_requests
+        .values()
+        .filter(|r| matches!(r.state, OfframpRequestState::Expired { .. }))
+        .count() as u64;
+
+    (expired_onramp, expired_offramp)
+}
+
+/// Set test timeout values for E2E testing.
+///
+/// Pass 0 to reset to default values.
+/// This allows tests to use shorter timeouts instead of waiting 10-30 minutes.
+pub fn set_test_timeouts_impl(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
+    let mut state = STATE.write().unwrap();
+
+    state.test_onramp_timeout_ns = if onramp_timeout_ns == 0 {
+        None
+    } else {
+        Some(onramp_timeout_ns)
+    };
+
+    state.test_offramp_timeout_ns = if offramp_timeout_ns == 0 {
+        None
+    } else {
+        Some(offramp_timeout_ns)
+    };
+
+    ic_cdk::println!(
+        "Test timeouts set: onramp={:?}ns, offramp={:?}ns",
+        state.test_onramp_timeout_ns,
+        state.test_offramp_timeout_ns
+    );
+}
+
+/// Get current timeout values (for testing/debugging)
+pub fn get_timeout_values_impl() -> (u64, u64) {
+    let state = STATE.read().unwrap();
+    (
+        state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
+        state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
+    )
+}
+
+// =============================================================================
+// Relay Registration Functions
+// =============================================================================
+
+/// Register a relay with its Lightning node pubkey.
+///
+/// The relay must call this before it can submit invoices for onramp requests.
+/// This prevents invoice substitution attacks where a malicious relay could
+/// redirect payments to a different node.
+///
+/// Currently only one relay can be registered at a time.
+pub fn register_relay_impl(request: RegisterRelayRequest) -> RegisterRelayResponse {
+    let caller = msg_caller();
+
+    // Validate node pubkey format (33 bytes compressed secp256k1)
+    if request.node_pubkey.len() != 33 {
+        return RegisterRelayResponse {
+            success: false,
+            error: Some("node_pubkey must be 33 bytes (compressed secp256k1)".to_string()),
+        };
+    }
+
+    // Validate it's a valid compressed public key (starts with 0x02 or 0x03)
+    let first_byte = request.node_pubkey[0];
+    if first_byte != 0x02 && first_byte != 0x03 {
+        return RegisterRelayResponse {
+            success: false,
+            error: Some("Invalid compressed pubkey format (must start with 0x02 or 0x03)".to_string()),
+        };
+    }
+
+    let mut state = STATE.write().unwrap();
+
+    // Check if a relay is already registered
+    if let Some(existing) = &state.registered_relay {
+        // Allow re-registration by the same principal (to update pubkey)
+        if existing.principal != caller {
+            return RegisterRelayResponse {
+                success: false,
+                error: Some(format!(
+                    "A relay is already registered. Existing principal: {}",
+                    existing.principal
+                )),
+            };
+        }
+    }
+
+    // Register the relay
+    let registration = RelayRegistration {
+        principal: caller,
+        node_pubkey: request.node_pubkey.clone(),
+        registered_at: blocktime(),
+        is_active: true,
+    };
+
+    ic_cdk::println!(
+        "Relay registered: principal={}, node_pubkey={}",
+        caller,
+        hex::encode(&request.node_pubkey)
+    );
+
+    state.registered_relay = Some(registration);
+
+    RegisterRelayResponse {
+        success: true,
+        error: None,
+    }
+}
+
+/// Get information about the registered relay.
+pub fn get_relay_info_impl() -> GetRelayInfoResponse {
+    let state = STATE.read().unwrap();
+
+    match &state.registered_relay {
+        Some(relay) => GetRelayInfoResponse {
+            registered: true,
+            principal: Some(relay.principal),
+            node_pubkey: Some(relay.node_pubkey.clone()),
+            is_active: Some(relay.is_active),
+        },
+        None => GetRelayInfoResponse {
+            registered: false,
+            principal: None,
+            node_pubkey: None,
+            is_active: None,
+        },
+    }
+}
+
+/// Helper function to extract the payee (destination) node pubkey from a BOLT11 invoice.
+///
+/// Returns the 33-byte compressed secp256k1 public key of the node that will receive the payment.
+fn extract_node_pubkey_from_invoice(invoice_str: &str) -> Result<Vec<u8>, String> {
+    let invoice = lightning_invoice::Bolt11Invoice::from_str(invoice_str)
+        .map_err(|e| format!("Invalid BOLT11 invoice: {}", e))?;
+
+    // Get the payee public key
+    // This is the node that created the invoice and will receive the payment
+    let payee_pubkey = invoice.recover_payee_pub_key();
+
+    // Convert to serialized bytes (33 bytes compressed)
+    Ok(payee_pubkey.serialize().to_vec())
+}
+
+/// Verify that an invoice was created by the registered relay node.
+///
+/// This is called during submit_invoice to prevent invoice substitution attacks.
+fn verify_invoice_node_pubkey(invoice_str: &str) -> Result<(), String> {
+    let state = STATE.read().unwrap();
+
+    // Get registered relay
+    let relay = match &state.registered_relay {
+        Some(r) => r,
+        None => {
+            return Err("No relay registered. Call register_relay first.".to_string());
+        }
+    };
+
+    if !relay.is_active {
+        return Err("Registered relay is not active".to_string());
+    }
+
+    // Extract node pubkey from invoice
+    let invoice_pubkey = extract_node_pubkey_from_invoice(invoice_str)?;
+
+    // Compare with registered relay pubkey
+    if invoice_pubkey != relay.node_pubkey {
+        return Err(format!(
+            "Invoice node pubkey mismatch! Expected: {}, Got: {}. This could indicate an invoice substitution attack.",
+            hex::encode(&relay.node_pubkey),
+            hex::encode(&invoice_pubkey)
+        ));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Rate Limiting Functions
+// =============================================================================
+
+/// Check if a principal is rate limited for onramp requests.
+/// Returns Ok(()) if allowed, Err(message) if rate limited.
+/// Also increments the request count if allowed.
+fn check_onramp_rate_limit(caller: Principal) -> Result<(), String> {
+    let now = blocktime();
+    let mut state = STATE.write().unwrap();
+
+    if let Some(info) = state.onramp_rate_limits.get_mut(&caller) {
+        // Check if window has expired
+        if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
+            // Reset window
+            info.window_start = now;
+            info.request_count = 1;
+            Ok(())
+        } else if info.request_count >= MAX_ONRAMP_REQUESTS_PER_WINDOW {
+            // Rate limited
+            let reset_in_ns = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
+            let reset_in_secs = reset_in_ns / 1_000_000_000;
+            Err(format!(
+                "Rate limited: {} onramp requests per hour exceeded. Try again in {} seconds.",
+                MAX_ONRAMP_REQUESTS_PER_WINDOW, reset_in_secs
+            ))
+        } else {
+            // Increment and allow
+            info.request_count += 1;
+            Ok(())
+        }
+    } else {
+        // First request from this principal
+        state.onramp_rate_limits.insert(caller, RateLimitInfo::new(now));
+        Ok(())
+    }
+}
+
+/// Check if a principal is rate limited for offramp requests.
+/// Returns Ok(()) if allowed, Err(message) if rate limited.
+/// Also increments the request count if allowed.
+fn check_offramp_rate_limit(caller: Principal) -> Result<(), String> {
+    let now = blocktime();
+    let mut state = STATE.write().unwrap();
+
+    if let Some(info) = state.offramp_rate_limits.get_mut(&caller) {
+        // Check if window has expired
+        if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
+            // Reset window
+            info.window_start = now;
+            info.request_count = 1;
+            Ok(())
+        } else if info.request_count >= MAX_OFFRAMP_REQUESTS_PER_WINDOW {
+            // Rate limited
+            let reset_in_ns = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
+            let reset_in_secs = reset_in_ns / 1_000_000_000;
+            Err(format!(
+                "Rate limited: {} offramp requests per hour exceeded. Try again in {} seconds.",
+                MAX_OFFRAMP_REQUESTS_PER_WINDOW, reset_in_secs
+            ))
+        } else {
+            // Increment and allow
+            info.request_count += 1;
+            Ok(())
+        }
+    } else {
+        // First request from this principal
+        state.offramp_rate_limits.insert(caller, RateLimitInfo::new(now));
+        Ok(())
+    }
+}
+
+/// Get rate limit status for a principal.
+pub fn get_rate_limit_status_impl(principal: Principal) -> RateLimitStatus {
+    let now = blocktime();
+    let state = STATE.read().unwrap();
+
+    let (onramp_count, onramp_window_start) = match state.onramp_rate_limits.get(&principal) {
+        Some(info) => {
+            if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
+                (0, now) // Window expired, would reset
+            } else {
+                (info.request_count, info.window_start)
+            }
+        }
+        None => (0, now),
+    };
+
+    let (offramp_count, offramp_window_start) = match state.offramp_rate_limits.get(&principal) {
+        Some(info) => {
+            if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
+                (0, now) // Window expired, would reset
+            } else {
+                (info.request_count, info.window_start)
+            }
+        }
+        None => (0, now),
+    };
+
+    // Calculate time until earliest window reset
+    let onramp_reset = (onramp_window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
+    let offramp_reset = (offramp_window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
+    let reset_in_secs = std::cmp::max(onramp_reset, offramp_reset) / 1_000_000_000;
+
+    RateLimitStatus {
+        onramp_requests: onramp_count,
+        offramp_requests: offramp_count,
+        max_onramp_per_window: MAX_ONRAMP_REQUESTS_PER_WINDOW,
+        max_offramp_per_window: MAX_OFFRAMP_REQUESTS_PER_WINDOW,
+        window_resets_in_seconds: reset_in_secs,
     }
 }
