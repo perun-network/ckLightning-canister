@@ -32,6 +32,96 @@ pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 pub const ICP_DDOS_FEE_E8S: u64 = 2_000_000_000; // 20 ICP in e8s
 pub const ICP_TRANSFER_FEE_E8S: u64 = 10_000;     // 0.0001 ICP in e8s
 
+// Swap timeout constants (in nanoseconds)
+pub const ONRAMP_TIMEOUT_NS: u64 = 30 * 60 * 1_000_000_000;  // 30 minutes
+pub const OFFRAMP_TIMEOUT_NS: u64 = 10 * 60 * 1_000_000_000; // 10 minutes
+
+// Rate limiting constants
+pub const RATE_LIMIT_WINDOW_NS: u64 = 60 * 60 * 1_000_000_000; // 1 hour window
+pub const MAX_ONRAMP_REQUESTS_PER_WINDOW: u32 = 10;  // 10 onramp requests per hour
+pub const MAX_OFFRAMP_REQUESTS_PER_WINDOW: u32 = 10; // 10 offramp requests per hour
+
+// =============================================================================
+// Relay Registration Types
+// =============================================================================
+
+/// Registered relay information
+///
+/// The relay must register its Lightning node pubkey before it can submit
+/// invoices for onramp requests. This prevents invoice substitution attacks
+/// where a malicious relay could redirect payments to a different node.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RelayRegistration {
+    /// The IC principal of the relay
+    pub principal: Principal,
+    /// The Lightning node pubkey (33 bytes compressed secp256k1)
+    pub node_pubkey: Vec<u8>,
+    /// When the relay was registered (nanoseconds)
+    pub registered_at: u64,
+    /// Whether the relay is currently active
+    pub is_active: bool,
+}
+
+/// Request to register a relay
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RegisterRelayRequest {
+    /// The Lightning node pubkey (33 bytes compressed secp256k1)
+    pub node_pubkey: Vec<u8>,
+}
+
+/// Response from registering a relay
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RegisterRelayResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Query response for relay info
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct GetRelayInfoResponse {
+    pub registered: bool,
+    pub principal: Option<Principal>,
+    pub node_pubkey: Option<Vec<u8>>,
+    pub is_active: Option<bool>,
+}
+
+// =============================================================================
+// Rate Limiting Types
+// =============================================================================
+
+/// Rate limit tracking for a principal
+#[derive(Clone, Debug)]
+pub struct RateLimitInfo {
+    /// Number of requests in current window
+    pub request_count: u32,
+    /// Start of current time window (nanoseconds)
+    pub window_start: u64,
+}
+
+impl RateLimitInfo {
+    pub fn new(now: u64) -> Self {
+        Self {
+            request_count: 1,
+            window_start: now,
+        }
+    }
+}
+
+/// Rate limit status response
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RateLimitStatus {
+    /// Requests made in current window
+    pub onramp_requests: u32,
+    /// Requests made in current window
+    pub offramp_requests: u32,
+    /// Max allowed per window
+    pub max_onramp_per_window: u32,
+    /// Max allowed per window
+    pub max_offramp_per_window: u32,
+    /// Seconds until window resets
+    pub window_resets_in_seconds: u64,
+}
+
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
 use candid::{CandidType, Principal};
@@ -1058,6 +1148,8 @@ pub enum OfframpRequestState {
     Failed { reason: String },
     /// ckBTC refunded to user
     Refunded { block_index: Nat },
+    /// Request expired without completion, ckBTC refunded to user
+    Expired { refund_block_index: Option<Nat> },
 }
 
 /// Request to offramp ckBTC to Lightning (user → canister)

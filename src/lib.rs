@@ -66,6 +66,10 @@ use crate::ic_types::{
     // HTLC signing types (Phase 2)
     CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
     SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
+    // Relay registration types
+    RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
+    // Rate limiting types
+    RateLimitStatus,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::Nat;

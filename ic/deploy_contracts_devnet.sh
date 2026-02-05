@@ -89,20 +89,21 @@ check_mode = variant { AcceptAll }; num_subnet_nodes = 34; } })"
 
 # Prepare ledger initialization argument
 
-LEDGER_INIT_ARG="(variant { Init = record { 
-    minting_account = \"${MINTING_ACCOUNT}\"; 
-    initial_values = vec { 
-        record { \"${INITIAL_ACCOUNT}\"; record { e8s = 200_000_000 } } 
-    }; 
-    send_whitelist = vec {}; 
-    transfer_fee = opt record { e8s = 10_000 }; 
-    token_symbol = opt \"LICP\"; 
-    token_name = opt \"Local Internet Computer Protocol Token\"; 
-    archive_options = opt record { 
-        trigger_threshold = 2000; 
-        num_blocks_to_archive = 1000; 
-        controller_id = principal \"${ARCHIVE_PRINCIPAL}\" 
-    }; 
+LEDGER_INIT_ARG="(variant { Init = record {
+    minting_account = \"${MINTING_ACCOUNT}\";
+    initial_values = vec {
+        record { \"${INITIAL_ACCOUNT}\"; record { e8s = 10_000_000_000 } };
+        record { \"${USER_ACCOUNT}\"; record { e8s = 10_000_000_000 } }
+    };
+    send_whitelist = vec {};
+    transfer_fee = opt record { e8s = 10_000 };
+    token_symbol = opt \"LICP\";
+    token_name = opt \"Local Internet Computer Protocol Token\";
+    archive_options = opt record {
+        trigger_threshold = 2000;
+        num_blocks_to_archive = 1000;
+        controller_id = principal \"${ARCHIVE_PRINCIPAL}\"
+    };
 } })"
 
 # Prepare ckbtc ledger initialization argument
@@ -157,6 +158,13 @@ dfx canister install cklightning --argument '(variant { regtest })'
 dfx canister install basic_bitcoin --argument '(variant { regtest })'
 # dfx deploy basic_bitcoin --argument '(variant { regtest })'
 
+# Mint ICP to user and node for anti-DDoS fee testing (1000 ICP each)
+echo -e "\n=== Minting ICP for testing ==="
+dfx identity use minting_ledger
+dfx canister call ledger icrc1_transfer "(record { to = record { owner = principal \"${USER_PRINCIPAL}\"; subaccount = null }; amount = 100_000_000_000; fee = null; memo = null; from_subaccount = null; created_at_time = null })"
+echo "Minted 1000 ICP to user (${USER_PRINCIPAL})"
+dfx canister call ledger icrc1_transfer "(record { to = record { owner = principal \"${NODE_PRINCIPAL}\"; subaccount = null }; amount = 100_000_000_000; fee = null; memo = null; from_subaccount = null; created_at_time = null })"
+echo "Minted 1000 ICP to node (${NODE_PRINCIPAL})"
 
 MOCK_ID=$(dfx canister id mock_contract)
 
@@ -190,4 +198,11 @@ echo "Node Principal: ${NODE_PRINCIPAL}"
 echo "Node Account: ${NODE_ACCOUNT}"
 echo "Default Principal: ${DEFAULT_PRINCIPAL}"
 echo "Archive Principal: ${ARCHIVE_PRINCIPAL}"
+
+echo -e "\nUser Balances:"
+echo "  ICP: 1100 ICP (100 initial + 1000 minted for anti-DDoS fee testing)"
+echo "  ckBTC: 101_000_000 sats"
+echo -e "\nNode Balances:"
+echo "  ICP: 1000 ICP (minted for anti-DDoS fee testing)"
+echo "  ckBTC: 100_000_000 sats"
 echo -e "\nDeployment completed successfully!"

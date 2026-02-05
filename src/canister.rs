@@ -43,6 +43,13 @@ use crate::canister_state::{
     register_channel_secrets_impl, get_channel_secrets_info_impl,
     // HTLC signing functions (Phase 2)
     create_htlc_with_tx_details_impl, sign_htlc_success_impl, sign_htlc_timeout_impl,
+    // Swap timeout handling
+    check_expired_swaps_impl, get_expired_swap_counts,
+    set_test_timeouts_impl, get_timeout_values_impl,
+    // Relay registration
+    register_relay_impl, get_relay_info_impl,
+    // Rate limiting
+    get_rate_limit_status_impl,
 };
 use crate::helpers::{
     get_ln_funding_pubkey_impl, get_ln_invoice_impl, send_btc_tx_impl, sign_ln_message_impl,
@@ -88,12 +95,17 @@ use crate::ic_types::{
     // LP Liquidity types
     GetFundingUtxosResponse, UpdateChannelBalanceRequest, UpdateChannelBalanceResponse,
     LpLiquidityStatus,
+    // Relay registration types
+    RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
+    // Rate limiting types
+    RateLimitStatus,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
 use ic_cdk::api::call::CallResult;
 use ic_cdk::query;
 use ic_cdk::update;
+use ic_cdk::heartbeat;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
@@ -810,4 +822,106 @@ fn sign_htlc_success(request: SignHtlcSuccessRequest) -> SignHtlcResponse {
 #[candid_method(update)]
 fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
     sign_htlc_timeout_impl(request)
+}
+
+// =============================================================================
+// Swap Timeout Handling
+// =============================================================================
+
+/// Heartbeat function that periodically checks for expired swaps.
+///
+/// - Onramp: Marks expired requests, ICP fee NOT refunded (anti-DDoS)
+/// - Offramp: Marks expired requests, refunds ckBTC to user (not LP)
+///
+/// Timeout periods:
+/// - Onramp: 30 minutes
+/// - Offramp: 10 minutes
+#[heartbeat]
+async fn heartbeat() {
+    check_expired_swaps_impl().await;
+}
+
+/// Get count of expired swaps for monitoring
+///
+/// Returns (expired_onramp_count, expired_offramp_count)
+#[query]
+#[candid_method(query)]
+fn get_expired_swap_counts_query() -> (u64, u64) {
+    get_expired_swap_counts()
+}
+
+/// Manually trigger expired swap checking (for testing)
+///
+/// This allows E2E tests to trigger the expiry check without waiting for heartbeat.
+/// In production, the heartbeat handles this automatically.
+#[update]
+#[candid_method(update)]
+async fn check_expired_swaps() {
+    check_expired_swaps_impl().await;
+}
+
+/// Set test timeout values (for E2E testing only)
+///
+/// Pass 0 to reset to default values.
+/// Default: onramp=30min, offramp=10min
+/// For testing, use small values like 5_000_000_000 (5 seconds)
+#[update]
+#[candid_method(update)]
+fn set_test_timeouts(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
+    set_test_timeouts_impl(onramp_timeout_ns, offramp_timeout_ns);
+}
+
+/// Get current timeout values (for testing/debugging)
+///
+/// Returns (onramp_timeout_ns, offramp_timeout_ns)
+#[query]
+#[candid_method(query)]
+fn get_timeout_values() -> (u64, u64) {
+    get_timeout_values_impl()
+}
+
+// =============================================================================
+// Relay Registration Endpoints
+// =============================================================================
+
+/// Register a relay with its Lightning node pubkey.
+///
+/// The relay must call this before it can submit invoices for onramp requests.
+/// This prevents invoice substitution attacks where a malicious relay could
+/// redirect payments to a different node.
+///
+/// # Arguments
+/// * `request` - Contains the 33-byte compressed secp256k1 node pubkey
+///
+/// # Security
+/// - Only one relay can be registered at a time
+/// - The same principal can update its pubkey by calling again
+/// - Invoice submission will fail if the invoice's destination node doesn't match
+#[update]
+#[candid_method(update)]
+fn register_relay(request: RegisterRelayRequest) -> RegisterRelayResponse {
+    register_relay_impl(request)
+}
+
+/// Get information about the registered relay.
+///
+/// Returns whether a relay is registered, and if so, its principal and node pubkey.
+#[query]
+#[candid_method(query)]
+fn get_relay_info() -> GetRelayInfoResponse {
+    get_relay_info_impl()
+}
+
+// =============================================================================
+// Rate Limiting Endpoints
+// =============================================================================
+
+/// Get the caller's rate limit status.
+///
+/// Returns how many onramp/offramp requests the caller has made in the current
+/// window, and when the window resets.
+#[query]
+#[candid_method(query)]
+fn get_rate_limit_status() -> RateLimitStatus {
+    get_rate_limit_status_impl(ic_cdk::api::msg_caller())
 }
