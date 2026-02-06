@@ -26,6 +26,7 @@ pub mod btc;
 use crate::ic_types::LnInvoiceRequest;
 pub mod msg;
 pub mod receiver;
+pub mod stableswap;
 use crate::error::ResultBtc;
 use crate::error::{BtcError, CklError};
 use crate::events::{ChannelTime, Event, RegEvent};
@@ -70,9 +71,14 @@ use crate::ic_types::{
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
     // Rate limiting types
     RateLimitStatus,
+    // StableSwap types
+    StableSwapConfig, SwapDirection,
+    UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
+    SwapQuoteRequest, SwapQuoteResponse,
+    WithdrawProtocolFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
-use candid::Nat;
+use candid::{Nat, Principal};
 use ic_cdk::bitcoin_canister::Network;
 
 use ic_cdk::{init, post_upgrade};

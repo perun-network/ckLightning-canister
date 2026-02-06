@@ -205,6 +205,19 @@ where
 
     // Rate limit tracking for offramp requests (principal -> RateLimitInfo)
     offramp_rate_limits: HashMap<Principal, RateLimitInfo>,
+
+    // ==========================================================================
+    // StableSwap AMM Configuration
+    // ==========================================================================
+
+    // StableSwap config (amplification, fees)
+    stableswap_config: crate::stableswap::StableSwapConfig,
+
+    // Accumulated protocol fees in satoshis (ckBTC side)
+    protocol_fees_ckbtc: u64,
+
+    // Admin principal (can update config, withdraw protocol fees)
+    admin: Option<Principal>,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -536,6 +549,16 @@ where
             // Rate limiting
             onramp_rate_limits: HashMap::new(),
             offramp_rate_limits: HashMap::new(),
+            // StableSwap AMM
+            stableswap_config: crate::stableswap::StableSwapConfig {
+                amplification: 200,
+                fee_bps: 10,
+                protocol_fee_share_bps: 5000,
+                max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
+                imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
+            },
+            protocol_fees_ckbtc: 0,
+            admin: None,
         }
     }
 
@@ -990,8 +1013,8 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     }
 
     // Convert amount from millisatoshis to satoshis
-    let amount_sat = swap_info.amount_msat / 1000;
-    if amount_sat == 0 {
+    let input_sat = swap_info.amount_msat / 1000;
+    if input_sat == 0 {
         // Mark as failed
         {
             let mut state = STATE.write().unwrap();
@@ -1008,11 +1031,44 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         };
     }
 
-    // Check LP has sufficient liquidity and deduct proportionally from all depositors
-    let amount_nat = Nat::from(amount_sat);
-    {
+    // Use StableSwap AMM to compute ckBTC output for BTC input
+    let ckbtc_out = {
         let mut state = STATE.write().unwrap();
-        if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, amount_nat.clone()) {
+
+        // Get pool balances
+        let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+        let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
+
+        let swap_result = match crate::stableswap::get_swap_output(
+            &state.stableswap_config,
+            btc_balance,
+            ckbtc_balance,
+            input_sat as u64,
+            &crate::stableswap::SwapDirection::BtcToCkbtc,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
+                    swap.state = SwapState::Failed {
+                        reason: format!("StableSwap error: {}", e),
+                    };
+                }
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some(format!("StableSwap pricing error: {}", e)),
+                };
+            }
+        };
+
+        // Track protocol fees
+        state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(swap_result.protocol_fee);
+
+        let ckbtc_out = swap_result.output_amount;
+
+        // Deduct ckBTC from LP proportionally (only the output amount — LP fee stays in pool)
+        let amount_nat = Nat::from(ckbtc_out);
+        if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, amount_nat) {
             if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                 swap.state = SwapState::Failed {
                     reason: "Insufficient LP liquidity".to_string(),
@@ -1024,7 +1080,9 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                 error: Some("Insufficient LP liquidity for swap".to_string()),
             };
         }
-    }
+
+        ckbtc_out
+    };
 
     // Execute ckBTC transfer
     let transfer_arg = TransferArg {
@@ -1033,7 +1091,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             owner: swap_info.recipient,
             subaccount: None,
         },
-        amount: Nat(amount_sat.into()),
+        amount: Nat(ckbtc_out.into()),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
         memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(
             request.payment_hash.clone(),
@@ -1103,9 +1161,10 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                 {
                     let mut state = STATE.write().unwrap();
                     // Restore the deducted amount back to pool
+                    let restore_nat = Nat::from(ckbtc_out);
                     state.liq_pool.holdings_total
                         .get_mut(&PoolAsset::CkBTC)
-                        .map(|total| *total += amount_nat.clone());
+                        .map(|total| *total += restore_nat);
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                         swap.state = SwapState::Failed {
                             reason: format!("Transfer error: {:?}", e),
@@ -1124,9 +1183,10 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             {
                 let mut state = STATE.write().unwrap();
                 // Restore the deducted amount back to pool
+                let restore_nat = Nat::from(ckbtc_out);
                 state.liq_pool.holdings_total
                     .get_mut(&PoolAsset::CkBTC)
-                    .map(|total| *total += amount_nat.clone());
+                    .map(|total| *total += restore_nat);
                 if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                     swap.state = SwapState::Failed {
                         reason: format!("Call error: {:?} - {}", code, msg),
@@ -1471,7 +1531,8 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         }
     };
 
-    let amount_sats = amount_msat / 1000;
+    // BTC amount the user wants to receive via Lightning
+    let btc_out = amount_msat / 1000;
 
     // Extract payment hash
     let payment_hash_slice: &[u8] = invoice.payment_hash().as_ref();
@@ -1487,6 +1548,37 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         .take(16)
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
+
+    // Use StableSwap to compute how much ckBTC the user must pay for the desired BTC output
+    let (ckbtc_required, amount_sats) = {
+        let mut state = STATE.write().unwrap();
+
+        let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+        let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
+
+        match crate::stableswap::get_swap_input(
+            &state.stableswap_config,
+            btc_balance,
+            ckbtc_balance,
+            btc_out as u64,
+            &crate::stableswap::SwapDirection::CkbtcToBtc,
+        ) {
+            Ok(swap_result) => {
+                // Track protocol fees
+                state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(swap_result.protocol_fee);
+                // output_amount in get_swap_input is the required input
+                (swap_result.output_amount, btc_out as u64)
+            }
+            Err(e) => {
+                return OfframpResponse {
+                    request_id: String::new(),
+                    success: false,
+                    amount_sats: Some(btc_out as u64),
+                    error: Some(format!("StableSwap pricing error: {}", e)),
+                };
+            }
+        }
+    };
 
     let canister_principal = canister_self();
 
@@ -1535,10 +1627,11 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     };
 
     // STEP 2: Take custody of user's ckBTC via ICRC-2 transfer_from
-    // User must have called icrc2_approve(ckLightning canister, amount + fee) first
+    // User must have called icrc2_approve(ckLightning canister, ckbtc_required + fee) first
+    // ckbtc_required includes the StableSwap premium over 1:1
     let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
 
-    // Transfer ckBTC from user to canister
+    // Transfer ckBTC from user to canister (StableSwap-computed amount)
     let ckbtc_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
         spender_subaccount: None,
         from: icrc_ledger_types::icrc1::account::Account {
@@ -1549,7 +1642,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
             owner: canister_principal,
             subaccount: None,
         },
-        amount: candid::Nat::from(amount_sats),
+        amount: candid::Nat::from(ckbtc_required),
         fee: None,
         memo: None,
         created_at_time: None,
@@ -4395,4 +4488,256 @@ pub fn get_rate_limit_status_impl(principal: Principal) -> RateLimitStatus {
         max_offramp_per_window: MAX_OFFRAMP_REQUESTS_PER_WINDOW,
         window_resets_in_seconds: reset_in_secs,
     }
+}
+
+// =============================================================================
+// StableSwap Configuration & Query Endpoints
+// =============================================================================
+
+use crate::ic_types::{
+    SwapQuoteRequest, SwapQuoteResponse,
+    UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
+    WithdrawProtocolFeesResponse,
+    StableSwapConfig, SwapDirection,
+};
+
+/// Preview a swap output without executing — read-only query.
+pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
+    let state = STATE.read().unwrap();
+
+    let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+    let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
+
+    let effective_fee_bps = crate::stableswap::compute_effective_fee_bps(
+        &state.stableswap_config,
+        btc_balance as u128,
+        ckbtc_balance as u128,
+    );
+
+    match crate::stableswap::get_swap_output(
+        &state.stableswap_config,
+        btc_balance,
+        ckbtc_balance,
+        request.amount_sats,
+        &request.direction,
+    ) {
+        Ok(result) => SwapQuoteResponse {
+            input_amount: request.amount_sats,
+            output_amount: result.output_amount,
+            total_fee: result.total_fee,
+            lp_fee: result.lp_fee,
+            protocol_fee: result.protocol_fee,
+            price_impact_bps: result.price_impact_bps,
+            effective_fee_bps,
+            btc_pool_balance: btc_balance,
+            ckbtc_pool_balance: ckbtc_balance,
+            error: None,
+        },
+        Err(e) => SwapQuoteResponse {
+            input_amount: request.amount_sats,
+            output_amount: 0,
+            total_fee: 0,
+            lp_fee: 0,
+            protocol_fee: 0,
+            price_impact_bps: 0,
+            effective_fee_bps,
+            btc_pool_balance: btc_balance,
+            ckbtc_pool_balance: ckbtc_balance,
+            error: Some(format!("{}", e)),
+        },
+    }
+}
+
+/// Get the current StableSwap configuration.
+pub fn get_stableswap_config_impl() -> StableSwapConfig {
+    let state = STATE.read().unwrap();
+    state.stableswap_config.clone()
+}
+
+/// Update the StableSwap configuration (admin-only).
+pub fn update_stableswap_config_impl(
+    request: UpdateStableSwapConfigRequest,
+) -> UpdateStableSwapConfigResponse {
+    let caller = msg_caller();
+    let mut state = STATE.write().unwrap();
+
+    // Check admin authorization
+    match state.admin {
+        Some(admin) if admin == caller => {}
+        _ => {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("Unauthorized: caller is not admin".to_string()),
+            };
+        }
+    }
+
+    // Validate new values
+    if let Some(amp) = request.amplification {
+        if amp == 0 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("Amplification must be > 0".to_string()),
+            };
+        }
+        state.stableswap_config.amplification = amp;
+    }
+    if let Some(fee) = request.fee_bps {
+        if fee > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("fee_bps must be <= 10000".to_string()),
+            };
+        }
+        state.stableswap_config.fee_bps = fee;
+    }
+    if let Some(share) = request.protocol_fee_share_bps {
+        if share > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("protocol_fee_share_bps must be <= 10000".to_string()),
+            };
+        }
+        state.stableswap_config.protocol_fee_share_bps = share;
+    }
+    if let Some(max_slip) = request.max_slippage_bps {
+        if max_slip > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("max_slippage_bps must be <= 10000".to_string()),
+            };
+        }
+        state.stableswap_config.max_slippage_bps = max_slip;
+    }
+    if let Some(imb_fee) = request.imbalance_fee_bps {
+        if imb_fee > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("imbalance_fee_bps must be <= 10000".to_string()),
+            };
+        }
+        if imb_fee < state.stableswap_config.fee_bps {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("imbalance_fee_bps must be >= fee_bps".to_string()),
+            };
+        }
+        state.stableswap_config.imbalance_fee_bps = imb_fee;
+    }
+
+    UpdateStableSwapConfigResponse {
+        success: true,
+        config: state.stableswap_config.clone(),
+        error: None,
+    }
+}
+
+/// Withdraw accumulated protocol fees (admin-only).
+/// Transfers accumulated ckBTC fees to the specified recipient via ICRC-1, then resets counter.
+pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtocolFeesResponse {
+    let caller = msg_caller();
+
+    let (admin, amount) = {
+        let state = STATE.read().unwrap();
+        (state.admin, state.protocol_fees_ckbtc)
+    };
+
+    // Check admin authorization
+    match admin {
+        Some(a) if a == caller => {}
+        _ => {
+            return WithdrawProtocolFeesResponse {
+                success: false,
+                btc_amount: 0,
+                ckbtc_amount: 0,
+                ckbtc_block_index: None,
+                error: Some("Unauthorized: caller is not admin".to_string()),
+            };
+        }
+    }
+
+    if amount == 0 {
+        return WithdrawProtocolFeesResponse {
+            success: true,
+            btc_amount: 0,
+            ckbtc_amount: 0,
+            ckbtc_block_index: None,
+            error: None,
+        };
+    }
+
+    // Transfer accumulated ckBTC fees to recipient
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat(amount.into()),
+        fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_arg,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => {
+                // Reset the counter on success
+                let mut state = STATE.write().unwrap();
+                state.protocol_fees_ckbtc = 0;
+
+                WithdrawProtocolFeesResponse {
+                    success: true,
+                    btc_amount: 0,
+                    ckbtc_amount: amount,
+                    ckbtc_block_index: Some(block_index),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                ic_cdk::println!("Protocol fee withdrawal failed: {:?}", e);
+                WithdrawProtocolFeesResponse {
+                    success: false,
+                    btc_amount: 0,
+                    ckbtc_amount: amount,
+                    ckbtc_block_index: None,
+                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            ic_cdk::println!("Protocol fee withdrawal call failed: {:?} - {}", code, msg);
+            WithdrawProtocolFeesResponse {
+                success: false,
+                btc_amount: 0,
+                ckbtc_amount: amount,
+                ckbtc_block_index: None,
+                error: Some(format!("Ledger call failed: {:?} - {}", code, msg)),
+            }
+        }
+    }
+}
+
+/// Set the admin principal (callable by canister controller only).
+pub fn set_admin_impl(principal: Principal) {
+    // ic_cdk::api::is_controller checks if the caller is a canister controller
+    if !ic_cdk::api::is_controller(&msg_caller()) {
+        ic_cdk::trap("Only canister controllers can set admin");
+    }
+    let mut state = STATE.write().unwrap();
+    state.admin = Some(principal);
+    ic_cdk::println!("Admin set to: {}", principal);
 }
