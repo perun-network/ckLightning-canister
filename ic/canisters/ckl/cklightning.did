@@ -997,8 +997,6 @@ service : (Network) -> {
   // The transaction is NOT broadcast - it's returned to the relay which passes
   // it to LDK for proper broadcast timing and channel setup.
   fund_channel : (FundChannelRequest) -> (FundChannelResponse);
-  // Returns the balance of the given bitcoin address.
-  get_balance : (text) -> (nat64);
   get_btc_balance : (opt nat64) -> (Result_2);
   get_btc_liquidity_address_for_caller : () -> (Result_3);
   // Query channel secrets info (public keys only, secrets are never exposed).
