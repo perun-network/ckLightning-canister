@@ -863,7 +863,6 @@ service : (Network) -> {
   // HTLC transactions, or closing transactions. The canister signs using its
   // Lightning funding key derived via chainkey ECDSA.
   __candid_method_sign_ln_message : (LnSignRequest) -> (LnSignResponse);
-  __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
   // Submit a created invoice for a pending request
   // 
   // Called by the relay after creating a BOLT11 invoice for a pending request.
@@ -1225,7 +1224,6 @@ service : (Network) -> {
   // HTLC transactions, or closing transactions. The canister signs using its
   // Lightning funding key derived via chainkey ECDSA.
   sign_ln_message : (LnSignRequest) -> (LnSignResponse);
-  simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
   // Submit a created invoice for a pending request
   // 
