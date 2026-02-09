@@ -50,6 +50,10 @@ use crate::canister_state::{
     register_relay_impl, get_relay_info_impl,
     // Rate limiting
     get_rate_limit_status_impl,
+    // StableSwap functions
+    get_swap_quote_impl, get_stableswap_config_impl,
+    update_stableswap_config_impl, withdraw_protocol_fees_impl,
+    set_admin_impl,
 };
 use crate::helpers::{
     get_ln_funding_pubkey_impl, get_ln_invoice_impl, send_btc_tx_impl, sign_ln_message_impl,
@@ -99,6 +103,10 @@ use crate::ic_types::{
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
     // Rate limiting types
     RateLimitStatus,
+    // StableSwap types
+    StableSwapConfig, SwapQuoteRequest, SwapQuoteResponse,
+    UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
+    WithdrawProtocolFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -924,4 +932,57 @@ fn get_relay_info() -> GetRelayInfoResponse {
 #[candid_method(query)]
 fn get_rate_limit_status() -> RateLimitStatus {
     get_rate_limit_status_impl(ic_cdk::api::msg_caller())
+}
+
+// =============================================================================
+// StableSwap AMM Endpoints
+// =============================================================================
+
+/// Preview a swap output without executing.
+///
+/// Returns the expected output, fees, and price impact for a given input
+/// amount and direction. Does not modify any state.
+#[query]
+#[candid_method(query)]
+fn get_swap_quote(request: SwapQuoteRequest) -> SwapQuoteResponse {
+    get_swap_quote_impl(request)
+}
+
+/// Get the current StableSwap configuration.
+///
+/// Returns the amplification coefficient, fee basis points, and protocol fee share.
+#[query]
+#[candid_method(query)]
+fn get_stableswap_config() -> StableSwapConfig {
+    get_stableswap_config_impl()
+}
+
+/// Update the StableSwap configuration (admin-only).
+///
+/// Allows the admin to change the amplification coefficient, swap fee,
+/// and protocol fee share. Pass None for fields that should not change.
+#[update]
+#[candid_method(update)]
+fn update_stableswap_config(request: UpdateStableSwapConfigRequest) -> UpdateStableSwapConfigResponse {
+    update_stableswap_config_impl(request)
+}
+
+/// Withdraw accumulated protocol fees (admin-only).
+///
+/// Transfers all accumulated ckBTC protocol fees to the specified recipient
+/// via ICRC-1 transfer, then resets the counter.
+#[update]
+#[candid_method(update)]
+async fn withdraw_protocol_fees(recipient: Principal) -> WithdrawProtocolFeesResponse {
+    withdraw_protocol_fees_impl(recipient).await
+}
+
+/// Set the admin principal (controller-only).
+///
+/// Only canister controllers can call this. The admin can then update
+/// StableSwap config and withdraw protocol fees.
+#[update]
+#[candid_method(update)]
+fn set_admin(principal: Principal) {
+    set_admin_impl(principal)
 }

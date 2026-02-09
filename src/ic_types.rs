@@ -41,6 +41,9 @@ pub const RATE_LIMIT_WINDOW_NS: u64 = 60 * 60 * 1_000_000_000; // 1 hour window
 pub const MAX_ONRAMP_REQUESTS_PER_WINDOW: u32 = 10;  // 10 onramp requests per hour
 pub const MAX_OFFRAMP_REQUESTS_PER_WINDOW: u32 = 10; // 10 offramp requests per hour
 
+// Re-export StableSwap types from the math module
+pub use crate::stableswap::{StableSwapConfig, SwapDirection};
+
 // =============================================================================
 // Relay Registration Types
 // =============================================================================
@@ -1785,4 +1788,63 @@ impl Funding {
             }
         }
     }
+}
+
+// =============================================================================
+// StableSwap AMM Types
+// =============================================================================
+
+/// Request to update the StableSwap configuration (admin-only)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateStableSwapConfigRequest {
+    /// New amplification coefficient (None = keep current)
+    pub amplification: Option<u64>,
+    /// New fee in basis points (None = keep current)
+    pub fee_bps: Option<u64>,
+    /// New protocol fee share in basis points (None = keep current)
+    pub protocol_fee_share_bps: Option<u64>,
+    /// New max slippage in basis points (None = keep current). 0 = disabled.
+    pub max_slippage_bps: Option<u64>,
+    /// New imbalance fee in basis points (None = keep current). Must be >= fee_bps.
+    pub imbalance_fee_bps: Option<u64>,
+}
+
+/// Response from updating StableSwap configuration
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateStableSwapConfigResponse {
+    pub success: bool,
+    pub config: StableSwapConfig,
+    pub error: Option<String>,
+}
+
+/// Request for a swap quote (preview without executing)
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SwapQuoteRequest {
+    pub direction: SwapDirection,
+    pub amount_sats: u64,
+}
+
+/// Response with swap quote details
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SwapQuoteResponse {
+    pub input_amount: u64,
+    pub output_amount: u64,
+    pub total_fee: u64,
+    pub lp_fee: u64,
+    pub protocol_fee: u64,
+    pub price_impact_bps: u64,
+    pub effective_fee_bps: u64,
+    pub btc_pool_balance: u64,
+    pub ckbtc_pool_balance: u64,
+    pub error: Option<String>,
+}
+
+/// Response from withdrawing accumulated protocol fees
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct WithdrawProtocolFeesResponse {
+    pub success: bool,
+    pub btc_amount: u64,
+    pub ckbtc_amount: u64,
+    pub ckbtc_block_index: Option<Nat>,
+    pub error: Option<String>,
 }

@@ -25,4 +25,24 @@ if [ -f "canister_ids.json" ]; then
     rm canister_ids.json
 fi
 
+# Reset Bitcoin regtest for clean state (no leftover UTXOs from prior runs)
+BITCOIN_DIR="/home/ilja/workrepos/bitcoin-25.0"
+BITCOIN_CLI="$BITCOIN_DIR/bin/bitcoin-cli -regtest -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E="
+
+echo "=== Resetting Bitcoin regtest ==="
+$BITCOIN_CLI stop 2>/dev/null || true
+sleep 3
+
+rm -rf "$BITCOIN_DIR/data/regtest"
+
+$BITCOIN_DIR/bin/bitcoind -conf=$BITCOIN_DIR/bitcoin.conf -datadir=$BITCOIN_DIR/data --port=18444 -daemon
+sleep 3
+
+$BITCOIN_CLI createwallet testwallet
+echo "Created testwallet"
+
+ADDR=$($BITCOIN_CLI -rpcwallet=testwallet getnewaddress)
+$BITCOIN_CLI generatetoaddress 101 $ADDR > /dev/null
+echo "Mined 101 blocks for coinbase maturity"
+
 dfx start --clean --enable-bitcoin --background

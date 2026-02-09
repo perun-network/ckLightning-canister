@@ -151,6 +151,12 @@ type GetOfframpStatusResponse = record {
   state : OfframpRequestState;
   amount_sats : nat64;
 };
+type GetRelayInfoResponse = record {
+  "principal" : opt principal;
+  node_pubkey : opt blob;
+  is_active : opt bool;
+  registered : bool;
+};
 type GetUtxosResponse = record {
   next_page : opt blob;
   tip_height : nat32;
@@ -270,6 +276,7 @@ type OfframpRequestState = variant {
   Refunded : record { block_index : nat };
   PaymentInProgress;
   Completed : FulfillHtlcRequest;
+  Expired : record { refund_block_index : opt nat };
   Pending;
 };
 type OfframpResponse = record {
@@ -325,6 +332,13 @@ type PoolWithdrawal = record {
 };
 type QueryLnChannelRequest = record { channel_id : blob };
 type QueryLnChannelsResponse = record { channels : vec LnChannelInfo };
+type RateLimitStatus = record {
+  onramp_requests : nat32;
+  offramp_requests : nat32;
+  max_offramp_per_window : nat32;
+  max_onramp_per_window : nat32;
+  window_resets_in_seconds : nat64;
+};
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
 type RegisterChannelSecretsRequest = record { secrets : ChannelSecrets };
 type RegisterChannelSecretsResponse = record {
@@ -344,6 +358,7 @@ type RegisterLnChannelRequest = record {
   remote_node_id : blob;
   local_node_id : blob;
 };
+type RegisterRelayRequest = record { node_pubkey : blob };
 type RegisterSwapRequest = record {
   payment_hash : blob;
   recipient : principal;
@@ -431,6 +446,13 @@ type SignedCandidInvoice = record {
   timestamp : nat64;
   payment_secret : blob;
 };
+type StableSwapConfig = record {
+  amplification : nat64;
+  imbalance_fee_bps : nat64;
+  fee_bps : nat64;
+  protocol_fee_share_bps : nat64;
+  max_slippage_bps : nat64;
+};
 type State = record {
   action : CklChannelAction;
   version : nat64;
@@ -444,6 +466,23 @@ type SubmitInvoiceRequest = record {
   payment_hash : blob;
   invoice : text;
   expiry_timestamp : nat64;
+};
+type SwapDirection = variant { BtcToCkbtc; CkbtcToBtc };
+type SwapQuoteRequest = record {
+  direction : SwapDirection;
+  amount_sats : nat64;
+};
+type SwapQuoteResponse = record {
+  input_amount : nat64;
+  ckbtc_pool_balance : nat64;
+  price_impact_bps : nat64;
+  effective_fee_bps : nat64;
+  btc_pool_balance : nat64;
+  output_amount : nat64;
+  total_fee : nat64;
+  error : opt text;
+  protocol_fee : nat64;
+  lp_fee : nat64;
 };
 type TimeoutHtlcRequest = record { payment_hash : blob };
 type TimeoutHtlcResponse = record {
@@ -468,12 +507,31 @@ type UpdateChannelBalanceRequest = record {
   our_balance_sats : nat64;
   their_balance_sats : nat64;
 };
+type UpdateStableSwapConfigRequest = record {
+  amplification : opt nat64;
+  imbalance_fee_bps : opt nat64;
+  fee_bps : opt nat64;
+  protocol_fee_share_bps : opt nat64;
+  max_slippage_bps : opt nat64;
+};
+type UpdateStableSwapConfigResponse = record {
+  error : opt text;
+  success : bool;
+  config : StableSwapConfig;
+};
 type Utxo = record { height : nat32; value : nat64; outpoint : Outpoint };
 type VerifyLnChannelResponse = record {
   confirmations : opt nat32;
   verified : bool;
   utxo_value_sats : opt nat64;
   error : opt text;
+};
+type WithdrawProtocolFeesResponse = record {
+  error : opt text;
+  btc_amount : nat64;
+  ckbtc_block_index : opt nat;
+  success : bool;
+  ckbtc_amount : nat64;
 };
 type WithdrawalLPArgs = record {
   signature : blob;
@@ -496,6 +554,11 @@ service : (Network) -> {
   // The relay calls this after a channel funding transaction is confirmed.
   // Updates LP accounting to track BTC locked in channels.
   __candid_method_channel_funded : (blob, nat64) -> (Result);
+  // Manually trigger expired swap checking (for testing)
+  // 
+  // This allows E2E tests to trigger the expiry check without waiting for heartbeat.
+  // In production, the heartbeat handles this automatically.
+  __candid_method_check_expired_swaps : () -> ();
   // Complete an offramp request after successful payment
   // 
   // Called by the relay after successfully paying the Lightning invoice.
@@ -573,6 +636,10 @@ service : (Network) -> {
   __candid_method_get_depositor_btc_balance : () -> (
       DepositorBtcBalanceResponse,
     );
+  // Get count of expired swaps for monitoring
+  // 
+  // Returns (expired_onramp_count, expired_offramp_count)
+  __candid_method_get_expired_swap_counts_query : () -> (nat64, nat64) query;
   // Get available UTXOs from the LP's BTC address for channel funding
   // 
   // The relay calls this to get UTXOs it can use to fund Lightning channels.
@@ -626,6 +693,30 @@ service : (Network) -> {
   __candid_method_get_pending_offramp_requests : () -> (
       vec PendingOfframpRequest,
     ) query;
+  // Get the caller's rate limit status.
+  // 
+  // Returns how many onramp/offramp requests the caller has made in the current
+  // window, and when the window resets.
+  __candid_method_get_rate_limit_status : () -> (RateLimitStatus) query;
+  // Get information about the registered relay.
+  // 
+  // Returns whether a relay is registered, and if so, its principal and node pubkey.
+  __candid_method_get_relay_info : () -> (GetRelayInfoResponse) query;
+  // Get the current StableSwap configuration.
+  // 
+  // Returns the amplification coefficient, fee basis points, and protocol fee share.
+  __candid_method_get_stableswap_config : () -> (StableSwapConfig) query;
+  // Preview a swap output without executing.
+  // 
+  // Returns the expected output, fees, and price impact for a given input
+  // amount and direction. Does not modify any state.
+  __candid_method_get_swap_quote : (SwapQuoteRequest) -> (
+      SwapQuoteResponse,
+    ) query;
+  // Get current timeout values (for testing/debugging)
+  // 
+  // Returns (onramp_timeout_ns, offramp_timeout_ns)
+  __candid_method_get_timeout_values : () -> (nat64, nat64) query;
   // Get the total LP balance across all depositors
   // 
   // Returns the total ckBTC and BTC in the liquidity pool, plus the number of depositors.
@@ -671,6 +762,22 @@ service : (Network) -> {
   __candid_method_register_ln_channel : (RegisterLnChannelRequest) -> (
       CreateHtlcResponse,
     );
+  // Register a relay with its Lightning node pubkey.
+  // 
+  // The relay must call this before it can submit invoices for onramp requests.
+  // This prevents invoice substitution attacks where a malicious relay could
+  // redirect payments to a different node.
+  // 
+  // # Arguments
+  // * `request` - Contains the 33-byte compressed secp256k1 node pubkey
+  // 
+  // # Security
+  // - Only one relay can be registered at a time
+  // - The same principal can update its pubkey by calling again
+  // - Invoice submission will fail if the invoice's destination node doesn't match
+  __candid_method_register_relay : (RegisterRelayRequest) -> (
+      CreateHtlcResponse,
+    );
   // Register a new Lightning → ckBTC swap
   // 
   // Called by the relay node when an invoice is created with an IC principal.
@@ -711,8 +818,19 @@ service : (Network) -> {
       SendFromDepositorRequest,
     ) -> (SendFromDepositorResponse);
   __candid_method_send_btc_tx : (SendBtcTxArgs) -> (Result_10);
+  // Set the admin principal (controller-only).
+  // 
+  // Only canister controllers can call this. The admin can then update
+  // StableSwap config and withdraw protocol fees.
+  __candid_method_set_admin : (principal) -> ();
   __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   __candid_method_set_btc_liquidity_address : () -> (Result_12);
+  // Set test timeout values (for E2E testing only)
+  // 
+  // Pass 0 to reset to default values.
+  // Default: onramp=30min, offramp=10min
+  // For testing, use small values like 5_000_000_000 (5 seconds)
+  __candid_method_set_test_timeouts : (nat64, nat64) -> ();
   // Sign an HTLC-Success transaction (receiver claims with preimage).
   // 
   // Builds the HTLC-Success transaction using stored HTLC details,
@@ -767,6 +885,13 @@ service : (Network) -> {
   __candid_method_update_channel_balance : (UpdateChannelBalanceRequest) -> (
       CreateHtlcResponse,
     );
+  // Update the StableSwap configuration (admin-only).
+  // 
+  // Allows the admin to change the amplification coefficient, swap fee,
+  // and protocol fee share. Pass None for fields that should not change.
+  __candid_method_update_stableswap_config : (
+      UpdateStableSwapConfigRequest,
+    ) -> (UpdateStableSwapConfigResponse);
   // Verify a Lightning channel's funding UTXO on-chain
   // 
   // Queries the Bitcoin canister to check if the funding UTXO exists
@@ -787,6 +912,13 @@ service : (Network) -> {
   // The ckBTC is transferred directly to the caller's principal.
   __candid_method_withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
+  // Withdraw accumulated protocol fees (admin-only).
+  // 
+  // Transfers all accumulated ckBTC protocol fees to the specified recipient
+  // via ICRC-1 transfer, then resets the counter.
+  __candid_method_withdraw_protocol_fees : (principal) -> (
+      WithdrawProtocolFeesResponse,
+    );
   // Called when a channel is closed
   // 
   // The relay calls this when a channel is closed (cooperative or force).
@@ -797,6 +929,11 @@ service : (Network) -> {
   // The relay calls this after a channel funding transaction is confirmed.
   // Updates LP accounting to track BTC locked in channels.
   channel_funded : (blob, nat64) -> (Result);
+  // Manually trigger expired swap checking (for testing)
+  // 
+  // This allows E2E tests to trigger the expiry check without waiting for heartbeat.
+  // In production, the heartbeat handles this automatically.
+  check_expired_swaps : () -> ();
   clear : () -> ();
   // Complete an offramp request after successful payment
   // 
@@ -860,8 +997,6 @@ service : (Network) -> {
   // The transaction is NOT broadcast - it's returned to the relay which passes
   // it to LDK for proper broadcast timing and channel setup.
   fund_channel : (FundChannelRequest) -> (FundChannelResponse);
-  // Returns the balance of the given bitcoin address.
-  get_balance : (text) -> (nat64);
   get_btc_balance : (opt nat64) -> (Result_2);
   get_btc_liquidity_address_for_caller : () -> (Result_3);
   // Query channel secrets info (public keys only, secrets are never exposed).
@@ -871,6 +1006,10 @@ service : (Network) -> {
   // Returns the caller's BTC address (derived via threshold ECDSA) and its balance.
   // The address is derived from the caller's principal using BtcPurpose::LiquidityDepositor.
   get_depositor_btc_balance : () -> (DepositorBtcBalanceResponse);
+  // Get count of expired swaps for monitoring
+  // 
+  // Returns (expired_onramp_count, expired_offramp_count)
+  get_expired_swap_counts_query : () -> (nat64, nat64) query;
   // Get available UTXOs from the LP's BTC address for channel funding
   // 
   // The relay calls this to get UTXOs it can use to fund Lightning channels.
@@ -929,7 +1068,29 @@ service : (Network) -> {
   // 
   // Called by the relay to find offramp requests that need invoices paid.
   get_pending_offramp_requests : () -> (vec PendingOfframpRequest) query;
+  // Get the caller's rate limit status.
+  // 
+  // Returns how many onramp/offramp requests the caller has made in the current
+  // window, and when the window resets.
+  get_rate_limit_status : () -> (RateLimitStatus) query;
+  // Get information about the registered relay.
+  // 
+  // Returns whether a relay is registered, and if so, its principal and node pubkey.
+  get_relay_info : () -> (GetRelayInfoResponse) query;
   get_segwit_address : (BtcPurpose) -> (Result_3);
+  // Get the current StableSwap configuration.
+  // 
+  // Returns the amplification coefficient, fee basis points, and protocol fee share.
+  get_stableswap_config : () -> (StableSwapConfig) query;
+  // Preview a swap output without executing.
+  // 
+  // Returns the expected output, fees, and price impact for a given input
+  // amount and direction. Does not modify any state.
+  get_swap_quote : (SwapQuoteRequest) -> (SwapQuoteResponse) query;
+  // Get current timeout values (for testing/debugging)
+  // 
+  // Returns (onramp_timeout_ns, offramp_timeout_ns)
+  get_timeout_values : () -> (nat64, nat64) query;
   // Get the total LP balance across all depositors
   // 
   // Returns the total ckBTC and BTC in the liquidity pool, plus the number of depositors.
@@ -970,6 +1131,20 @@ service : (Network) -> {
   // Called by the relay node when a channel is opened.
   // Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
   register_ln_channel : (RegisterLnChannelRequest) -> (CreateHtlcResponse);
+  // Register a relay with its Lightning node pubkey.
+  // 
+  // The relay must call this before it can submit invoices for onramp requests.
+  // This prevents invoice substitution attacks where a malicious relay could
+  // redirect payments to a different node.
+  // 
+  // # Arguments
+  // * `request` - Contains the 33-byte compressed secp256k1 node pubkey
+  // 
+  // # Security
+  // - Only one relay can be registered at a time
+  // - The same principal can update its pubkey by calling again
+  // - Invoice submission will fail if the invoice's destination node doesn't match
+  register_relay : (RegisterRelayRequest) -> (CreateHtlcResponse);
   // Register a new Lightning → ckBTC swap
   // 
   // Called by the relay node when an invoice is created with an IC principal.
@@ -1009,8 +1184,19 @@ service : (Network) -> {
     );
   send_btc_tx : (SendBtcTxArgs) -> (Result_10);
   send_from_p2pkh_address : (SendRequest) -> (text);
+  // Set the admin principal (controller-only).
+  // 
+  // Only canister controllers can call this. The admin can then update
+  // StableSwap config and withdraw protocol fees.
+  set_admin : (principal) -> ();
   set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   set_btc_liquidity_address : () -> (Result_12);
+  // Set test timeout values (for E2E testing only)
+  // 
+  // Pass 0 to reset to default values.
+  // Default: onramp=30min, offramp=10min
+  // For testing, use small values like 5_000_000_000 (5 seconds)
+  set_test_timeouts : (nat64, nat64) -> ();
   // Sign an HTLC-Success transaction (receiver claims with preimage).
   // 
   // Builds the HTLC-Success transaction using stored HTLC details,
@@ -1060,6 +1246,13 @@ service : (Network) -> {
   update_channel_balance : (UpdateChannelBalanceRequest) -> (
       CreateHtlcResponse,
     );
+  // Update the StableSwap configuration (admin-only).
+  // 
+  // Allows the admin to change the amplification coefficient, swap fee,
+  // and protocol fee share. Pass None for fields that should not change.
+  update_stableswap_config : (UpdateStableSwapConfigRequest) -> (
+      UpdateStableSwapConfigResponse,
+    );
   // Verify a Lightning channel's funding UTXO on-chain
   // 
   // Queries the Bitcoin canister to check if the funding UTXO exists
@@ -1076,4 +1269,9 @@ service : (Network) -> {
   // The ckBTC is transferred directly to the caller's principal.
   withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
   withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
+  // Withdraw accumulated protocol fees (admin-only).
+  // 
+  // Transfers all accumulated ckBTC protocol fees to the specified recipient
+  // via ICRC-1 transfer, then resets the counter.
+  withdraw_protocol_fees : (principal) -> (WithdrawProtocolFeesResponse);
 }
