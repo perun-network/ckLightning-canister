@@ -22,6 +22,8 @@ pub mod lp_btc;
 pub mod channel_funding;
 pub mod htlc_ops;
 pub mod htlc_signing;
+pub mod bolt3_keys;
+pub mod commitment_signing;
 pub mod admin;
 
 // Re-export all public items so `crate::canister_state::*` still works
@@ -34,6 +36,8 @@ pub use lp_btc::*;
 pub use channel_funding::*;
 pub use htlc_ops::*;
 pub use htlc_signing::*;
+pub use bolt3_keys::*;
+pub use commitment_signing::*;
 pub use admin::*;
 
 use crate::BtcPurpose;
@@ -150,6 +154,9 @@ where
 
     // Per-channel secrets for HTLC signing (channel_id -> secrets)
     pub(crate) channel_secrets: HashMap<[u8; 32], ChannelSecretsInternal>,
+
+    // Counterparty funding pubkey per channel (channel_keys_id -> 33-byte pubkey)
+    pub(crate) channel_counterparty_pubkeys: HashMap<[u8; 32], Vec<u8>>,
 
     // HTLC transaction details for signing (payment_hash -> details)
     pub(crate) htlc_tx_details: HashMap<[u8; 32], HtlcTxDetails>,
@@ -468,6 +475,7 @@ where
             htlc_manager: HtlcManager::new(),
             // Channel secrets (Phase 2)
             channel_secrets: HashMap::new(),
+            channel_counterparty_pubkeys: HashMap::new(),
             htlc_tx_details: HashMap::new(),
             // Test configuration
             test_onramp_timeout_ns: None,
