@@ -93,7 +93,7 @@ pub struct GetRelayInfoResponse {
 // =============================================================================
 
 /// Rate limit tracking for a principal
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct RateLimitInfo {
     /// Number of requests in current window
     pub request_count: u32,

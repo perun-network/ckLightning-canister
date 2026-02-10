@@ -13,16 +13,17 @@
 //  limitations under the License.
 use crate::error::{CklError, ResultCkl};
 use crate::ic_types::{Amount, PoolAsset};
-use candid::{Nat, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use std::collections::HashMap;
 
 /// Simplified depositor info - just tracks balances per principal
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, CandidType, Deserialize)]
 pub struct DepositorBalance {
     pub ckbtc_amount: Amount,
     pub btc_amount: Amount,
 }
 
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct LiquidityPool {
     /// Total holdings per asset (sum of all depositors)
     pub holdings_total: HashMap<PoolAsset, Amount>,
