@@ -535,3 +535,55 @@ pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
         error: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+
+    #[test]
+    fn test_build_funding_witness_script_valid() {
+        let secp = Secp256k1::new();
+        let key1 = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let key2 = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let pk1 = key1.public_key(&secp).serialize();
+        let pk2 = key2.public_key(&secp).serialize();
+
+        let script = build_funding_witness_script(&pk1, &pk2).unwrap();
+        let script_bytes = script.as_bytes();
+
+        // Must be a valid script containing both pubkeys and 2-of-2 multisig opcodes
+        assert!(script_bytes.len() > 70, "Script must be at least 70 bytes for 2-of-2 multisig");
+
+        // Verify both pubkeys appear in the script (sorted lexicographically)
+        let (first, second) = if pk1 < pk2 { (pk1, pk2) } else { (pk2, pk1) };
+
+        // Check the script contains both sorted pubkeys
+        let script_hex = hex::encode(script_bytes);
+        assert!(script_hex.contains(&hex::encode(first)),
+            "Script must contain the lexicographically first pubkey");
+        assert!(script_hex.contains(&hex::encode(second)),
+            "Script must contain the lexicographically second pubkey");
+
+        // Verify OP_2 at start and before OP_CHECKMULTISIG
+        assert_eq!(script_bytes[0], 0x52, "Script must start with OP_2");
+        assert_eq!(script_bytes[script_bytes.len() - 2], 0x52, "OP_2 before OP_CHECKMULTISIG");
+        assert_eq!(*script_bytes.last().unwrap(), 0xAE, "Script must end with OP_CHECKMULTISIG");
+    }
+
+    #[test]
+    fn test_build_funding_witness_script_sorted() {
+        let secp = Secp256k1::new();
+        let key1 = SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let key2 = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let pk1 = key1.public_key(&secp).serialize();
+        let pk2 = key2.public_key(&secp).serialize();
+
+        // Regardless of input order, the same script should be produced
+        let script_a = build_funding_witness_script(&pk1, &pk2).unwrap();
+        let script_b = build_funding_witness_script(&pk2, &pk1).unwrap();
+
+        assert_eq!(script_a, script_b,
+            "Funding witness script must be identical regardless of pubkey input order");
+    }
+}

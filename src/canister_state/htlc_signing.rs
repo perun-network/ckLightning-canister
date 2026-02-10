@@ -809,3 +809,190 @@ pub fn register_channel_info_impl(request: RegisterChannelInfoRequest) -> bool {
     );
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::ChannelSecretsInternal;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+
+    /// Insert test channel secrets into STATE and return them.
+    fn setup_test_channel_secrets(channel_keys_id: [u8; 32]) -> ChannelSecretsInternal {
+        let secrets = ChannelSecretsInternal {
+            htlc_base_secret: [21u8; 32],
+            revocation_base_secret: [22u8; 32],
+            delayed_payment_base_secret: [23u8; 32],
+            payment_secret: [24u8; 32],
+            commitment_seed: [25u8; 32],
+        };
+        let mut state = STATE.write().unwrap();
+        state.channel_secrets.insert(channel_keys_id, secrets.clone());
+        secrets
+    }
+
+    #[test]
+    fn test_get_per_commitment_point_valid() {
+        let channel_keys_id = [0xB1; 32];
+        setup_test_channel_secrets(channel_keys_id);
+
+        let request = GetPerCommitmentPointRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx: 0,
+        };
+
+        let response = get_per_commitment_point_impl(request);
+        assert!(response.success, "Should succeed: {:?}", response.error);
+
+        let point_bytes = response.point.unwrap();
+        assert_eq!(point_bytes.len(), 33, "Point must be 33 bytes (compressed pubkey)");
+
+        // Verify it's a valid public key
+        assert!(PublicKey::from_slice(&point_bytes).is_ok(), "Must be a valid secp256k1 pubkey");
+    }
+
+    #[test]
+    fn test_get_per_commitment_point_consistency() {
+        let channel_keys_id = [0xB2; 32];
+        let secrets = setup_test_channel_secrets(channel_keys_id);
+        let secp = Secp256k1::new();
+
+        let request = GetPerCommitmentPointRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx: 0,
+        };
+
+        let response = get_per_commitment_point_impl(request);
+        assert!(response.success);
+        let point_bytes = response.point.unwrap();
+
+        // Manually derive the expected point
+        let per_commitment_secret_bytes = bolt3_keys::derive_per_commitment_secret(
+            &secrets.commitment_seed, 0,
+        );
+        let sk = SecretKey::from_slice(&per_commitment_secret_bytes).unwrap();
+        let expected_point = sk.public_key(&secp).serialize().to_vec();
+
+        assert_eq!(point_bytes, expected_point,
+            "Point from impl must match manual derivation");
+    }
+
+    #[test]
+    fn test_get_per_commitment_point_different_indices() {
+        let channel_keys_id = [0xB3; 32];
+        setup_test_channel_secrets(channel_keys_id);
+
+        let response0 = get_per_commitment_point_impl(GetPerCommitmentPointRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx: 0,
+        });
+        let response1 = get_per_commitment_point_impl(GetPerCommitmentPointRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx: 1,
+        });
+
+        assert!(response0.success && response1.success);
+        assert_ne!(response0.point.unwrap(), response1.point.unwrap(),
+            "Different indices must produce different commitment points");
+    }
+
+    #[test]
+    fn test_get_per_commitment_point_missing_secrets() {
+        let missing_id = [0xBF; 32];
+        let request = GetPerCommitmentPointRequest {
+            channel_keys_id: missing_id.to_vec(),
+            idx: 0,
+        };
+
+        let response = get_per_commitment_point_impl(request);
+        assert!(!response.success, "Should fail when secrets not found");
+        assert!(response.error.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_release_commitment_secret_valid() {
+        let channel_keys_id = [0xC1; 32];
+        setup_test_channel_secrets(channel_keys_id);
+
+        let request = ReleaseCommitmentSecretRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx: 5,
+        };
+
+        let response = release_commitment_secret_impl(request);
+        assert!(response.success, "Should succeed: {:?}", response.error);
+
+        let secret = response.secret.unwrap();
+        assert_eq!(secret.len(), 32, "Released secret must be 32 bytes");
+
+        // Should be a valid secret key
+        assert!(SecretKey::from_slice(&secret).is_ok(), "Released secret must be a valid secret key");
+    }
+
+    #[test]
+    fn test_release_commitment_secret_matches_point() {
+        let channel_keys_id = [0xC2; 32];
+        setup_test_channel_secrets(channel_keys_id);
+        let secp = Secp256k1::new();
+        let idx = 42u64;
+
+        // Get the point for this index
+        let point_response = get_per_commitment_point_impl(GetPerCommitmentPointRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx,
+        });
+        assert!(point_response.success);
+        let point_bytes = point_response.point.unwrap();
+        let point = PublicKey::from_slice(&point_bytes).unwrap();
+
+        // Release the secret for this index
+        let secret_response = release_commitment_secret_impl(ReleaseCommitmentSecretRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            idx,
+        });
+        assert!(secret_response.success);
+        let secret_bytes = secret_response.secret.unwrap();
+        let sk = SecretKey::from_slice(&secret_bytes).unwrap();
+
+        // The public key of the released secret must match the commitment point
+        let derived_point = sk.public_key(&secp);
+        assert_eq!(derived_point, point,
+            "PublicKey::from_secret_key(released_secret) must equal get_per_commitment_point(same_idx)");
+    }
+
+    #[test]
+    fn test_register_channel_info_valid() {
+        let secp = Secp256k1::new();
+        let channel_keys_id = [0xD1; 32];
+        let counterparty_key = SecretKey::from_slice(&[50u8; 32]).unwrap();
+        let counterparty_pubkey = counterparty_key.public_key(&secp).serialize().to_vec();
+
+        let request = RegisterChannelInfoRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            counterparty_funding_pubkey: counterparty_pubkey.clone(),
+        };
+
+        let result = register_channel_info_impl(request);
+        assert!(result, "Should succeed with valid pubkey");
+
+        // Verify it's stored in STATE
+        let state = STATE.read().unwrap();
+        let stored = state.channel_counterparty_pubkeys.get(&channel_keys_id).unwrap();
+        assert_eq!(stored, &counterparty_pubkey, "Stored pubkey must match input");
+    }
+
+    #[test]
+    fn test_register_channel_info_invalid_pubkey() {
+        let channel_keys_id = [0xD2; 32];
+
+        // 33 bytes but not a valid secp256k1 point
+        let invalid_pubkey = vec![0x04; 33]; // 0x04 prefix is for uncompressed, but only 33 bytes
+
+        let request = RegisterChannelInfoRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            counterparty_funding_pubkey: invalid_pubkey,
+        };
+
+        let result = register_channel_info_impl(request);
+        assert!(!result, "Should fail with invalid pubkey bytes");
+    }
+}

@@ -703,3 +703,224 @@ pub fn sign_htlc_tx_impl(request: SignHtlcTxRequest) -> LnSignResponse {
         error: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::ChannelSecretsInternal;
+    use bitcoin::consensus::serialize as btc_serialize;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, Message};
+    use bitcoin::{Transaction, TxIn, TxOut, OutPoint, Txid, Witness, ScriptBuf};
+    use bitcoin::transaction::Version;
+    use bitcoin::locktime::absolute::LockTime;
+
+    /// Insert test channel secrets into STATE and return them for verification.
+    fn setup_test_channel(channel_keys_id: [u8; 32]) -> ChannelSecretsInternal {
+        let secrets = ChannelSecretsInternal {
+            htlc_base_secret: [11u8; 32],
+            revocation_base_secret: [12u8; 32],
+            delayed_payment_base_secret: [13u8; 32],
+            payment_secret: [14u8; 32],
+            commitment_seed: [15u8; 32],
+        };
+        let mut state = STATE.write().unwrap();
+        state.channel_secrets.insert(channel_keys_id, secrets.clone());
+        secrets
+    }
+
+    /// Build a minimal valid transaction for sighash testing.
+    fn build_test_tx() -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0xAA; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: bitcoin::Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(
+                    &bitcoin::WPubkeyHash::from_byte_array([0xBB; 20]),
+                ),
+            }],
+        }
+    }
+
+    /// Build a simple P2WSH witness script for testing sighash computation.
+    fn build_test_witness_script(pubkey: &PublicKey) -> ScriptBuf {
+        use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1};
+        bitcoin::script::Builder::new()
+            .push_opcode(OP_PUSHNUM_1)
+            .push_slice(&pubkey.serialize())
+            .push_opcode(OP_PUSHNUM_1)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script()
+    }
+
+    #[test]
+    fn test_sign_justice_tx_valid_signature() {
+        let channel_keys_id = [0xA1; 32];
+        let secrets = setup_test_channel(channel_keys_id);
+        let secp = Secp256k1::new();
+
+        // Use a known per-commitment secret
+        let per_commitment_secret = SecretKey::from_slice(&[20u8; 32]).unwrap();
+        let revocation_base_secret = SecretKey::from_slice(&secrets.revocation_base_secret).unwrap();
+
+        // Derive the expected revocation key + pubkey
+        let expected_rev_key = bolt3_keys::derive_private_revocation_key(
+            &secp, &per_commitment_secret, &revocation_base_secret,
+        ).unwrap();
+        let expected_rev_pubkey = expected_rev_key.public_key(&secp);
+
+        // Build test transaction and witness script
+        let tx = build_test_tx();
+        let witness_script = build_test_witness_script(&expected_rev_pubkey);
+        let amount_sat = 100_000u64;
+        let tx_bytes = btc_serialize(&tx);
+
+        let request = SignJusticeTxRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            justice_tx_bytes: tx_bytes,
+            input_index: 0,
+            amount_sat,
+            per_commitment_secret: per_commitment_secret.secret_bytes().to_vec(),
+            witness_script: witness_script.as_bytes().to_vec(),
+        };
+
+        let response = sign_justice_tx_impl(request);
+        assert!(response.success, "Justice tx signing should succeed: {:?}", response.error);
+
+        // Verify signature against the expected revocation pubkey
+        let sig_bytes = response.signature.unwrap();
+        let sig = bitcoin::secp256k1::ecdsa::Signature::from_compact(&sig_bytes).unwrap();
+
+        // Compute the expected sighash
+        let sighash = compute_witness_sighash(&tx, 0, &witness_script, amount_sat).unwrap();
+        let msg = Message::from_digest(sighash);
+
+        assert!(secp.verify_ecdsa(&msg, &sig, &expected_rev_pubkey).is_ok(),
+            "Justice tx signature must verify against derived revocation pubkey");
+    }
+
+    #[test]
+    fn test_sign_justice_tx_missing_secrets() {
+        let missing_id = [0xFF; 32];
+        let tx = build_test_tx();
+        let request = SignJusticeTxRequest {
+            channel_keys_id: missing_id.to_vec(),
+            justice_tx_bytes: btc_serialize(&tx),
+            input_index: 0,
+            amount_sat: 100_000,
+            per_commitment_secret: [20u8; 32].to_vec(),
+            witness_script: vec![0x51],
+        };
+
+        let response = sign_justice_tx_impl(request);
+        assert!(!response.success, "Should fail when channel secrets missing");
+        assert!(response.error.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_sign_htlc_tx_valid_signature() {
+        let channel_keys_id = [0xA2; 32];
+        let secrets = setup_test_channel(channel_keys_id);
+        let secp = Secp256k1::new();
+
+        // Create a per-commitment point
+        let per_commitment_secret = SecretKey::from_slice(&[25u8; 32]).unwrap();
+        let per_commitment_point = per_commitment_secret.public_key(&secp);
+
+        // Derive expected HTLC key
+        let htlc_base_secret = SecretKey::from_slice(&secrets.htlc_base_secret).unwrap();
+        let expected_htlc_key = bolt3_keys::derive_private_key(
+            &secp, &per_commitment_point, &htlc_base_secret,
+        ).unwrap();
+        let expected_htlc_pubkey = expected_htlc_key.public_key(&secp);
+
+        // Build test transaction and witness script
+        let tx = build_test_tx();
+        let witness_script = build_test_witness_script(&expected_htlc_pubkey);
+        let amount_sat = 75_000u64;
+        let tx_bytes = btc_serialize(&tx);
+
+        let request = SignHtlcTxRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            htlc_tx_bytes: tx_bytes,
+            input_index: 0,
+            amount_sat,
+            per_commitment_point: per_commitment_point.serialize().to_vec(),
+            witness_script: witness_script.as_bytes().to_vec(),
+        };
+
+        let response = sign_htlc_tx_impl(request);
+        assert!(response.success, "HTLC tx signing should succeed: {:?}", response.error);
+
+        // Verify signature
+        let sig_bytes = response.signature.unwrap();
+        let sig = bitcoin::secp256k1::ecdsa::Signature::from_compact(&sig_bytes).unwrap();
+
+        let sighash = compute_witness_sighash(&tx, 0, &witness_script, amount_sat).unwrap();
+        let msg = Message::from_digest(sighash);
+
+        assert!(secp.verify_ecdsa(&msg, &sig, &expected_htlc_pubkey).is_ok(),
+            "HTLC tx signature must verify against derived HTLC pubkey");
+    }
+
+    #[test]
+    fn test_sign_htlc_tx_missing_secrets() {
+        let missing_id = [0xFE; 32];
+        let secp = Secp256k1::new();
+        let per_commitment_secret = SecretKey::from_slice(&[25u8; 32]).unwrap();
+        let per_commitment_point = per_commitment_secret.public_key(&secp);
+        let tx = build_test_tx();
+
+        let request = SignHtlcTxRequest {
+            channel_keys_id: missing_id.to_vec(),
+            htlc_tx_bytes: btc_serialize(&tx),
+            input_index: 0,
+            amount_sat: 75_000,
+            per_commitment_point: per_commitment_point.serialize().to_vec(),
+            witness_script: vec![0x51],
+        };
+
+        let response = sign_htlc_tx_impl(request);
+        assert!(!response.success, "Should fail when channel secrets missing");
+        assert!(response.error.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_compute_funding_sighash_deterministic() {
+        let secp = Secp256k1::new();
+        let key = SecretKey::from_slice(&[30u8; 32]).unwrap();
+        let pubkey = key.public_key(&secp);
+        let script = build_test_witness_script(&pubkey);
+        let tx = build_test_tx();
+        let amount = 100_000u64;
+
+        let hash1 = compute_funding_sighash(&tx, &script, amount).unwrap();
+        let hash2 = compute_funding_sighash(&tx, &script, amount).unwrap();
+        assert_eq!(hash1, hash2, "Same tx+script+amount must produce same sighash");
+        assert_ne!(hash1, [0u8; 32], "Sighash must not be all zeros");
+    }
+
+    #[test]
+    fn test_compute_witness_sighash_deterministic() {
+        let secp = Secp256k1::new();
+        let key = SecretKey::from_slice(&[31u8; 32]).unwrap();
+        let pubkey = key.public_key(&secp);
+        let script = build_test_witness_script(&pubkey);
+        let tx = build_test_tx();
+        let amount = 80_000u64;
+
+        let hash1 = compute_witness_sighash(&tx, 0, &script, amount).unwrap();
+        let hash2 = compute_witness_sighash(&tx, 0, &script, amount).unwrap();
+        assert_eq!(hash1, hash2, "Same inputs must produce same sighash");
+        assert_ne!(hash1, [0u8; 32], "Sighash must not be all zeros");
+    }
+}
