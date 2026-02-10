@@ -202,29 +202,11 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
 
     let amount_nat = Nat::from(request.amount_sat);
 
-    // Check available BTC (not locked in channels) and deduct from LP balance
+    // Deduct from LP balance
+    // LP balances already reflect channel deductions (deduct_proportional on fund),
+    // so we just check the individual LP balance via liq_pool.withdraw().
     {
         let mut state = STATE.write().unwrap();
-
-        // Calculate available BTC = total LP BTC - BTC locked in channels
-        let total_lp_btc: u64 = state.liq_pool.get_total(&PoolAsset::BTC)
-            .0.clone().try_into().unwrap_or(0);
-        let btc_in_channels = state.total_btc_in_channels;
-        let available_btc = total_lp_btc.saturating_sub(btc_in_channels);
-
-        if request.amount_sat > available_btc {
-            let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
-            return LpBtcWithdrawResponse {
-                success: false,
-                amount_withdrawn: Nat::from(0u64),
-                new_btc_balance: current_balance,
-                txid: None,
-                error: Some(format!(
-                    "Insufficient available BTC: {} sats requested but only {} sats available (total {} sats, {} sats locked in channels)",
-                    request.amount_sat, available_btc, total_lp_btc, btc_in_channels
-                )),
-            };
-        }
 
         if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::BTC, amount_nat.clone()) {
             let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
@@ -629,8 +611,12 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     // Track the funding in canister state
     {
         let mut state = STATE.write().unwrap();
-        // Deduct from total LP BTC (it will go into channel)
         state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(request.amount_sat);
+        // Deduct from LPs proportionally — each LP's BTC balance decreases by their share
+        let amount_nat = Nat::from(request.amount_sat);
+        if let Err(e) = state.liq_pool.deduct_proportional(PoolAsset::BTC, amount_nat) {
+            ic_cdk::println!("WARNING: deduct_proportional failed on channel fund: {:?}", e);
+        }
     }
 
     FundChannelResponse {

@@ -226,3 +226,189 @@ impl LiquidityPool {
         self.holdings_total.get(asset).cloned().unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lp1() -> Principal {
+        Principal::from_slice(&[1u8; 10])
+    }
+
+    fn lp2() -> Principal {
+        Principal::from_slice(&[2u8; 10])
+    }
+
+    fn nat(v: u64) -> Nat {
+        Nat::from(v)
+    }
+
+    fn to_u64(n: &Nat) -> u64 {
+        n.0.clone().try_into().unwrap_or(0)
+    }
+
+    #[test]
+    fn test_proportional_deduction_80_20_split() {
+        let mut pool = LiquidityPool::new();
+        // LP1 deposits 80k, LP2 deposits 20k → total 100k BTC
+        pool.deposit(lp1(), PoolAsset::BTC, nat(80_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(20_000));
+        assert_eq!(to_u64(&pool.get_total(&PoolAsset::BTC)), 100_000);
+
+        // Fund a 100k channel → deduct proportionally
+        pool.deduct_proportional(PoolAsset::BTC, nat(100_000)).unwrap();
+
+        // LP1 loses 80k (80%), LP2 loses 20k (20%)
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 0);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 0);
+        assert_eq!(to_u64(&pool.get_total(&PoolAsset::BTC)), 0);
+    }
+
+    #[test]
+    fn test_proportional_deduction_partial() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(80_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(20_000));
+
+        // Fund a 50k channel (half the pool)
+        pool.deduct_proportional(PoolAsset::BTC, nat(50_000)).unwrap();
+
+        // LP1: 80k - (50k * 80k/100k) = 80k - 40k = 40k
+        // LP2: 20k - (50k * 20k/100k) = 20k - 10k = 10k
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 40_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 10_000);
+        assert_eq!(to_u64(&pool.get_total(&PoolAsset::BTC)), 50_000);
+    }
+
+    #[test]
+    fn test_proportional_credit_after_channel_close() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(80_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(20_000));
+
+        // Channel open: deduct 100k
+        pool.deduct_proportional(PoolAsset::BTC, nat(100_000)).unwrap();
+        assert_eq!(to_u64(&pool.get_total(&PoolAsset::BTC)), 0);
+
+        // Channel close: credit back 95k (5k lost to outbound payments)
+        let recipients = pool.credit_proportional(PoolAsset::BTC, nat(95_000));
+        // credit_proportional distributes based on current share, but pool is 0
+        // so nobody gets anything (edge case: pool empty)
+        assert_eq!(recipients, 0);
+    }
+
+    #[test]
+    fn test_proportional_credit_with_remaining_balance() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(80_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(20_000));
+
+        // Fund 50k channel (deduct half)
+        pool.deduct_proportional(PoolAsset::BTC, nat(50_000)).unwrap();
+        // Now: LP1=40k, LP2=10k, total=50k
+
+        // Channel closes with 45k returned (5k lost)
+        let recipients = pool.credit_proportional(PoolAsset::BTC, nat(45_000));
+        assert_eq!(recipients, 2);
+
+        // LP1 gets 45k * 40k/50k = 36k → 40k + 36k = 76k
+        // LP2 gets 45k * 10k/50k = 9k → 10k + 9k = 19k
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 76_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 19_000);
+        assert_eq!(to_u64(&pool.get_total(&PoolAsset::BTC)), 95_000);
+    }
+
+    #[test]
+    fn test_net_loss_tracking() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(80_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(20_000));
+
+        // Fund 100k channel
+        pool.deduct_proportional(PoolAsset::BTC, nat(100_000)).unwrap();
+
+        // LP1 deposits more BTC while channel is open
+        pool.deposit(lp1(), PoolAsset::BTC, nat(50_000));
+        // Now: LP1=50k, LP2=0, total=50k
+
+        // Channel closes with 80k returned
+        let recipients = pool.credit_proportional(PoolAsset::BTC, nat(80_000));
+        assert_eq!(recipients, 1); // Only LP1 has balance
+
+        // LP1: 50k + (80k * 50k/50k) = 50k + 80k = 130k
+        // LP2: 0 + 0 = 0 (had no share when credit happened)
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 130_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 0);
+    }
+
+    #[test]
+    fn test_multiple_channels() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(100_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(100_000));
+
+        // Open first channel: 80k
+        pool.deduct_proportional(PoolAsset::BTC, nat(80_000)).unwrap();
+        // LP1: 100k - 40k = 60k, LP2: 100k - 40k = 60k, total=120k
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 60_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 60_000);
+
+        // Open second channel: 60k
+        pool.deduct_proportional(PoolAsset::BTC, nat(60_000)).unwrap();
+        // LP1: 60k - 30k = 30k, LP2: 60k - 30k = 30k, total=60k
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 30_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 30_000);
+
+        // Close first channel with 75k returned (lost 5k)
+        pool.credit_proportional(PoolAsset::BTC, nat(75_000));
+        // Each gets 75k * 30k/60k = 37.5k → 37500 due to integer math
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 67_500);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 67_500);
+    }
+
+    #[test]
+    fn test_withdrawal_after_channel_open() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(100_000));
+        pool.deposit(lp2(), PoolAsset::BTC, nat(50_000));
+
+        // Fund 60k channel
+        pool.deduct_proportional(PoolAsset::BTC, nat(60_000)).unwrap();
+        // LP1: 100k - (60k * 100k/150k) = 100k - 40k = 60k
+        // LP2: 50k - (60k * 50k/150k) = 50k - 20k = 30k
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 60_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp2(), &PoolAsset::BTC)), 30_000);
+
+        // LP1 can withdraw their remaining 60k
+        pool.withdraw(lp1(), PoolAsset::BTC, nat(60_000)).unwrap();
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 0);
+
+        // LP1 cannot withdraw more than they have
+        assert!(pool.withdraw(lp1(), PoolAsset::BTC, nat(1)).is_err());
+    }
+
+    #[test]
+    fn test_deduct_insufficient_pool() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(50_000));
+
+        // Cannot deduct more than pool has
+        assert!(pool.deduct_proportional(PoolAsset::BTC, nat(100_000)).is_err());
+        // Balance unchanged
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 50_000);
+    }
+
+    #[test]
+    fn test_ckbtc_not_affected_by_btc_channel_ops() {
+        let mut pool = LiquidityPool::new();
+        pool.deposit(lp1(), PoolAsset::BTC, nat(100_000));
+        pool.deposit(lp1(), PoolAsset::CkBTC, nat(50_000));
+
+        // Fund BTC channel
+        pool.deduct_proportional(PoolAsset::BTC, nat(100_000)).unwrap();
+
+        // ckBTC balance unaffected
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::CkBTC)), 50_000);
+        assert_eq!(to_u64(&pool.get_balance(&lp1(), &PoolAsset::BTC)), 0);
+    }
+}
