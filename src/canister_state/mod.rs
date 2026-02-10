@@ -501,6 +501,7 @@ where
                 max_slippage_bps: 500,
                 imbalance_fee_bps: 100,
                 rebate_bps: 0,
+                max_swap_pct_bps: 0,
             },
             protocol_fees_ckbtc: 0,
             admin: None,
@@ -553,6 +554,7 @@ where
                 max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
                 imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
                 rebate_bps: 0,            // disabled by default
+                max_swap_pct_bps: 0,      // disabled by default
             },
             protocol_fees_ckbtc: 0,
             admin: None,
@@ -1120,6 +1122,7 @@ mod snapshot_tests {
             max_slippage_bps: 600,
             imbalance_fee_bps: 150,
             rebate_bps: 5,
+            max_swap_pct_bps: 500,
         };
         state.protocol_fees_ckbtc = 12345;
         state.admin = Some(test_principal_2);
@@ -1153,6 +1156,7 @@ mod snapshot_tests {
         assert!(decoded.registered_relay.is_some());
         assert_eq!(decoded.onramp_rate_limits.len(), 1);
         assert_eq!(decoded.stableswap_config.amplification, 300);
+        assert_eq!(decoded.stableswap_config.max_swap_pct_bps, 500);
         assert_eq!(decoded.protocol_fees_ckbtc, 12345);
         assert_eq!(decoded.admin, Some(test_principal_2));
         assert_eq!(decoded.icp_ddos_fee_e8s, 200_000_000);
@@ -1182,6 +1186,7 @@ mod snapshot_tests {
         assert_eq!(restored.registered_relay.as_ref().unwrap().principal, test_principal_2);
         assert_eq!(restored.onramp_rate_limits.len(), 1);
         assert_eq!(restored.stableswap_config.amplification, 300);
+        assert_eq!(restored.stableswap_config.max_swap_pct_bps, 500);
         assert_eq!(restored.protocol_fees_ckbtc, 12345);
         assert_eq!(restored.admin, Some(test_principal_2));
         assert_eq!(restored.icp_ddos_fee_e8s, 200_000_000);

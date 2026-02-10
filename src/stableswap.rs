@@ -52,6 +52,8 @@ pub struct StableSwapConfig {
     /// When a swap moves the pool closer to balance, the user receives a rebate
     /// (negative fee) that scales with how much the swap improves balance.
     pub rebate_bps: u64,
+    /// Max single swap as % of output pool in bps. 0 = disabled, 1000 = 10%.
+    pub max_swap_pct_bps: u64,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize, PartialEq, Eq)]
@@ -86,6 +88,7 @@ pub enum StableSwapError {
     Overflow,
     ZeroAmplification,
     SlippageExceeded { price_impact_bps: u64, max_slippage_bps: u64 },
+    SwapSizeExceeded { swap_pct_bps: u64, max_swap_pct_bps: u64 },
 }
 
 impl std::fmt::Display for StableSwapError {
@@ -99,6 +102,9 @@ impl std::fmt::Display for StableSwapError {
             StableSwapError::ZeroAmplification => write!(f, "Amplification must be > 0"),
             StableSwapError::SlippageExceeded { price_impact_bps, max_slippage_bps } => {
                 write!(f, "Slippage exceeded: price impact {} bps > max {} bps", price_impact_bps, max_slippage_bps)
+            }
+            StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps } => {
+                write!(f, "Swap size exceeded: {} bps of output pool > max {} bps", swap_pct_bps, max_swap_pct_bps)
             }
         }
     }
@@ -494,6 +500,18 @@ pub fn get_swap_output(
         });
     }
 
+    // Max swap size check (0 = disabled)
+    // raw_output as % of output pool (y)
+    if config.max_swap_pct_bps > 0 {
+        let swap_pct = (raw_output * 10_000) / y;
+        if swap_pct as u64 > config.max_swap_pct_bps {
+            return Err(StableSwapError::SwapSizeExceeded {
+                swap_pct_bps: swap_pct as u64,
+                max_swap_pct_bps: config.max_swap_pct_bps,
+            });
+        }
+    }
+
     Ok(SwapResult {
         output_amount: output_after_fee as u64,
         total_fee: total_fee as u64,
@@ -653,6 +671,18 @@ pub fn get_swap_input(
         });
     }
 
+    // Max swap size check (0 = disabled)
+    // raw_output as % of output pool (y)
+    if config.max_swap_pct_bps > 0 {
+        let swap_pct = (raw_output * 10_000) / y;
+        if swap_pct as u64 > config.max_swap_pct_bps {
+            return Err(StableSwapError::SwapSizeExceeded {
+                swap_pct_bps: swap_pct as u64,
+                max_swap_pct_bps: config.max_swap_pct_bps,
+            });
+        }
+    }
+
     Ok(SwapResult {
         output_amount: input as u64, // For get_swap_input, output_amount is the required input
         total_fee: total_fee as u64,
@@ -679,6 +709,7 @@ mod tests {
             max_slippage_bps: 500,     // 5% — reject swaps with extreme price impact
             imbalance_fee_bps: 100,    // 1% at full imbalance (10x base fee)
             rebate_bps: 0,             // disabled by default
+            max_swap_pct_bps: 0,       // disabled by default
         }
     }
 
@@ -756,6 +787,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: lots of BTC, less ckBTC
@@ -780,6 +812,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: lots of ckBTC, less BTC
@@ -803,6 +836,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,    // same as fee_bps
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let btc_bal = 10_000_000u64;
@@ -829,6 +863,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let btc_bal = 5_000_000u64;
@@ -921,6 +956,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let bal = 5_000_000u64;
         let input = 100_000u64;
@@ -940,6 +976,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let high_amp = StableSwapConfig {
             amplification: 1000,
@@ -948,6 +985,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced pool
@@ -977,6 +1015,7 @@ mod tests {
             max_slippage_bps: 5,      // very tight: 0.05%
             imbalance_fee_bps: 10,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         // Heavily imbalanced pool
         let btc_bal = 2_000_000u64;
@@ -1003,6 +1042,7 @@ mod tests {
             max_slippage_bps: 50,      // 0.5% limit
             imbalance_fee_bps: 10,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let btc_bal = 10_000_000u64;
         let ckbtc_bal = 10_000_000u64;
@@ -1023,6 +1063,7 @@ mod tests {
             max_slippage_bps: 0,       // disabled
             imbalance_fee_bps: 0,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         // Very imbalanced pool
         let btc_bal = 5_000_000u64;
@@ -1044,6 +1085,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,    // 1% at max imbalance
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Balanced pool
@@ -1071,6 +1113,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 500,    // very high at max imbalance
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let effective = compute_effective_fee_bps(&config, 1_000_000, 1_000_000);
@@ -1087,6 +1130,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 30,     // same as fee_bps
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let effective_balanced = compute_effective_fee_bps(&config, 5_000_000, 5_000_000);
@@ -1105,6 +1149,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 50,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let btc_bal = 5_000_000u64;
         let ckbtc_bal = 5_000_000u64;
@@ -1131,6 +1176,7 @@ mod tests {
             max_slippage_bps: 0,       // disabled for this test
             imbalance_fee_bps: 10,     // same as fee_bps → no dynamic effect
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let input = 10_000u64;
 
@@ -1169,6 +1215,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 110,     // 1.1% at max imbalance
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Balanced: effective = fee_bps = 10
@@ -1197,6 +1244,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 30,     // less than fee_bps
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         assert_eq!(compute_effective_fee_bps(&config_no_dynamic, 9_000, 1_000), 50);
     }
@@ -1216,6 +1264,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,            // 0.2% max rebate
+            max_swap_pct_bps: 0,
         };
 
         // Very imbalanced: 100k BTC / 2M ckBTC
@@ -1247,6 +1296,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: 500k BTC / 2M ckBTC
@@ -1276,6 +1326,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,
+            max_swap_pct_bps: 0,
         };
 
         // Balanced: 5M / 5M
@@ -1300,6 +1351,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 0,            // disabled
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: 500k BTC / 2M ckBTC, swap BTC → ckBTC (rebalancing)
@@ -1325,6 +1377,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,
+            max_swap_pct_bps: 0,
         };
 
         // Heavily imbalanced: 200k BTC / 2M ckBTC
@@ -1350,6 +1403,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,
+            max_swap_pct_bps: 0,
         };
         let config_no_rebate = StableSwapConfig {
             amplification: 200,
@@ -1358,6 +1412,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: 500k BTC / 2M ckBTC, reverse swap BTC → ckBTC (rebalancing)
@@ -1387,6 +1442,7 @@ mod tests {
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,
             rebate_bps: 20,
+            max_swap_pct_bps: 0,
         };
 
         // Rebalancing: pool goes from imbalanced to more balanced
@@ -1405,5 +1461,66 @@ mod tests {
             "Strong rebalancing should get negative fee (rebate), got {}", fee_strong);
         assert!(fee_strong >= -20,
             "Rebate should not exceed rebate_bps ({}), got {}", -20, fee_strong);
+    }
+
+    // -----------------------------------------------------------------------
+    // Max swap size tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_max_swap_pct_within_limit() {
+        // Swap that uses < 10% of the output pool should succeed
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 1000, // 10% limit
+        };
+        // Balanced pool: 1M each. Swap 50k BTC → ckBTC ≈ 5% of output pool.
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 50_000, &SwapDirection::BtcToCkbtc);
+        assert!(result.is_ok(), "Swap within 10% limit should succeed, got {:?}", result);
+    }
+
+    #[test]
+    fn test_max_swap_pct_exceeds_limit() {
+        // Swap that uses > 10% of the output pool should fail
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 1000, // 10% limit
+        };
+        // Balanced pool: 1M each. Swap 200k BTC → ckBTC ≈ 20% of output pool.
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 200_000, &SwapDirection::BtcToCkbtc);
+        match result {
+            Err(StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps }) => {
+                assert!(swap_pct_bps > 1000, "swap_pct_bps {} should exceed 1000", swap_pct_bps);
+                assert_eq!(max_swap_pct_bps, 1000);
+            }
+            other => panic!("Expected SwapSizeExceeded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_max_swap_pct_disabled_when_zero() {
+        // max_swap_pct_bps = 0 → no limit, even huge swaps should pass
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0, // disabled
+        };
+        // Swap 500k out of 1M pool = 50%, should still succeed with check disabled
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 500_000, &SwapDirection::BtcToCkbtc);
+        assert!(result.is_ok(), "Should never reject when max_swap_pct_bps=0, got {:?}", result);
     }
 }

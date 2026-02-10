@@ -1276,6 +1276,8 @@ pub struct OfframpRequestInfo {
     pub icp_fee_block_index: Option<Nat>,
     /// Whether the ICP fee has been refunded (on success)
     pub icp_fee_refunded: bool,
+    /// ckBTC amount collected from user (StableSwap-computed, for LP crediting on completion)
+    pub ckbtc_collected: u64,
 }
 
 // =============================================================================
@@ -1809,6 +1811,8 @@ pub struct UpdateStableSwapConfigRequest {
     pub imbalance_fee_bps: Option<u64>,
     /// New rebate in basis points (None = keep current). Max rebate at full rebalance. 0 = disabled.
     pub rebate_bps: Option<u64>,
+    /// New max swap size as % of output pool in bps (None = keep current). 0 = disabled, 1000 = 10%.
+    pub max_swap_pct_bps: Option<u64>,
 }
 
 /// Response from updating StableSwap configuration

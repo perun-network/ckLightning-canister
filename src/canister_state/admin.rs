@@ -456,7 +456,9 @@ pub fn get_rate_limit_status_impl(principal: Principal) -> RateLimitStatus {
 pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
     let state = STATE.read().unwrap();
 
+    // BTC balance includes channel BTC for StableSwap pricing
     let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+    let btc_balance = btc_balance + state.total_btc_in_channels;
     let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
     let effective_fee_bps = crate::stableswap::compute_effective_fee_bps(
@@ -591,6 +593,16 @@ pub fn update_stableswap_config_impl(
             };
         }
         state.stableswap_config.rebate_bps = rebate;
+    }
+    if let Some(max_pct) = request.max_swap_pct_bps {
+        if max_pct > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("max_swap_pct_bps must be <= 10000".to_string()),
+            };
+        }
+        state.stableswap_config.max_swap_pct_bps = max_pct;
     }
 
     UpdateStableSwapConfigResponse {

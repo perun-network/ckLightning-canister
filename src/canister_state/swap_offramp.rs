@@ -88,7 +88,9 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     let (ckbtc_required, amount_sats) = {
         let mut state = STATE.write().unwrap();
 
+        // BTC balance includes channel BTC for StableSwap pricing
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+        let btc_balance = btc_balance + state.total_btc_in_channels;
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
         match crate::stableswap::get_swap_input(
@@ -214,6 +216,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                     preimage: None,
                     icp_fee_block_index: Some(icp_fee_block_index),
                     icp_fee_refunded: false,
+                    ckbtc_collected: ckbtc_required,
                 };
 
                 {
@@ -304,7 +307,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     let computed_hash = bitcoin::hashes::sha256::Hash::hash(&request.preimage);
     let computed_hash_bytes = computed_hash.as_byte_array();
 
-    // Get the user and verify state, mark as completed
+    // Get the user and verify state, mark as completed, credit LPs with ckBTC
     let user = {
         let mut state = STATE.write().unwrap();
 
@@ -340,7 +343,17 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
         };
         request_info.preimage = Some(request.preimage);
 
-        request_info.user
+        let user = request_info.user;
+        let ckbtc_collected = request_info.ckbtc_collected;
+
+        // Credit LPs proportionally with the ckBTC collected from the user.
+        // LPs are "selling" BTC (via Lightning channel) in exchange for ckBTC.
+        if ckbtc_collected > 0 {
+            let amount_nat = Nat::from(ckbtc_collected);
+            state.liq_pool.credit_proportional(PoolAsset::CkBTC, amount_nat);
+        }
+
+        user
     };
 
     // Refund ICP fee to the user (on success)

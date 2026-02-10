@@ -167,8 +167,10 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     let ckbtc_out = {
         let mut state = STATE.write().unwrap();
 
-        // Get pool balances
+        // Get pool balances for StableSwap pricing
+        // BTC balance includes channel BTC (it's still system BTC, just in channels not on-chain)
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+        let btc_balance = btc_balance + state.total_btc_in_channels;
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
         let swap_result = match crate::stableswap::get_swap_output(
@@ -289,14 +291,11 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                 }
             }
             Err(e) => {
-                // Restore LP balance and mark as failed
+                // Restore LP balances proportionally and mark as failed
                 {
                     let mut state = STATE.write().unwrap();
-                    // Restore the deducted amount back to pool
                     let restore_nat = Nat::from(ckbtc_out);
-                    state.liq_pool.holdings_total
-                        .get_mut(&PoolAsset::CkBTC)
-                        .map(|total| *total += restore_nat);
+                    state.liq_pool.credit_proportional(PoolAsset::CkBTC, restore_nat);
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                         swap.state = SwapState::Failed {
                             reason: format!("Transfer error: {:?}", e),
@@ -311,14 +310,11 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             }
         },
         Err((code, msg)) => {
-            // Restore LP balance and mark as failed
+            // Restore LP balances proportionally and mark as failed
             {
                 let mut state = STATE.write().unwrap();
-                // Restore the deducted amount back to pool
                 let restore_nat = Nat::from(ckbtc_out);
-                state.liq_pool.holdings_total
-                    .get_mut(&PoolAsset::CkBTC)
-                    .map(|total| *total += restore_nat);
+                state.liq_pool.credit_proportional(PoolAsset::CkBTC, restore_nat);
                 if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                     swap.state = SwapState::Failed {
                         reason: format!("Call error: {:?} - {}", code, msg),
