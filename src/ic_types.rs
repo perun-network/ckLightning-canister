@@ -1859,6 +1859,15 @@ pub struct SetIcpDdosFeeResponse {
     pub error: Option<String>,
 }
 
+/// Response from redistributing protocol fees to LPs
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RedistributeFeesResponse {
+    pub success: bool,
+    pub amount_distributed: u64,
+    pub num_recipients: u64,
+    pub error: Option<String>,
+}
+
 /// Response from withdrawing accumulated ICP fees
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct WithdrawIcpFeesResponse {

@@ -59,7 +59,7 @@ use crate::canister_state::{
     // StableSwap functions
     get_swap_quote_impl, get_stableswap_config_impl,
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
-    set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl,
+    set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl, redistribute_fees_impl,
     set_admin_impl,
 };
 use crate::helpers::{
@@ -123,7 +123,7 @@ use crate::ic_types::{
     StableSwapConfig, SwapQuoteRequest, SwapQuoteResponse,
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
-    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -924,6 +924,16 @@ fn get_icp_ddos_fee() -> u64 {
 #[candid_method(update)]
 async fn withdraw_icp_fees(recipient: Principal) -> WithdrawIcpFeesResponse {
     withdraw_icp_fees_impl(recipient).await
+}
+
+/// Redistribute accumulated ckBTC protocol fees to LPs (admin-only).
+///
+/// Credits each LP's ckBTC balance proportionally based on their pool share,
+/// then resets the protocol fee counter.
+#[update]
+#[candid_method(update)]
+fn redistribute_fees() -> RedistributeFeesResponse {
+    redistribute_fees_impl()
 }
 
 // =============================================================================

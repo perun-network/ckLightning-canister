@@ -85,7 +85,7 @@ use crate::ic_types::{
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,
-    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal};

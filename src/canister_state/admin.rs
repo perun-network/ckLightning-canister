@@ -15,7 +15,7 @@ use crate::ic_types::{
     SwapQuoteRequest, SwapQuoteResponse,
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
-    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
     StableSwapConfig,
 };
 
@@ -833,5 +833,59 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
                 error: Some(format!("Ledger call failed: {:?} - {}", code, msg)),
             }
         }
+    }
+}
+
+/// Redistribute accumulated ckBTC protocol fees to LPs proportionally (admin-only).
+///
+/// Takes the accumulated `protocol_fees_ckbtc` and credits each LP's ckBTC balance
+/// proportionally based on their share of the ckBTC pool. Resets the counter on success.
+pub fn redistribute_fees_impl() -> RedistributeFeesResponse {
+    let caller = msg_caller();
+    let mut state = STATE.write().unwrap();
+
+    match state.admin {
+        Some(admin) if admin == caller => {}
+        _ => {
+            return RedistributeFeesResponse {
+                success: false,
+                amount_distributed: 0,
+                num_recipients: 0,
+                error: Some("Unauthorized: caller is not admin".to_string()),
+            };
+        }
+    }
+
+    let amount = state.protocol_fees_ckbtc;
+    if amount == 0 {
+        return RedistributeFeesResponse {
+            success: true,
+            amount_distributed: 0,
+            num_recipients: 0,
+            error: None,
+        };
+    }
+
+    let recipients = state.liq_pool.credit_proportional(
+        PoolAsset::CkBTC,
+        Nat::from(amount),
+    );
+
+    if recipients == 0 {
+        return RedistributeFeesResponse {
+            success: false,
+            amount_distributed: 0,
+            num_recipients: 0,
+            error: Some("No LPs in pool to distribute to".to_string()),
+        };
+    }
+
+    state.protocol_fees_ckbtc = 0;
+
+    RedistributeFeesResponse {
+        success: true,
+        amount_distributed: amount,
+        num_recipients: recipients as u64,
+        error: None,
     }
 }

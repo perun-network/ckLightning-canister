@@ -145,6 +145,58 @@ impl LiquidityPool {
         Ok(())
     }
 
+    /// Credit pool proportionally to all depositors (inverse of deduct_proportional).
+    ///
+    /// Distributes the given amount to all depositors based on their share of the total pool.
+    /// Returns the number of depositors that received a share.
+    pub fn credit_proportional(&mut self, asset: PoolAsset, amount: Amount) -> usize {
+        let total = self.holdings_total.get(&asset)
+            .cloned()
+            .unwrap_or_default();
+
+        let amount_u128: u128 = amount.0.clone().try_into().unwrap_or(0);
+        let total_u128: u128 = total.0.clone().try_into().unwrap_or(0);
+
+        if amount_u128 == 0 {
+            return 0;
+        }
+
+        // If pool is empty, nothing to distribute to
+        if total_u128 == 0 {
+            return 0;
+        }
+
+        let mut total_credited = Nat::from(0u64);
+        let mut recipients = 0usize;
+        let depositor_keys: Vec<Principal> = self.depositors.keys().cloned().collect();
+
+        for depositor in depositor_keys {
+            if let Some(balance) = self.depositors.get_mut(&depositor) {
+                let depositor_balance = match asset {
+                    PoolAsset::CkBTC => &mut balance.ckbtc_amount,
+                    PoolAsset::BTC => &mut balance.btc_amount,
+                };
+
+                let depositor_u128: u128 = depositor_balance.0.clone().try_into().unwrap_or(0);
+
+                if depositor_u128 > 0 {
+                    let credit = (amount_u128 * depositor_u128) / total_u128;
+                    let credit_nat = Nat::from(credit);
+                    *depositor_balance += credit_nat.clone();
+                    total_credited += credit_nat;
+                    recipients += 1;
+                }
+            }
+        }
+
+        // Update total holdings
+        if let Some(holdings) = self.holdings_total.get_mut(&asset) {
+            *holdings += total_credited;
+        }
+
+        recipients
+    }
+
     /// Deduct from total pool only (legacy - doesn't affect individual balances)
     #[allow(dead_code)]
     pub fn deduct_from_pool(&mut self, asset: PoolAsset, amount: Amount) -> ResultCkl<()> {
