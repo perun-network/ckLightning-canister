@@ -6,7 +6,7 @@ use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
     CompleteSwapRequest, CompleteSwapResponse, DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
-    ICP_DDOS_FEE_E8S, ICP_TRANSFER_FEE_E8S,
+    ICP_TRANSFER_FEE_E8S,
     RegisterSwapRequest, RegisterSwapResponse,
     SwapInfo, SwapState, OnrampRequestState,
 };
@@ -338,8 +338,12 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> {
     let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
 
-    // Refund 20 ICP minus the transfer fee
-    let refund_amount = ICP_DDOS_FEE_E8S - ICP_TRANSFER_FEE_E8S;
+    // Read configured fee from state and refund minus the transfer fee
+    let icp_ddos_fee = {
+        let state = STATE.read().unwrap();
+        state.icp_ddos_fee_e8s
+    };
+    let refund_amount = icp_ddos_fee.saturating_sub(ICP_TRANSFER_FEE_E8S);
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,

@@ -209,6 +209,9 @@ where
 
     // Admin principal (can update config, withdraw protocol fees)
     pub(crate) admin: Option<Principal>,
+
+    // Configurable ICP anti-DDoS fee (in e8s). Default: 100_000_000 (1 ICP)
+    pub(crate) icp_ddos_fee_e8s: u64,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -497,9 +500,11 @@ where
                 protocol_fee_share_bps: 5000,
                 max_slippage_bps: 500,
                 imbalance_fee_bps: 100,
+                rebate_bps: 0,
             },
             protocol_fees_ckbtc: 0,
             admin: None,
+            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
         }
     }
 
@@ -547,9 +552,11 @@ where
                 protocol_fee_share_bps: 5000,
                 max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
                 imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
+                rebate_bps: 0,            // disabled by default
             },
             protocol_fees_ckbtc: 0,
             admin: None,
+            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
         }
     }
 
@@ -900,6 +907,7 @@ where
             stableswap_config: self.stableswap_config.clone(),
             protocol_fees_ckbtc: self.protocol_fees_ckbtc,
             admin: self.admin,
+            icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
         }
     }
 
@@ -937,6 +945,7 @@ where
         self.stableswap_config = snap.stableswap_config;
         self.protocol_fees_ckbtc = snap.protocol_fees_ckbtc;
         self.admin = snap.admin;
+        self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
     }
 }
 
@@ -983,6 +992,7 @@ pub struct CanisterStateSnapshot {
     pub stableswap_config: crate::stableswap::StableSwapConfig,
     pub protocol_fees_ckbtc: u64,
     pub admin: Option<Principal>,
+    pub icp_ddos_fee_e8s: u64,
 }
 
 #[cfg(test)]
@@ -1109,9 +1119,11 @@ mod snapshot_tests {
             protocol_fee_share_bps: 4000,
             max_slippage_bps: 600,
             imbalance_fee_bps: 150,
+            rebate_bps: 5,
         };
         state.protocol_fees_ckbtc = 12345;
         state.admin = Some(test_principal_2);
+        state.icp_ddos_fee_e8s = 200_000_000; // 2 ICP
 
         // Create snapshot
         let snapshot = state.to_snapshot();
@@ -1143,6 +1155,7 @@ mod snapshot_tests {
         assert_eq!(decoded.stableswap_config.amplification, 300);
         assert_eq!(decoded.protocol_fees_ckbtc, 12345);
         assert_eq!(decoded.admin, Some(test_principal_2));
+        assert_eq!(decoded.icp_ddos_fee_e8s, 200_000_000);
 
         // Restore from decoded snapshot into a fresh state
         let mut restored = make_test_state();
@@ -1171,6 +1184,7 @@ mod snapshot_tests {
         assert_eq!(restored.stableswap_config.amplification, 300);
         assert_eq!(restored.protocol_fees_ckbtc, 12345);
         assert_eq!(restored.admin, Some(test_principal_2));
+        assert_eq!(restored.icp_ddos_fee_e8s, 200_000_000);
 
         // Verify LP pool survived round-trip
         assert_eq!(restored.liq_pool.get_balance(&test_principal, &PoolAsset::CkBTC), Nat::from(100_000u64));

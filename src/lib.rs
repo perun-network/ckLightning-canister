@@ -85,6 +85,7 @@ use crate::ic_types::{
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal};
@@ -167,14 +168,14 @@ fn pre_upgrade() {
 
     let len = bytes.len() as u64;
     let pages_needed = (len + 8 + 65535) / 65536;
-    let current_pages = ic_cdk::api::stable::stable_size();
+    let current_pages = ic_cdk::stable::stable_size();
     if current_pages < pages_needed {
-        if ic_cdk::api::stable::stable_grow(pages_needed - current_pages).is_err() {
+        if ic_cdk::stable::stable_grow(pages_needed - current_pages).is_err() {
             ic_cdk::trap("pre_upgrade: failed to grow stable memory");
         }
     }
-    ic_cdk::api::stable::stable_write(0, &len.to_le_bytes());
-    ic_cdk::api::stable::stable_write(8, &bytes);
+    ic_cdk::stable::stable_write(0, &len.to_le_bytes());
+    ic_cdk::stable::stable_write(8, &bytes);
 }
 
 // Post-upgrade hook.
@@ -184,14 +185,14 @@ fn upgrade(network: Network) {
     init_upgrade(network);
 
     // Restore state from stable memory
-    if ic_cdk::api::stable::stable_size() > 0 {
+    if ic_cdk::stable::stable_size() > 0 {
         let mut len_bytes = [0u8; 8];
-        ic_cdk::api::stable::stable_read(0, &mut len_bytes);
+        ic_cdk::stable::stable_read(0, &mut len_bytes);
         let len = u64::from_le_bytes(len_bytes) as usize;
 
         if len > 0 {
             let mut bytes = vec![0u8; len];
-            ic_cdk::api::stable::stable_read(8, &mut bytes);
+            ic_cdk::stable::stable_read(8, &mut bytes);
             let snapshot: canister_state::CanisterStateSnapshot = match candid::decode_one(&bytes) {
                 Ok(s) => s,
                 Err(e) => {

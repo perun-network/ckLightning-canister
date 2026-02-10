@@ -5,7 +5,7 @@
 use super::STATE;
 use super::admin::{check_onramp_rate_limit, verify_invoice_node_pubkey};
 use crate::ic_types::{
-    DEVNET_ICP_LEDGER, ICP_DDOS_FEE_E8S,
+    DEVNET_ICP_LEDGER,
     OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestInfo, OnrampRequestState,
     PendingInvoiceRequest, SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
     SwapInfo, SwapState,
@@ -22,7 +22,7 @@ use ic_cdk::api::time as blocktime;
 ///
 /// Called by clients to initiate a Lightning → ckBTC swap.
 /// Creates a pending request that the relay will fulfill with an actual invoice.
-/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
+/// Requires prior ICRC-2 approval for the configured ICP anti-DDoS fee.
 pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
     let caller = msg_caller();
 
@@ -44,6 +44,12 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         };
     }
 
+    // Read configured ICP anti-DDoS fee from state
+    let icp_ddos_fee = {
+        let state = STATE.read().unwrap();
+        state.icp_ddos_fee_e8s
+    };
+
     // Collect ICP anti-DDoS fee upfront via ICRC-2 transfer_from
     let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
     let canister_principal = canister_self();
@@ -58,7 +64,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
             owner: canister_principal,
             subaccount: None,
         },
-        amount: candid::Nat::from(ICP_DDOS_FEE_E8S),
+        amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
         memo: None,
         created_at_time: None,
@@ -72,10 +78,11 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => block_index,
             Err(err) => {
+                let fee_icp = icp_ddos_fee as f64 / 1e8;
                 return OnrampInvoiceResponse {
                     request_id: String::new(),
                     success: false,
-                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve 20 ICP?", err)),
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve {} ICP?", err, fee_icp)),
                 };
             }
         },

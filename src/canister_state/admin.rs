@@ -5,7 +5,8 @@
 use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, ONRAMP_TIMEOUT_NS, OFFRAMP_TIMEOUT_NS, DEFAULT_CKBTC_FEE,
+    DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER, ICP_TRANSFER_FEE_E8S,
+    ONRAMP_TIMEOUT_NS, OFFRAMP_TIMEOUT_NS, DEFAULT_CKBTC_FEE,
     OnrampRequestState, OfframpRequestState,
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
     RelayRegistration,
@@ -14,6 +15,7 @@ use crate::ic_types::{
     SwapQuoteRequest, SwapQuoteResponse,
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
     StableSwapConfig,
 };
 
@@ -580,6 +582,16 @@ pub fn update_stableswap_config_impl(
         }
         state.stableswap_config.imbalance_fee_bps = imb_fee;
     }
+    if let Some(rebate) = request.rebate_bps {
+        if rebate > 10_000 {
+            return UpdateStableSwapConfigResponse {
+                success: false,
+                config: state.stableswap_config.clone(),
+                error: Some("rebate_bps must be <= 10000".to_string()),
+            };
+        }
+        state.stableswap_config.rebate_bps = rebate;
+    }
 
     UpdateStableSwapConfigResponse {
         success: true,
@@ -689,4 +701,137 @@ pub fn set_admin_impl(principal: Principal) {
     let mut state = STATE.write().unwrap();
     state.admin = Some(principal);
     ic_cdk::println!("Admin set to: {}", principal);
+}
+
+/// Set the ICP anti-DDoS fee amount (admin-only).
+pub fn set_icp_ddos_fee_impl(fee_e8s: u64) -> SetIcpDdosFeeResponse {
+    let caller = msg_caller();
+    let mut state = STATE.write().unwrap();
+
+    match state.admin {
+        Some(admin) if admin == caller => {}
+        _ => {
+            return SetIcpDdosFeeResponse {
+                success: false,
+                fee_e8s: state.icp_ddos_fee_e8s,
+                error: Some("Unauthorized: caller is not admin".to_string()),
+            };
+        }
+    }
+
+    state.icp_ddos_fee_e8s = fee_e8s;
+    ic_cdk::println!("ICP anti-DDoS fee set to: {} e8s", fee_e8s);
+
+    SetIcpDdosFeeResponse {
+        success: true,
+        fee_e8s,
+        error: None,
+    }
+}
+
+/// Get the current ICP anti-DDoS fee.
+pub fn get_icp_ddos_fee_impl() -> u64 {
+    let state = STATE.read().unwrap();
+    state.icp_ddos_fee_e8s
+}
+
+/// Withdraw accumulated ICP fees from the canister (admin-only).
+/// Transfers the canister's ICP balance (minus transfer fee) to the specified recipient.
+pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResponse {
+    let caller = msg_caller();
+
+    let admin = {
+        let state = STATE.read().unwrap();
+        state.admin
+    };
+
+    match admin {
+        Some(a) if a == caller => {}
+        _ => {
+            return WithdrawIcpFeesResponse {
+                success: false,
+                amount_e8s: 0,
+                block_index: None,
+                error: Some("Unauthorized: caller is not admin".to_string()),
+            };
+        }
+    }
+
+    // Query the canister's ICP balance first
+    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let canister_principal = ic_cdk::api::canister_self();
+
+    let balance_result: CallResult<(Nat,)> = ic_cdk::call(
+        icp_ledger,
+        "icrc1_balance_of",
+        (Account { owner: canister_principal, subaccount: None },),
+    ).await;
+
+    let balance: u64 = match balance_result {
+        Ok((bal,)) => bal.0.try_into().unwrap_or(0),
+        Err((code, msg)) => {
+            return WithdrawIcpFeesResponse {
+                success: false,
+                amount_e8s: 0,
+                block_index: None,
+                error: Some(format!("Failed to query ICP balance: {:?} - {}", code, msg)),
+            };
+        }
+    };
+
+    if balance <= ICP_TRANSFER_FEE_E8S {
+        return WithdrawIcpFeesResponse {
+            success: true,
+            amount_e8s: 0,
+            block_index: None,
+            error: None,
+        };
+    }
+
+    let withdraw_amount = balance - ICP_TRANSFER_FEE_E8S;
+
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: recipient,
+            subaccount: None,
+        },
+        amount: Nat(withdraw_amount.into()),
+        fee: Some(Nat(ICP_TRANSFER_FEE_E8S.into())),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(icp_ledger, "icrc1_transfer", (transfer_arg,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => WithdrawIcpFeesResponse {
+                success: true,
+                amount_e8s: withdraw_amount,
+                block_index: Some(block_index),
+                error: None,
+            },
+            Err(e) => {
+                ic_cdk::println!("ICP fee withdrawal failed: {:?}", e);
+                WithdrawIcpFeesResponse {
+                    success: false,
+                    amount_e8s: withdraw_amount,
+                    block_index: None,
+                    error: Some(format!("ICP transfer failed: {:?}", e)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            ic_cdk::println!("ICP fee withdrawal call failed: {:?} - {}", code, msg);
+            WithdrawIcpFeesResponse {
+                success: false,
+                amount_e8s: withdraw_amount,
+                block_index: None,
+                error: Some(format!("Ledger call failed: {:?} - {}", code, msg)),
+            }
+        }
+    }
 }

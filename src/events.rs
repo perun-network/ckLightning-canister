@@ -213,7 +213,7 @@ impl fmt::Display for Event {
 #[async_trait]
 impl EventRegisterer for CanisterState {
     async fn register_event(&mut self, time: Timestamp, ch: ChannelId, e: Event) {
-        if ic_cdk::api::caller() != self.perun_canister {
+        if ic_cdk::api::msg_caller() != self.perun_canister {
             return;
         }
         self.imple.register_event(time, ch, e).await;

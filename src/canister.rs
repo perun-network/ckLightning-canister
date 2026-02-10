@@ -59,6 +59,7 @@ use crate::canister_state::{
     // StableSwap functions
     get_swap_quote_impl, get_stableswap_config_impl,
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
+    set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl,
     set_admin_impl,
 };
 use crate::helpers::{
@@ -122,6 +123,7 @@ use crate::ic_types::{
     StableSwapConfig, SwapQuoteRequest, SwapQuoteResponse,
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -266,18 +268,18 @@ async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
 ///
 /// Called by clients to initiate a swap. Returns a request_id that can be
 /// used to poll for the invoice once the relay creates it.
-/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
+/// Requires prior ICRC-2 approval for the configured ICP anti-DDoS fee.
 ///
 /// Flow:
-/// 1. Client approves 20 ICP for canister via ICP ledger icrc2_approve
+/// 1. Client approves ICP for canister via ICP ledger icrc2_approve
 /// 2. Client calls this endpoint with (recipient, amount)
-/// 3. Canister takes 20 ICP fee, creates pending request, returns request_id
+/// 3. Canister takes ICP fee, creates pending request, returns request_id
 /// 4. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
 /// 5. Relay calls submit_invoice with the invoice
 /// 6. Client polls get_invoice_by_request until invoice is ready
 /// 7. Client pays the invoice
 /// 8. Relay receives payment, calls complete_swap
-/// 9. Canister transfers ckBTC AND refunds 20 ICP to user
+/// 9. Canister transfers ckBTC AND refunds ICP to user
 #[update]
 #[candid_method(update)]
 async fn request_onramp_invoice(request: OnrampInvoiceRequest) -> OnrampInvoiceResponse {
@@ -351,7 +353,7 @@ fn mark_offramp_in_progress(request_id: String) -> bool {
 ///
 /// Called by the relay after successfully paying the Lightning invoice.
 /// Requires the payment preimage as proof of payment.
-/// Refunds the 20 ICP anti-DDoS fee to the user on success.
+/// Refunds the ICP anti-DDoS fee to the user on success.
 #[update]
 #[candid_method(update)]
 async fn complete_offramp(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
@@ -896,6 +898,32 @@ fn update_stableswap_config(request: UpdateStableSwapConfigRequest) -> UpdateSta
 #[candid_method(update)]
 async fn withdraw_protocol_fees(recipient: Principal) -> WithdrawProtocolFeesResponse {
     withdraw_protocol_fees_impl(recipient).await
+}
+
+/// Set the ICP anti-DDoS fee amount (admin-only).
+///
+/// Controls how much ICP is collected as a security deposit for swap requests.
+/// The fee is refunded on successful swap completion.
+#[update]
+#[candid_method(update)]
+fn set_icp_ddos_fee(fee_e8s: u64) -> SetIcpDdosFeeResponse {
+    set_icp_ddos_fee_impl(fee_e8s)
+}
+
+/// Get the current ICP anti-DDoS fee amount.
+#[query]
+#[candid_method(query)]
+fn get_icp_ddos_fee() -> u64 {
+    get_icp_ddos_fee_impl()
+}
+
+/// Withdraw accumulated ICP fees from the canister (admin-only).
+///
+/// Transfers the canister's ICP balance (minus transfer fee) to the recipient.
+#[update]
+#[candid_method(update)]
+async fn withdraw_icp_fees(recipient: Principal) -> WithdrawIcpFeesResponse {
+    withdraw_icp_fees_impl(recipient).await
 }
 
 // =============================================================================
