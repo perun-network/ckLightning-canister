@@ -242,23 +242,37 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
 pub fn channel_closed_impl(channel_id: [u8; 32]) {
     let mut state = STATE.write().unwrap();
 
-    if let Some(balance) = state.channel_balances.get_mut(&channel_id) {
+    // Try channel_balances first (has per-update balance tracking)
+    let (our_sats, capacity) = if let Some(balance) = state.channel_balances.get_mut(&channel_id) {
         let our_sats = balance.our_balance_sats;
         let capacity = balance.capacity_sats;
         balance.is_active = false;
+        (our_sats, capacity)
+    } else if let Some(channel_info) = state.ln_channels.get(&channel_id) {
+        // Fallback: channel was registered but no balance updates happened.
+        // Assume full capacity is returned (no payments routed through channel yet).
+        let capacity = channel_info.capacity_sats;
+        ic_cdk::println!(
+            "Channel closed (no balance tracking): using capacity {} sats as credit amount",
+            capacity
+        );
+        (capacity, capacity)
+    } else {
+        ic_cdk::println!("Channel closed: unknown channel_id, no LP credit applied");
+        return;
+    };
 
-        // Decrement the global channel counter by the original capacity
-        state.total_btc_in_channels = state.total_btc_in_channels.saturating_sub(capacity);
+    // Decrement the global channel counter by the original capacity
+    state.total_btc_in_channels = state.total_btc_in_channels.saturating_sub(capacity);
 
-        // Credit LPs proportionally with the returned BTC (our_balance_sats)
-        // If channel opened at 100k and closes with 95k, LPs get back 95k (5k was paid out)
-        if our_sats > 0 {
-            let amount_nat = Nat::from(our_sats);
-            let recipients = state.liq_pool.credit_proportional(PoolAsset::BTC, amount_nat);
-            ic_cdk::println!(
-                "Channel closed: credited {} sats back to {} LPs (capacity was {} sats)",
-                our_sats, recipients, capacity
-            );
-        }
+    // Credit LPs proportionally with the returned BTC (our_balance_sats)
+    // If channel opened at 100k and closes with 95k, LPs get back 95k (5k was paid out)
+    if our_sats > 0 {
+        let amount_nat = Nat::from(our_sats);
+        let recipients = state.liq_pool.credit_proportional(PoolAsset::BTC, amount_nat);
+        ic_cdk::println!(
+            "Channel closed: credited {} sats back to {} LPs (capacity was {} sats)",
+            our_sats, recipients, capacity
+        );
     }
 }
