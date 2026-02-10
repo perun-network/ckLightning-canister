@@ -22,6 +22,8 @@ pub mod lp_btc;
 pub mod channel_funding;
 pub mod htlc_ops;
 pub mod htlc_signing;
+pub mod bolt3_keys;
+pub mod commitment_signing;
 pub mod admin;
 
 // Re-export all public items so `crate::canister_state::*` still works
@@ -34,6 +36,8 @@ pub use lp_btc::*;
 pub use channel_funding::*;
 pub use htlc_ops::*;
 pub use htlc_signing::*;
+pub use bolt3_keys::*;
+pub use commitment_signing::*;
 pub use admin::*;
 
 use crate::BtcPurpose;
@@ -79,6 +83,7 @@ use std::sync::RwLock;
 
 use crate::ic_types::RelayRegistration;
 
+#[cfg(not(test))]
 lazy_static! {
     pub(crate) static ref STATE: RwLock<CanisterState<receiver::CanisterTXQuerier>> =
         RwLock::new(CanisterState::new(
@@ -86,6 +91,16 @@ lazy_static! {
                 Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal")
             ),
             canister_self(),
+        ));
+}
+
+#[cfg(test)]
+lazy_static! {
+    pub(crate) static ref STATE: RwLock<CanisterState<receiver::CanisterTXQuerier>> =
+        RwLock::new(CanisterState::new_for_test(
+            receiver::CanisterTXQuerier::new(
+                Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal")
+            ),
         ));
 }
 
@@ -150,6 +165,9 @@ where
 
     // Per-channel secrets for HTLC signing (channel_id -> secrets)
     pub(crate) channel_secrets: HashMap<[u8; 32], ChannelSecretsInternal>,
+
+    // Counterparty funding pubkey per channel (channel_keys_id -> 33-byte pubkey)
+    pub(crate) channel_counterparty_pubkeys: HashMap<[u8; 32], Vec<u8>>,
 
     // HTLC transaction details for signing (payment_hash -> details)
     pub(crate) htlc_tx_details: HashMap<[u8; 32], HtlcTxDetails>,
@@ -441,6 +459,50 @@ impl<Q> CanisterState<Q>
 where
     Q: receiver::TXQuerier,
 {
+    /// Test-only constructor that doesn't call canister_self() (which panics outside IC runtime).
+    #[cfg(test)]
+    pub fn new_for_test(q: Q) -> Self {
+        let dummy_principal = Principal::anonymous();
+        Self {
+            principal: dummy_principal,
+            btc_liquidity_addresses: HashMap::new(),
+            btc_invoice_address: None,
+            lp_btc_address: None,
+            pending_btc_deposits: HashMap::new(),
+            processed_utxos: HashMap::new(),
+            icrc_receiver: receiver::Receiver::new(q, dummy_principal),
+            user_holdings: Default::default(),
+            channels: Default::default(),
+            liq_pool: LiquidityPool::new(),
+            swaps: HashMap::new(),
+            ln_channels: HashMap::new(),
+            onramp_requests: HashMap::new(),
+            offramp_requests: HashMap::new(),
+            channel_balances: HashMap::new(),
+            total_btc_deposited: 0,
+            total_btc_in_channels: 0,
+            reserved_utxos: HashMap::new(),
+            htlc_manager: HtlcManager::new(),
+            channel_secrets: HashMap::new(),
+            channel_counterparty_pubkeys: HashMap::new(),
+            htlc_tx_details: HashMap::new(),
+            test_onramp_timeout_ns: None,
+            test_offramp_timeout_ns: None,
+            registered_relay: None,
+            onramp_rate_limits: HashMap::new(),
+            offramp_rate_limits: HashMap::new(),
+            stableswap_config: crate::stableswap::StableSwapConfig {
+                amplification: 200,
+                fee_bps: 10,
+                protocol_fee_share_bps: 5000,
+                max_slippage_bps: 500,
+                imbalance_fee_bps: 100,
+            },
+            protocol_fees_ckbtc: 0,
+            admin: None,
+        }
+    }
+
     pub fn new(q: Q, my_principal: Principal) -> Self {
         assert!(my_principal == canister_self());
 
@@ -468,6 +530,7 @@ where
             htlc_manager: HtlcManager::new(),
             // Channel secrets (Phase 2)
             channel_secrets: HashMap::new(),
+            channel_counterparty_pubkeys: HashMap::new(),
             htlc_tx_details: HashMap::new(),
             // Test configuration
             test_onramp_timeout_ns: None,

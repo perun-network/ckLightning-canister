@@ -10,7 +10,7 @@ type EcdsaKey = Vec<u8>;
 
 // In-memory cache for ECDSA public keys. Note: this cache is not persistent across smart contract upgrades.
 thread_local! {
-    static ECDSA_KEY_CACHE: RefCell<HashMap<DerivationPath, EcdsaKey>> = RefCell::new(HashMap::new());
+    pub static ECDSA_KEY_CACHE: RefCell<HashMap<DerivationPath, EcdsaKey>> = RefCell::new(HashMap::new());
 }
 
 /// Retrieves the ECDSA public key for the given derivation path from the ECDSA API.

@@ -1848,3 +1848,193 @@ pub struct WithdrawProtocolFeesResponse {
     pub ckbtc_block_index: Option<Nat>,
     pub error: Option<String>,
 }
+
+// =============================================================================
+// Channel Secret Generation Types (Phase 3: Canister generates secrets)
+// =============================================================================
+
+/// Request to generate channel secrets on the canister.
+///
+/// The canister uses `raw_rand()` to generate a master seed, then derives
+/// all 5 channel secrets via HMAC-SHA256. Secrets never leave the canister.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GenerateChannelSecretsRequest {
+    /// Unique channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+}
+
+/// Response from generating channel secrets.
+///
+/// Contains only public keys — the underlying secrets are stored in canister
+/// state and never exposed.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GenerateChannelSecretsResponse {
+    pub success: bool,
+    /// HTLC basepoint (33 bytes compressed)
+    pub htlc_basepoint: Option<Vec<u8>>,
+    /// Revocation basepoint (33 bytes compressed)
+    pub revocation_basepoint: Option<Vec<u8>>,
+    /// Delayed payment basepoint (33 bytes compressed)
+    pub delayed_payment_basepoint: Option<Vec<u8>>,
+    /// Payment point (33 bytes compressed)
+    pub payment_point: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+/// Request to get a per-commitment point for a specific commitment index.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetPerCommitmentPointRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Commitment number (0-indexed, counting from first commitment)
+    pub idx: u64,
+}
+
+/// Response containing the per-commitment point.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct GetPerCommitmentPointResponse {
+    pub success: bool,
+    /// Per-commitment public key (33 bytes compressed)
+    pub point: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+/// Request to release (reveal) a per-commitment secret.
+///
+/// Called when the counterparty needs the secret for a revoked commitment.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ReleaseCommitmentSecretRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Commitment number to release the secret for
+    pub idx: u64,
+}
+
+/// Response containing the released per-commitment secret.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ReleaseCommitmentSecretResponse {
+    pub success: bool,
+    /// The 32-byte per-commitment secret
+    pub secret: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// Commitment/Justice/HTLC Transaction Signing Types (Phase 3)
+// =============================================================================
+
+/// Request to sign a counterparty commitment transaction.
+///
+/// The canister computes all sighashes itself from the full transaction bytes.
+/// Returns commitment signature (chainkey) + HTLC signatures (local ECDSA).
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignCounterpartyCommitmentRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Full serialized commitment transaction
+    pub commitment_tx_bytes: Vec<u8>,
+    /// Per-commitment point (33 bytes compressed)
+    pub per_commitment_point: Vec<u8>,
+    /// Serialized second-level HTLC transactions
+    pub htlc_tx_bytes: Vec<Vec<u8>>,
+    /// Amount for each HTLC sighash (in satoshis)
+    pub htlc_amounts_sat: Vec<u64>,
+    /// Witness scripts for each HTLC
+    pub htlc_redeemscripts: Vec<Vec<u8>>,
+    /// Channel capacity for funding sighash (in satoshis)
+    pub funding_amount_sat: u64,
+}
+
+/// Response from signing a counterparty commitment.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignCounterpartyCommitmentResponse {
+    pub success: bool,
+    /// Commitment signature (64-byte compact ECDSA from chainkey)
+    pub commitment_sig: Option<Vec<u8>>,
+    /// HTLC signatures (64-byte compact ECDSA each, from local keys)
+    pub htlc_sigs: Option<Vec<Vec<u8>>>,
+    pub error: Option<String>,
+}
+
+/// Request to sign a holder commitment transaction.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHolderCommitmentRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Full serialized commitment transaction
+    pub commitment_tx_bytes: Vec<u8>,
+    /// Channel capacity for funding sighash (in satoshis)
+    pub funding_amount_sat: u64,
+}
+
+/// Response from signing a holder commitment.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHolderCommitmentResponse {
+    pub success: bool,
+    /// Commitment signature (64-byte compact ECDSA from chainkey)
+    pub commitment_sig: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+/// Request to sign a closing transaction.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignClosingTxRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Full serialized closing transaction
+    pub closing_tx_bytes: Vec<u8>,
+    /// Channel capacity for funding sighash (in satoshis)
+    pub funding_amount_sat: u64,
+}
+
+// SignClosingTxResponse reuses SignHolderCommitmentResponse
+
+/// Request to sign a justice (penalty) transaction.
+///
+/// Used to punish a cheating counterparty who broadcasts a revoked commitment.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignJusticeTxRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Full serialized justice transaction
+    pub justice_tx_bytes: Vec<u8>,
+    /// Input index to sign
+    pub input_index: u32,
+    /// Amount of the input being spent (in satoshis)
+    pub amount_sat: u64,
+    /// The revealed per-commitment secret (32 bytes) from the cheating counterparty
+    pub per_commitment_secret: Vec<u8>,
+    /// Witness script for the input being spent
+    pub witness_script: Vec<u8>,
+}
+
+/// Request to sign an HTLC transaction (holder or counterparty).
+///
+/// Used for signing second-level HTLC-Success and HTLC-Timeout transactions.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SignHtlcTxRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Full serialized HTLC transaction
+    pub htlc_tx_bytes: Vec<u8>,
+    /// Input index to sign
+    pub input_index: u32,
+    /// Amount of the input being spent (in satoshis)
+    pub amount_sat: u64,
+    /// Per-commitment point (33 bytes compressed)
+    pub per_commitment_point: Vec<u8>,
+    /// Witness script for the HTLC input
+    pub witness_script: Vec<u8>,
+}
+
+/// Request to register counterparty channel info for a channel.
+///
+/// Stores the counterparty's funding pubkey so the canister can reconstruct
+/// the funding redeemscript for sighash computation.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RegisterChannelInfoRequest {
+    /// Channel identifier (32 bytes)
+    pub channel_keys_id: Vec<u8>,
+    /// Counterparty's funding public key (33 bytes compressed)
+    pub counterparty_funding_pubkey: Vec<u8>,
+}

@@ -10,14 +10,6 @@ type BtcPurpose = variant {
   LiquidityPoolShared;
 };
 type ChannelFunding = record { participant : blob; channel : blob };
-type ChannelSecrets = record {
-  channel_id : blob;
-  delayed_payment_base_secret : blob;
-  htlc_base_secret : blob;
-  commitment_seed : blob;
-  revocation_base_secret : blob;
-  payment_secret : blob;
-};
 type ChannelSecretsInfo = record {
   channel_id : blob;
   has_secrets : bool;
@@ -132,6 +124,15 @@ type FundingLPQueryArgs = record {
   funding_query_sig : blob;
   funding_query : FundingLPQuery;
 };
+type GenerateChannelSecretsRequest = record { channel_keys_id : blob };
+type GenerateChannelSecretsResponse = record {
+  error : opt text;
+  payment_point : opt blob;
+  revocation_basepoint : opt blob;
+  success : bool;
+  htlc_basepoint : opt blob;
+  delayed_payment_basepoint : opt blob;
+};
 type GetBtcBalancesResponse = record {
   msg : SetBtcAddressMsg;
   balances : vec record { principal; opt nat64 };
@@ -150,6 +151,15 @@ type GetOfframpStatusResponse = record {
   error : opt text;
   state : OfframpRequestState;
   amount_sats : nat64;
+};
+type GetPerCommitmentPointRequest = record {
+  idx : nat64;
+  channel_keys_id : blob;
+};
+type GetPerCommitmentPointResponse = record {
+  error : opt text;
+  success : bool;
+  point : opt blob;
 };
 type GetRelayInfoResponse = record {
   "principal" : opt principal;
@@ -340,14 +350,9 @@ type RateLimitStatus = record {
   window_resets_in_seconds : nat64;
 };
 type RegEvent = record { time : nat64; event : Event; chanid : blob };
-type RegisterChannelSecretsRequest = record { secrets : ChannelSecrets };
-type RegisterChannelSecretsResponse = record {
-  error : opt text;
-  payment_point : opt blob;
-  revocation_basepoint : opt blob;
-  success : bool;
-  htlc_basepoint : opt blob;
-  delayed_payment_basepoint : opt blob;
+type RegisterChannelInfoRequest = record {
+  channel_keys_id : blob;
+  counterparty_funding_pubkey : blob;
 };
 type RegisterLnChannelRequest = record {
   channel_id : blob;
@@ -366,6 +371,11 @@ type RegisterSwapRequest = record {
   amount_msat : nat64;
 };
 type RegisteredState = record { state : State; timeout : nat64 };
+type ReleaseCommitmentSecretResponse = record {
+  secret : opt blob;
+  error : opt text;
+  success : bool;
+};
 type Result = variant { Ok; Err : text };
 type Result_1 = variant { Ok; Err : CklError };
 type Result_10 = variant { Ok : SendBtcTxMsg; Err : BtcError };
@@ -423,6 +433,36 @@ type SetLiquidityBtcAddressResponse = record {
   already_existed : bool;
   address : text;
 };
+type SignClosingTxRequest = record {
+  funding_amount_sat : nat64;
+  channel_keys_id : blob;
+  closing_tx_bytes : blob;
+};
+type SignCounterpartyCommitmentRequest = record {
+  htlc_tx_bytes : vec blob;
+  commitment_tx_bytes : blob;
+  per_commitment_point : blob;
+  funding_amount_sat : nat64;
+  channel_keys_id : blob;
+  htlc_redeemscripts : vec blob;
+  htlc_amounts_sat : vec nat64;
+};
+type SignCounterpartyCommitmentResponse = record {
+  error : opt text;
+  commitment_sig : opt blob;
+  success : bool;
+  htlc_sigs : opt vec blob;
+};
+type SignHolderCommitmentRequest = record {
+  commitment_tx_bytes : blob;
+  funding_amount_sat : nat64;
+  channel_keys_id : blob;
+};
+type SignHolderCommitmentResponse = record {
+  error : opt text;
+  commitment_sig : opt blob;
+  success : bool;
+};
 type SignHtlcResponse = record {
   txid : opt blob;
   signed_tx : opt blob;
@@ -435,6 +475,22 @@ type SignHtlcSuccessRequest = record {
   preimage : blob;
 };
 type SignHtlcTimeoutRequest = record { payment_hash : blob; fee_sat : nat64 };
+type SignHtlcTxRequest = record {
+  htlc_tx_bytes : blob;
+  witness_script : blob;
+  per_commitment_point : blob;
+  input_index : nat32;
+  amount_sat : nat64;
+  channel_keys_id : blob;
+};
+type SignJusticeTxRequest = record {
+  per_commitment_secret : blob;
+  witness_script : blob;
+  input_index : nat32;
+  amount_sat : nat64;
+  channel_keys_id : blob;
+  justice_tx_bytes : blob;
+};
 type SignedCandidInvoice = record {
   channel_id : blob;
   payment_hash : blob;
@@ -623,6 +679,17 @@ service : (Network) -> {
   // The transaction is NOT broadcast - it's returned to the relay which passes
   // it to LDK for proper broadcast timing and channel setup.
   __candid_method_fund_channel : (FundChannelRequest) -> (FundChannelResponse);
+  // Generate channel secrets on the canister.
+  // 
+  // The canister uses `raw_rand()` to generate a cryptographic master seed,
+  // then derives all 5 channel secrets via HMAC-SHA256. Secrets never leave
+  // the canister — only public keys are returned.
+  // 
+  // This replaces `register_channel_secrets` where the relay sent secrets
+  // to the canister.
+  __candid_method_generate_channel_secrets : (
+      GenerateChannelSecretsRequest,
+    ) -> (GenerateChannelSecretsResponse);
   __candid_method_get_btc_balance : (opt nat64) -> (Result_2);
   __candid_method_get_btc_liquidity_address_for_caller : () -> (Result_3);
   // Query channel secrets info (public keys only, secrets are never exposed).
@@ -693,6 +760,12 @@ service : (Network) -> {
   __candid_method_get_pending_offramp_requests : () -> (
       vec PendingOfframpRequest,
     ) query;
+  // Get the per-commitment point for a specific commitment index.
+  // 
+  // Pure computation from stored commitment_seed — safe as query.
+  __candid_method_get_per_commitment_point : (GetPerCommitmentPointRequest) -> (
+      GetPerCommitmentPointResponse,
+    ) query;
   // Get the caller's rate limit status.
   // 
   // Returns how many onramp/offramp requests the caller has made in the current
@@ -742,17 +815,13 @@ service : (Network) -> {
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
       Result_9,
     ) query;
-  // Register channel secrets for a Lightning channel.
+  // Register counterparty channel info for a channel.
   // 
-  // Called by the relay when a channel is opened. Stores the secrets in canister
-  // state for later use in HTLC signing operations.
-  // 
-  // Security note: These secrets are stored in canister memory, which is readable
-  // by subnet nodes. This is an accepted tradeoff - the funding key remains on
-  // chainkey (threshold ECDSA) for maximum security.
-  __candid_method_register_channel_secrets : (
-      RegisterChannelSecretsRequest,
-    ) -> (RegisterChannelSecretsResponse);
+  // Stores the counterparty's funding pubkey so the canister can reconstruct
+  // the funding redeemscript for sighash computation during signing.
+  __candid_method_register_channel_info : (RegisterChannelInfoRequest) -> (
+      bool,
+    );
   __candid_method_register_event : (blob, nat64, Event) -> ();
   __candid_method_register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
@@ -783,6 +852,13 @@ service : (Network) -> {
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
   __candid_method_register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
+  // Release (reveal) a per-commitment secret.
+  // 
+  // Returns the raw 32-byte secret for a given commitment index.
+  // Pure computation from stored commitment_seed — safe as query.
+  __candid_method_release_commitment_secret : (
+      GetPerCommitmentPointRequest,
+    ) -> (ReleaseCommitmentSecretResponse) query;
   // Request an offramp (ckBTC → Lightning)
   // 
   // Called by a user who wants to pay a Lightning invoice using their ckBTC.
@@ -831,6 +907,24 @@ service : (Network) -> {
   // Default: onramp=30min, offramp=10min
   // For testing, use small values like 5_000_000_000 (5 seconds)
   __candid_method_set_test_timeouts : (nat64, nat64) -> ();
+  // Sign a cooperative closing transaction.
+  __candid_method_sign_closing_tx : (SignClosingTxRequest) -> (
+      SignHolderCommitmentResponse,
+    );
+  // Sign a counterparty commitment transaction.
+  // 
+  // Returns commitment signature (chainkey ECDSA) and HTLC signatures
+  // (local ECDSA using derived HTLC key). The canister computes all
+  // sighashes itself from full transaction bytes.
+  __candid_method_sign_counterparty_commitment : (
+      SignCounterpartyCommitmentRequest,
+    ) -> (SignCounterpartyCommitmentResponse);
+  // Sign a holder commitment transaction.
+  // 
+  // Returns only the commitment signature (chainkey ECDSA).
+  __candid_method_sign_holder_commitment_v2 : (SignHolderCommitmentRequest) -> (
+      SignHolderCommitmentResponse,
+    );
   // Sign an HTLC-Success transaction (receiver claims with preimage).
   // 
   // Builds the HTLC-Success transaction using stored HTLC details,
@@ -857,13 +951,22 @@ service : (Network) -> {
   __candid_method_sign_htlc_timeout : (SignHtlcTimeoutRequest) -> (
       SignHtlcResponse,
     );
+  // Sign an HTLC transaction (holder or counterparty second-level).
+  // 
+  // Uses the derived HTLC key to sign. Certified by subnet consensus
+  // via `#[update]` even though no chainkey is needed.
+  __candid_method_sign_htlc_tx : (SignHtlcTxRequest) -> (LnSignResponse);
+  // Sign a justice (penalty) transaction.
+  // 
+  // Uses the derived revocation key to sign. Certified by subnet consensus
+  // via `#[update]` even though no chainkey is needed.
+  __candid_method_sign_justice_tx : (SignJusticeTxRequest) -> (LnSignResponse);
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
   // HTLC transactions, or closing transactions. The canister signs using its
   // Lightning funding key derived via chainkey ECDSA.
   __candid_method_sign_ln_message : (LnSignRequest) -> (LnSignResponse);
-  __candid_method_simple_withdraw : (WithdrawalReq) -> (nat);
   // Submit a created invoice for a pending request
   // 
   // Called by the relay after creating a BOLT11 invoice for a pending request.
@@ -997,6 +1100,17 @@ service : (Network) -> {
   // The transaction is NOT broadcast - it's returned to the relay which passes
   // it to LDK for proper broadcast timing and channel setup.
   fund_channel : (FundChannelRequest) -> (FundChannelResponse);
+  // Generate channel secrets on the canister.
+  // 
+  // The canister uses `raw_rand()` to generate a cryptographic master seed,
+  // then derives all 5 channel secrets via HMAC-SHA256. Secrets never leave
+  // the canister — only public keys are returned.
+  // 
+  // This replaces `register_channel_secrets` where the relay sent secrets
+  // to the canister.
+  generate_channel_secrets : (GenerateChannelSecretsRequest) -> (
+      GenerateChannelSecretsResponse,
+    );
   get_btc_balance : (opt nat64) -> (Result_2);
   get_btc_liquidity_address_for_caller : () -> (Result_3);
   // Query channel secrets info (public keys only, secrets are never exposed).
@@ -1068,6 +1182,12 @@ service : (Network) -> {
   // 
   // Called by the relay to find offramp requests that need invoices paid.
   get_pending_offramp_requests : () -> (vec PendingOfframpRequest) query;
+  // Get the per-commitment point for a specific commitment index.
+  // 
+  // Pure computation from stored commitment_seed — safe as query.
+  get_per_commitment_point : (GetPerCommitmentPointRequest) -> (
+      GetPerCommitmentPointResponse,
+    ) query;
   // Get the caller's rate limit status.
   // 
   // Returns how many onramp/offramp requests the caller has made in the current
@@ -1113,17 +1233,11 @@ service : (Network) -> {
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_9) query;
-  // Register channel secrets for a Lightning channel.
+  // Register counterparty channel info for a channel.
   // 
-  // Called by the relay when a channel is opened. Stores the secrets in canister
-  // state for later use in HTLC signing operations.
-  // 
-  // Security note: These secrets are stored in canister memory, which is readable
-  // by subnet nodes. This is an accepted tradeoff - the funding key remains on
-  // chainkey (threshold ECDSA) for maximum security.
-  register_channel_secrets : (RegisterChannelSecretsRequest) -> (
-      RegisterChannelSecretsResponse,
-    );
+  // Stores the counterparty's funding pubkey so the canister can reconstruct
+  // the funding redeemscript for sighash computation during signing.
+  register_channel_info : (RegisterChannelInfoRequest) -> (bool);
   register_event : (blob, nat64, Event) -> ();
   register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
@@ -1150,6 +1264,13 @@ service : (Network) -> {
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
   register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
+  // Release (reveal) a per-commitment secret.
+  // 
+  // Returns the raw 32-byte secret for a given commitment index.
+  // Pure computation from stored commitment_seed — safe as query.
+  release_commitment_secret : (GetPerCommitmentPointRequest) -> (
+      ReleaseCommitmentSecretResponse,
+    ) query;
   // Request an offramp (ckBTC → Lightning)
   // 
   // Called by a user who wants to pay a Lightning invoice using their ckBTC.
@@ -1197,6 +1318,22 @@ service : (Network) -> {
   // Default: onramp=30min, offramp=10min
   // For testing, use small values like 5_000_000_000 (5 seconds)
   set_test_timeouts : (nat64, nat64) -> ();
+  // Sign a cooperative closing transaction.
+  sign_closing_tx : (SignClosingTxRequest) -> (SignHolderCommitmentResponse);
+  // Sign a counterparty commitment transaction.
+  // 
+  // Returns commitment signature (chainkey ECDSA) and HTLC signatures
+  // (local ECDSA using derived HTLC key). The canister computes all
+  // sighashes itself from full transaction bytes.
+  sign_counterparty_commitment : (SignCounterpartyCommitmentRequest) -> (
+      SignCounterpartyCommitmentResponse,
+    );
+  // Sign a holder commitment transaction.
+  // 
+  // Returns only the commitment signature (chainkey ECDSA).
+  sign_holder_commitment_v2 : (SignHolderCommitmentRequest) -> (
+      SignHolderCommitmentResponse,
+    );
   // Sign an HTLC-Success transaction (receiver claims with preimage).
   // 
   // Builds the HTLC-Success transaction using stored HTLC details,
@@ -1219,13 +1356,22 @@ service : (Network) -> {
   // - HTLC must be created via create_htlc_with_tx_details()
   // - Current block height must be >= HTLC's cltv_expiry (enforced by Bitcoin, not here)
   sign_htlc_timeout : (SignHtlcTimeoutRequest) -> (SignHtlcResponse);
+  // Sign an HTLC transaction (holder or counterparty second-level).
+  // 
+  // Uses the derived HTLC key to sign. Certified by subnet consensus
+  // via `#[update]` even though no chainkey is needed.
+  sign_htlc_tx : (SignHtlcTxRequest) -> (LnSignResponse);
+  // Sign a justice (penalty) transaction.
+  // 
+  // Uses the derived revocation key to sign. Certified by subnet consensus
+  // via `#[update]` even though no chainkey is needed.
+  sign_justice_tx : (SignJusticeTxRequest) -> (LnSignResponse);
   // Sign a message hash for Lightning channel operations
   // 
   // Called by the relay when it needs a signature for commitment transactions,
   // HTLC transactions, or closing transactions. The canister signs using its
   // Lightning funding key derived via chainkey ECDSA.
   sign_ln_message : (LnSignRequest) -> (LnSignResponse);
-  simple_withdraw : (WithdrawalReq) -> (nat);
   size : () -> (nat64) query;
   // Submit a created invoice for a pending request
   // 

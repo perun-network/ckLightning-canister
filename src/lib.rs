@@ -61,12 +61,21 @@ use crate::ic_types::{
     FulfillHtlcRequest, FulfillHtlcResponse,
     TimeoutHtlcRequest, TimeoutHtlcResponse,
     HtlcInfo,
-    // Channel secrets types (Phase 2)
-    ChannelSecrets, RegisterChannelSecretsRequest, RegisterChannelSecretsResponse,
+    // Channel secrets types
     ChannelSecretsInfo,
     // HTLC signing types (Phase 2)
     CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
     SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
+    // Channel secret generation types (Phase 3)
+    GenerateChannelSecretsRequest, GenerateChannelSecretsResponse,
+    GetPerCommitmentPointRequest, GetPerCommitmentPointResponse,
+    ReleaseCommitmentSecretRequest, ReleaseCommitmentSecretResponse,
+    RegisterChannelInfoRequest,
+    // Commitment/justice/HTLC signing types (Phase 3 + 4)
+    SignCounterpartyCommitmentRequest, SignCounterpartyCommitmentResponse,
+    SignHolderCommitmentRequest, SignHolderCommitmentResponse,
+    SignClosingTxRequest,
+    SignJusticeTxRequest, SignHtlcTxRequest,
     // Relay registration types
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
     // Rate limiting types

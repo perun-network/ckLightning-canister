@@ -39,10 +39,16 @@ use crate::canister_state::{
     // HTLC functions
     create_htlc_impl, fulfill_htlc_impl, timeout_htlc_impl,
     get_htlc_impl, get_pending_htlcs_impl,
-    // Channel secrets functions (Phase 2)
-    register_channel_secrets_impl, get_channel_secrets_info_impl,
+    // Channel secrets functions
+    get_channel_secrets_info_impl,
     // HTLC signing functions (Phase 2)
     create_htlc_with_tx_details_impl, sign_htlc_success_impl, sign_htlc_timeout_impl,
+    // Channel secret generation (Phase 3: canister generates secrets)
+    generate_channel_secrets_impl, get_per_commitment_point_impl,
+    release_commitment_secret_impl, register_channel_info_impl,
+    // Commitment/justice/HTLC signing (Phase 3 + 4)
+    sign_counterparty_commitment_impl, sign_holder_commitment_impl,
+    sign_closing_tx_impl, sign_justice_tx_impl, sign_htlc_tx_impl,
     // Swap timeout handling
     check_expired_swaps_impl, get_expired_swap_counts,
     set_test_timeouts_impl, get_timeout_values_impl,
@@ -70,12 +76,21 @@ use crate::ic_types::{
     FulfillHtlcRequest, FulfillHtlcResponse,
     TimeoutHtlcRequest, TimeoutHtlcResponse,
     HtlcInfo,
-    // Channel secrets types (Phase 2)
-    RegisterChannelSecretsRequest, RegisterChannelSecretsResponse,
+    // Channel secrets types
     ChannelSecretsInfo,
     // HTLC signing types (Phase 2)
     CreateHtlcWithTxDetailsRequest, CreateHtlcWithTxDetailsResponse,
     SignHtlcSuccessRequest, SignHtlcTimeoutRequest, SignHtlcResponse,
+    // Channel secret generation types (Phase 3)
+    GenerateChannelSecretsRequest, GenerateChannelSecretsResponse,
+    GetPerCommitmentPointRequest, GetPerCommitmentPointResponse,
+    ReleaseCommitmentSecretRequest, ReleaseCommitmentSecretResponse,
+    RegisterChannelInfoRequest,
+    // Commitment/justice/HTLC signing types (Phase 3 + 4)
+    SignCounterpartyCommitmentRequest, SignCounterpartyCommitmentResponse,
+    SignHolderCommitmentRequest, SignHolderCommitmentResponse,
+    SignClosingTxRequest,
+    SignJusticeTxRequest, SignHtlcTxRequest,
 };
 use crate::error::{BtcError, CklError};
 use crate::ic_types::LnInvoiceRequest;
@@ -83,7 +98,7 @@ use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
     BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
-    DEVNET_CKBTC_LEDGER, FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
+    FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
     HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
     NotifyArgs, QueryBtcAddressResponse, QueryLnChannelRequest, QueryLnChannelsResponse,
     RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
@@ -110,12 +125,9 @@ use crate::ic_types::{
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
-use ic_cdk::api::call::CallResult;
 use ic_cdk::query;
 use ic_cdk::update;
 use ic_cdk::heartbeat;
-use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 #[update]
 #[candid_method(update)]
@@ -214,83 +226,6 @@ fn deposit_lp(funding: FundingLPArgs) -> Result<(), CklError> {
 #[candid_method(query)]
 fn query_state(id: ChannelId) -> Option<RegisteredState> {
     query_state_impl(id)
-}
-
-#[update]
-#[candid::candid_method]
-async fn simple_withdraw(req: WithdrawalReq) -> Nat {
-    let receiver = req.receiver;
-    let amount_nat = req.amount;
-
-    let transfer_arg = TransferArg {
-        from_subaccount: None,
-        to: Account {
-            owner: receiver,
-            subaccount: None,
-        },
-        amount: amount_nat.clone(),
-        fee: Some(Nat(1000u64.into())), // ckBTC fee
-        memo: None,
-        created_at_time: None,
-    };
-
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
-
-    let call_result: CallResult<(
-        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
-        Ok((inner_result,)) => match inner_result {
-            Ok(block_height) => Nat::from(block_height),
-            Err(e) => match e {
-                icrc_ledger_types::icrc1::transfer::TransferError::BadFee { expected_fee } => {
-                    ic_cdk::println!("BadFee: expected_fee = {:?}", expected_fee);
-                    Nat::from(111u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::BadBurn { min_burn_amount } => {
-                    ic_cdk::println!("BadBurn: min_burn_amount = {:?}", min_burn_amount);
-                    Nat::from(112u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::InsufficientFunds {
-                    balance,
-                } => {
-                    ic_cdk::println!("InsufficientFunds: balance = {:?}", balance);
-                    Nat::from(222u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::TooOld => Nat::from(333u32),
-                icrc_ledger_types::icrc1::transfer::TransferError::CreatedInFuture {
-                    ledger_time,
-                } => {
-                    ic_cdk::println!("CreatedInFuture: ledger_time = {:?}", ledger_time);
-                    Nat::from(444u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::TemporarilyUnavailable => {
-                    ic_cdk::println!("TemporarilyUnavailable");
-                    Nat::from(666u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::Duplicate { duplicate_of } => {
-                    ic_cdk::println!("Duplicate: duplicate_of = {:?}", duplicate_of);
-                    Nat::from(555u32)
-                }
-                icrc_ledger_types::icrc1::transfer::TransferError::GenericError {
-                    error_code,
-                    message,
-                } => {
-                    ic_cdk::println!(
-                        "GenericError: code = {:?}, message = {}",
-                        error_code,
-                        message
-                    );
-                    Nat::from(777u32)
-                }
-            },
-        },
-        Err(e) => {
-            ic_cdk::println!("CallResult error: {:?}", e);
-            Nat::from(999u32) // Generic call error
-        }
-    }
 }
 
 #[update]
@@ -756,22 +691,8 @@ fn get_pending_htlcs() -> Vec<HtlcInfo> {
 }
 
 // =============================================================================
-// Channel Secrets Endpoints (Phase 2)
+// Channel Secrets Endpoints
 // =============================================================================
-
-/// Register channel secrets for a Lightning channel.
-///
-/// Called by the relay when a channel is opened. Stores the secrets in canister
-/// state for later use in HTLC signing operations.
-///
-/// Security note: These secrets are stored in canister memory, which is readable
-/// by subnet nodes. This is an accepted tradeoff - the funding key remains on
-/// chainkey (threshold ECDSA) for maximum security.
-#[update]
-#[candid_method(update)]
-fn register_channel_secrets(request: RegisterChannelSecretsRequest) -> RegisterChannelSecretsResponse {
-    register_channel_secrets_impl(request)
-}
 
 /// Query channel secrets info (public keys only, secrets are never exposed).
 #[query]
@@ -976,6 +897,120 @@ fn update_stableswap_config(request: UpdateStableSwapConfigRequest) -> UpdateSta
 async fn withdraw_protocol_fees(recipient: Principal) -> WithdrawProtocolFeesResponse {
     withdraw_protocol_fees_impl(recipient).await
 }
+
+// =============================================================================
+// Channel Secret Generation Endpoints (Phase 3: Canister generates secrets)
+// =============================================================================
+
+/// Generate channel secrets on the canister.
+///
+/// The canister uses `raw_rand()` to generate a cryptographic master seed,
+/// then derives all 5 channel secrets via HMAC-SHA256. Secrets never leave
+/// the canister — only public keys are returned.
+///
+/// This replaces `register_channel_secrets` where the relay sent secrets
+/// to the canister.
+#[update]
+#[candid_method(update)]
+async fn generate_channel_secrets(
+    request: GenerateChannelSecretsRequest,
+) -> GenerateChannelSecretsResponse {
+    generate_channel_secrets_impl(request).await
+}
+
+/// Get the per-commitment point for a specific commitment index.
+///
+/// Pure computation from stored commitment_seed — safe as query.
+#[query]
+#[candid_method(query)]
+fn get_per_commitment_point(request: GetPerCommitmentPointRequest) -> GetPerCommitmentPointResponse {
+    get_per_commitment_point_impl(request)
+}
+
+/// Release (reveal) a per-commitment secret.
+///
+/// Returns the raw 32-byte secret for a given commitment index.
+/// Pure computation from stored commitment_seed — safe as query.
+#[query]
+#[candid_method(query)]
+fn release_commitment_secret(
+    request: ReleaseCommitmentSecretRequest,
+) -> ReleaseCommitmentSecretResponse {
+    release_commitment_secret_impl(request)
+}
+
+/// Register counterparty channel info for a channel.
+///
+/// Stores the counterparty's funding pubkey so the canister can reconstruct
+/// the funding redeemscript for sighash computation during signing.
+#[update]
+#[candid_method(update)]
+fn register_channel_info(request: RegisterChannelInfoRequest) -> bool {
+    register_channel_info_impl(request)
+}
+
+// =============================================================================
+// Commitment Signing Endpoints (Phase 3)
+// =============================================================================
+
+/// Sign a counterparty commitment transaction.
+///
+/// Returns commitment signature (chainkey ECDSA) and HTLC signatures
+/// (local ECDSA using derived HTLC key). The canister computes all
+/// sighashes itself from full transaction bytes.
+#[update]
+#[candid_method(update)]
+async fn sign_counterparty_commitment(
+    request: SignCounterpartyCommitmentRequest,
+) -> SignCounterpartyCommitmentResponse {
+    sign_counterparty_commitment_impl(request).await
+}
+
+/// Sign a holder commitment transaction.
+///
+/// Returns only the commitment signature (chainkey ECDSA).
+#[update]
+#[candid_method(update)]
+async fn sign_holder_commitment_v2(
+    request: SignHolderCommitmentRequest,
+) -> SignHolderCommitmentResponse {
+    sign_holder_commitment_impl(request).await
+}
+
+/// Sign a cooperative closing transaction.
+#[update]
+#[candid_method(update)]
+async fn sign_closing_tx(request: SignClosingTxRequest) -> SignHolderCommitmentResponse {
+    sign_closing_tx_impl(request).await
+}
+
+// =============================================================================
+// Justice + HTLC Transaction Signing Endpoints (Phase 4)
+// =============================================================================
+
+/// Sign a justice (penalty) transaction.
+///
+/// Uses the derived revocation key to sign. Certified by subnet consensus
+/// via `#[update]` even though no chainkey is needed.
+#[update]
+#[candid_method(update)]
+fn sign_justice_tx(request: SignJusticeTxRequest) -> LnSignResponse {
+    sign_justice_tx_impl(request)
+}
+
+/// Sign an HTLC transaction (holder or counterparty second-level).
+///
+/// Uses the derived HTLC key to sign. Certified by subnet consensus
+/// via `#[update]` even though no chainkey is needed.
+#[update]
+#[candid_method(update)]
+fn sign_htlc_tx(request: SignHtlcTxRequest) -> LnSignResponse {
+    sign_htlc_tx_impl(request)
+}
+
+// =============================================================================
+// Admin Endpoints
+// =============================================================================
 
 /// Set the admin principal (controller-only).
 ///
