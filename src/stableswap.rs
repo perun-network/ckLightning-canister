@@ -48,6 +48,12 @@ pub struct StableSwapConfig {
     /// The effective fee interpolates between fee_bps (balanced pool) and
     /// imbalance_fee_bps (fully imbalanced pool).
     pub imbalance_fee_bps: u64,
+    /// Maximum rebate at full rebalance, in basis points. 0 = disabled.
+    /// When a swap moves the pool closer to balance, the user receives a rebate
+    /// (negative fee) that scales with how much the swap improves balance.
+    pub rebate_bps: u64,
+    /// Max single swap as % of output pool in bps. 0 = disabled, 1000 = 10%.
+    pub max_swap_pct_bps: u64,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize, PartialEq, Eq)]
@@ -68,6 +74,9 @@ pub struct SwapResult {
     pub protocol_fee: u64,
     /// Price impact in basis points.
     pub price_impact_bps: u64,
+    /// Rebate amount (when swap rebalances the pool and rebate_bps > 0).
+    /// This amount is already included in output_amount.
+    pub rebate_amount: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +88,7 @@ pub enum StableSwapError {
     Overflow,
     ZeroAmplification,
     SlippageExceeded { price_impact_bps: u64, max_slippage_bps: u64 },
+    SwapSizeExceeded { swap_pct_bps: u64, max_swap_pct_bps: u64 },
 }
 
 impl std::fmt::Display for StableSwapError {
@@ -92,6 +102,9 @@ impl std::fmt::Display for StableSwapError {
             StableSwapError::ZeroAmplification => write!(f, "Amplification must be > 0"),
             StableSwapError::SlippageExceeded { price_impact_bps, max_slippage_bps } => {
                 write!(f, "Slippage exceeded: price impact {} bps > max {} bps", price_impact_bps, max_slippage_bps)
+            }
+            StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps } => {
+                write!(f, "Swap size exceeded: {} bps of output pool > max {} bps", swap_pct_bps, max_swap_pct_bps)
             }
         }
     }
@@ -264,12 +277,8 @@ pub fn compute_y(x_new: u128, d: u128, amp: u128) -> Result<u128, StableSwapErro
 /// Compute the effective fee in basis points, interpolating between
 /// `fee_bps` (balanced pool) and `imbalance_fee_bps` (fully imbalanced pool).
 ///
-/// Formula: `effective = fee_bps + (imbalance_fee_bps - fee_bps) * |x - y| / (x + y)`
-///
-/// Returns `fee_bps` when:
-/// - The pool is perfectly balanced (x == y)
-/// - `imbalance_fee_bps <= fee_bps` (dynamic fee disabled)
-/// - Either balance is zero (avoid division issues, fall back to base fee)
+/// This is the legacy direction-unaware version used for initial estimates.
+/// For the full direction-aware computation, use `compute_effective_fee`.
 ///
 /// Capped at 10,000 bps (100%).
 pub fn compute_effective_fee_bps(config: &StableSwapConfig, x: u128, y: u128) -> u64 {
@@ -295,6 +304,73 @@ pub fn compute_effective_fee_bps(config: &StableSwapConfig, x: u128, y: u128) ->
 
     // Cap at 10,000 bps
     std::cmp::min(effective, 10_000) as u64
+}
+
+/// Direction-aware fee computation that accounts for pool rebalancing.
+///
+/// Uses pre-swap and post-swap balances to determine if the swap improves
+/// or worsens pool balance:
+///
+/// - **Imbalancing** (pool gets worse): fee scales from `fee_bps` up to
+///   `imbalance_fee_bps` based on post-swap imbalance.
+/// - **Rebalancing** (pool gets better): fee scales from `fee_bps` down to
+///   `-rebate_bps` based on improvement ratio. Negative = rebate to user.
+///
+/// Returns signed bps: positive = fee, negative = rebate.
+pub fn compute_effective_fee(
+    config: &StableSwapConfig,
+    x_before: u128,
+    y_before: u128,
+    x_after: u128,
+    y_after: u128,
+) -> i64 {
+    let base = config.fee_bps as i128;
+    let max_fee = config.imbalance_fee_bps as i128;
+    let rebate = config.rebate_bps as i128;
+
+    let sum_before = x_before.saturating_add(y_before);
+    let sum_after = x_after.saturating_add(y_after);
+
+    if sum_before == 0 || sum_after == 0 {
+        return config.fee_bps as i64;
+    }
+
+    // Imbalance in bps (0..10000)
+    let diff_before = if x_before > y_before { x_before - y_before } else { y_before - x_before };
+    let diff_after = if x_after > y_after { x_after - y_after } else { y_after - x_after };
+
+    let imb_before = (diff_before * 10_000 / sum_before) as i128;
+    let imb_after = (diff_after * 10_000 / sum_after) as i128;
+
+    if imb_after >= imb_before {
+        // Pool got worse (imbalancing) — charge higher fee based on post-swap imbalance
+        let effective = if max_fee <= base {
+            base
+        } else {
+            base + (max_fee - base) * imb_after / 10_000
+        };
+        std::cmp::min(effective, 10_000) as i64
+    } else {
+        // Pool got better (rebalancing) — apply rebate if enabled
+        if rebate == 0 {
+            return config.fee_bps as i64;
+        }
+
+        // improvement = how much of the imbalance was removed, 0..10000
+        let improvement = if imb_before == 0 {
+            0i128
+        } else {
+            (imb_before - imb_after) * 10_000 / imb_before
+        };
+
+        // Linear interpolation: fee_bps at improvement=0, -rebate_bps at improvement=10000
+        // effective = fee_bps - (fee_bps + rebate_bps) * improvement / 10000
+        let effective = base - (base + rebate) * improvement / 10_000;
+
+        // Clamp to [-rebate_bps, fee_bps]
+        let clamped = effective.max(-(rebate)).min(base);
+        clamped as i64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,26 +434,47 @@ pub fn get_swap_output(
         return Err(StableSwapError::InputTooLarge);
     }
 
-    // Apply dynamic fee (interpolates between fee_bps and imbalance_fee_bps)
-    let effective_fee = compute_effective_fee_bps(config, x, y) as u128;
-    let total_fee = raw_output
-        .checked_mul(effective_fee)
-        .ok_or(StableSwapError::Overflow)?
-        / 10_000;
+    // Direction-aware fee: uses pre-swap and post-swap balances
+    let effective_fee_signed = compute_effective_fee(config, x, y, x_new, y_new);
 
-    let output_after_fee = raw_output
-        .checked_sub(total_fee)
-        .ok_or(StableSwapError::Overflow)?;
+    let (output_after_fee, total_fee, protocol_fee, lp_fee, rebate_amount) = if effective_fee_signed >= 0 {
+        // Positive fee path (normal or imbalancing swap)
+        let fee_bps = effective_fee_signed as u128;
+        let total_fee = raw_output
+            .checked_mul(fee_bps)
+            .ok_or(StableSwapError::Overflow)?
+            / 10_000;
 
-    // Split fee between LP and protocol
-    let protocol_share_bps = config.protocol_fee_share_bps as u128;
-    let protocol_fee = total_fee
-        .checked_mul(protocol_share_bps)
-        .ok_or(StableSwapError::Overflow)?
-        / 10_000;
-    let lp_fee = total_fee
-        .checked_sub(protocol_fee)
-        .ok_or(StableSwapError::Overflow)?;
+        let output_after_fee = raw_output
+            .checked_sub(total_fee)
+            .ok_or(StableSwapError::Overflow)?;
+
+        // Split fee between LP and protocol
+        let protocol_share_bps = config.protocol_fee_share_bps as u128;
+        let protocol_fee = total_fee
+            .checked_mul(protocol_share_bps)
+            .ok_or(StableSwapError::Overflow)?
+            / 10_000;
+        let lp_fee = total_fee
+            .checked_sub(protocol_fee)
+            .ok_or(StableSwapError::Overflow)?;
+
+        (output_after_fee, total_fee, protocol_fee, lp_fee, 0u128)
+    } else {
+        // Negative fee path (rebate — user gets MORE than raw AMM output)
+        let rebate_bps = (-effective_fee_signed) as u128;
+        let rebate = raw_output
+            .checked_mul(rebate_bps)
+            .ok_or(StableSwapError::Overflow)?
+            / 10_000;
+
+        let output_with_rebate = raw_output
+            .checked_add(rebate)
+            .ok_or(StableSwapError::Overflow)?;
+
+        // No fees when rebate is active — rebate is paid by LPs
+        (output_with_rebate, 0u128, 0u128, 0u128, rebate)
+    };
 
     // Price impact: compare effective rate vs 1:1
     // price_impact_bps = (1 - output/input) * 10000
@@ -403,12 +500,25 @@ pub fn get_swap_output(
         });
     }
 
+    // Max swap size check (0 = disabled)
+    // raw_output as % of output pool (y)
+    if config.max_swap_pct_bps > 0 {
+        let swap_pct = (raw_output * 10_000) / y;
+        if swap_pct as u64 > config.max_swap_pct_bps {
+            return Err(StableSwapError::SwapSizeExceeded {
+                swap_pct_bps: swap_pct as u64,
+                max_swap_pct_bps: config.max_swap_pct_bps,
+            });
+        }
+    }
+
     Ok(SwapResult {
         output_amount: output_after_fee as u64,
         total_fee: total_fee as u64,
         lp_fee: lp_fee as u64,
         protocol_fee: protocol_fee as u64,
         price_impact_bps: impact,
+        rebate_amount: rebate_amount as u64,
     })
 }
 
@@ -451,33 +561,72 @@ pub fn get_swap_input(
     let output = desired_output as u128;
     let amp = config.amplification as u128;
 
-    // The user wants `output` after fees.
-    // raw_output = output / (1 - effective_fee/10000) = output * 10000 / (10000 - effective_fee)
-    let effective_fee = compute_effective_fee_bps(config, x, y) as u128;
-    let denom = 10_000u128
-        .checked_sub(effective_fee)
-        .ok_or(StableSwapError::Overflow)?;
-    if denom == 0 {
-        return Err(StableSwapError::Overflow);
+    // Step 1: Initial estimate using pre-swap fee (direction-unaware)
+    let initial_fee_bps = compute_effective_fee_bps(config, x, y) as i128;
+
+    // For initial estimate, check if pool is imbalanced and swap direction helps
+    // We'll iterate to refine with actual post-swap balances
+    let est_raw_output = if initial_fee_bps > 0 {
+        // raw_output = output * 10000 / (10000 - fee)
+        let denom = 10_000i128 - initial_fee_bps;
+        if denom <= 0 {
+            return Err(StableSwapError::Overflow);
+        }
+        (output as i128 * 10_000 + denom - 1) as u128 / denom as u128
+    } else {
+        output
+    };
+
+    if est_raw_output >= y {
+        return Err(StableSwapError::InputTooLarge);
     }
-    let raw_output = output
-        .checked_mul(10_000)
-        .ok_or(StableSwapError::Overflow)?
-        .checked_add(denom - 1) // Round up
-        .ok_or(StableSwapError::Overflow)?
-        / denom;
+
+    // Step 2: Compute actual post-swap balances and refine
+    let d = compute_d(x, y, amp)?;
+
+    let y_new_est = y.checked_sub(est_raw_output).ok_or(StableSwapError::Overflow)?;
+    let x_new_est = compute_y(y_new_est, d, amp)?;
+
+    // Now compute direction-aware fee with actual post-swap balances
+    let effective_fee_signed = compute_effective_fee(config, x, y, x_new_est, y_new_est);
+
+    // Recompute raw_output with the refined fee
+    let (raw_output, rebate_amount) = if effective_fee_signed >= 0 {
+        // Positive fee: raw_output = output * 10000 / (10000 - fee)
+        let fee_bps = effective_fee_signed as u128;
+        let denom = 10_000u128.checked_sub(fee_bps).ok_or(StableSwapError::Overflow)?;
+        if denom == 0 {
+            return Err(StableSwapError::Overflow);
+        }
+        let raw = output
+            .checked_mul(10_000)
+            .ok_or(StableSwapError::Overflow)?
+            .checked_add(denom - 1)
+            .ok_or(StableSwapError::Overflow)?
+            / denom;
+        (raw, 0u128)
+    } else {
+        // Negative fee (rebate): user gets output = raw_output + rebate
+        // output = raw_output * (10000 + |fee|) / 10000
+        // raw_output = output * 10000 / (10000 + |fee|)
+        let rebate_bps = (-effective_fee_signed) as u128;
+        let denom = 10_000u128.checked_add(rebate_bps).ok_or(StableSwapError::Overflow)?;
+        let raw = output
+            .checked_mul(10_000)
+            .ok_or(StableSwapError::Overflow)?
+            .checked_add(denom - 1)
+            .ok_or(StableSwapError::Overflow)?
+            / denom;
+        let rebate = output.saturating_sub(raw);
+        (raw, rebate)
+    };
 
     if raw_output >= y {
         return Err(StableSwapError::InputTooLarge);
     }
 
     // y_new = y - raw_output
-    let y_new = y
-        .checked_sub(raw_output)
-        .ok_or(StableSwapError::Overflow)?;
-
-    // Current invariant
-    let d = compute_d(x, y, amp)?;
+    let y_new = y.checked_sub(raw_output).ok_or(StableSwapError::Overflow)?;
 
     // Solve for x_new given y_new and D
     let x_new = compute_y(y_new, d, amp)?;
@@ -488,19 +637,20 @@ pub fn get_swap_input(
         return Err(StableSwapError::ZeroInput);
     }
 
-    // Compute actual fees from raw_output
-    let total_fee = raw_output
-        .checked_sub(output)
-        .ok_or(StableSwapError::Overflow)?;
-
-    let protocol_share_bps = config.protocol_fee_share_bps as u128;
-    let protocol_fee = total_fee
-        .checked_mul(protocol_share_bps)
-        .ok_or(StableSwapError::Overflow)?
-        / 10_000;
-    let lp_fee = total_fee
-        .checked_sub(protocol_fee)
-        .ok_or(StableSwapError::Overflow)?;
+    // Compute actual fees
+    let (total_fee, protocol_fee, lp_fee) = if effective_fee_signed >= 0 {
+        let total_fee = raw_output.checked_sub(output).ok_or(StableSwapError::Overflow)?;
+        let protocol_share_bps = config.protocol_fee_share_bps as u128;
+        let protocol_fee = total_fee
+            .checked_mul(protocol_share_bps)
+            .ok_or(StableSwapError::Overflow)?
+            / 10_000;
+        let lp_fee = total_fee.checked_sub(protocol_fee).ok_or(StableSwapError::Overflow)?;
+        (total_fee, protocol_fee, lp_fee)
+    } else {
+        // Rebate: no fees
+        (0u128, 0u128, 0u128)
+    };
 
     // Price impact
     let price_impact_bps = if input > 0 && output <= input {
@@ -521,12 +671,25 @@ pub fn get_swap_input(
         });
     }
 
+    // Max swap size check (0 = disabled)
+    // raw_output as % of output pool (y)
+    if config.max_swap_pct_bps > 0 {
+        let swap_pct = (raw_output * 10_000) / y;
+        if swap_pct as u64 > config.max_swap_pct_bps {
+            return Err(StableSwapError::SwapSizeExceeded {
+                swap_pct_bps: swap_pct as u64,
+                max_swap_pct_bps: config.max_swap_pct_bps,
+            });
+        }
+    }
+
     Ok(SwapResult {
         output_amount: input as u64, // For get_swap_input, output_amount is the required input
         total_fee: total_fee as u64,
         lp_fee: lp_fee as u64,
         protocol_fee: protocol_fee as u64,
         price_impact_bps: impact,
+        rebate_amount: rebate_amount as u64,
     })
 }
 
@@ -545,6 +708,8 @@ mod tests {
             protocol_fee_share_bps: 5000, // 50% of fee to protocol
             max_slippage_bps: 500,     // 5% — reject swaps with extreme price impact
             imbalance_fee_bps: 100,    // 1% at full imbalance (10x base fee)
+            rebate_bps: 0,             // disabled by default
+            max_swap_pct_bps: 0,       // disabled by default
         }
     }
 
@@ -621,6 +786,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: lots of BTC, less ckBTC
@@ -644,6 +811,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced: lots of ckBTC, less BTC
@@ -666,6 +835,8 @@ mod tests {
             protocol_fee_share_bps: 3000, // 30% of fee to protocol
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,    // same as fee_bps
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let btc_bal = 10_000_000u64;
@@ -691,6 +862,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let btc_bal = 5_000_000u64;
@@ -782,6 +955,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let bal = 5_000_000u64;
         let input = 100_000u64;
@@ -800,6 +975,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let high_amp = StableSwapConfig {
             amplification: 1000,
@@ -807,6 +984,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Imbalanced pool
@@ -835,6 +1014,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 5,      // very tight: 0.05%
             imbalance_fee_bps: 10,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         // Heavily imbalanced pool
         let btc_bal = 2_000_000u64;
@@ -860,6 +1041,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 50,      // 0.5% limit
             imbalance_fee_bps: 10,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let btc_bal = 10_000_000u64;
         let ckbtc_bal = 10_000_000u64;
@@ -879,6 +1062,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,       // disabled
             imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         // Very imbalanced pool
         let btc_bal = 5_000_000u64;
@@ -899,6 +1084,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 0,
             imbalance_fee_bps: 100,    // 1% at max imbalance
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Balanced pool
@@ -925,6 +1112,8 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 500,    // very high at max imbalance
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let effective = compute_effective_fee_bps(&config, 1_000_000, 1_000_000);
@@ -940,6 +1129,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 0,
             imbalance_fee_bps: 30,     // same as fee_bps
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         let effective_balanced = compute_effective_fee_bps(&config, 5_000_000, 5_000_000);
@@ -957,6 +1148,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 0,
             imbalance_fee_bps: 50,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let btc_bal = 5_000_000u64;
         let ckbtc_bal = 5_000_000u64;
@@ -982,6 +1175,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 0,       // disabled for this test
             imbalance_fee_bps: 10,     // same as fee_bps → no dynamic effect
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         let input = 10_000u64;
 
@@ -1019,6 +1214,8 @@ mod tests {
             protocol_fee_share_bps: 5000,
             max_slippage_bps: 0,
             imbalance_fee_bps: 110,     // 1.1% at max imbalance
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
 
         // Balanced: effective = fee_bps = 10
@@ -1046,7 +1243,284 @@ mod tests {
             protocol_fee_share_bps: 0,
             max_slippage_bps: 0,
             imbalance_fee_bps: 30,     // less than fee_bps
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
         };
         assert_eq!(compute_effective_fee_bps(&config_no_dynamic, 9_000, 1_000), 50);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rebate tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rebate_rebalancing_swap_gets_bonus() {
+        // Pool is heavily imbalanced: lots of ckBTC, very little BTC
+        // Large swap BTC → ckBTC that significantly rebalances the pool
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 10,               // 0.1% base fee
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,            // 0.2% max rebate
+            max_swap_pct_bps: 0,
+        };
+
+        // Very imbalanced: 100k BTC / 2M ckBTC
+        // A large swap that strongly rebalances
+        let btc_bal = 100_000u64;
+        let ckbtc_bal = 2_000_000u64;
+        let input = 900_000u64; // huge rebalance — brings pool close to 1M/1M
+
+        let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc).unwrap();
+
+        // With a strong rebalancing swap, the improvement ratio should be high enough
+        // to push effective_fee negative, resulting in a rebate
+        assert!(result.rebate_amount > 0,
+            "Strong rebalancing swap should get rebate, got rebate_amount={}", result.rebate_amount);
+        // Fees should be zero when rebate is active
+        assert_eq!(result.total_fee, 0, "No fee when rebate is active");
+        assert_eq!(result.protocol_fee, 0);
+        assert_eq!(result.lp_fee, 0);
+    }
+
+    #[test]
+    fn test_rebate_imbalancing_swap_gets_higher_fee() {
+        // Pool is imbalanced: lots of ckBTC, less BTC
+        // Swapping ckBTC → BTC (adding to oversupplied ckBTC side) should get higher fee
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,
+            max_swap_pct_bps: 0,
+        };
+
+        // Imbalanced: 500k BTC / 2M ckBTC
+        let btc_bal = 500_000u64;
+        let ckbtc_bal = 2_000_000u64;
+        let input = 100_000u64;
+
+        // ckBTC → BTC: making imbalance worse
+        let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::CkbtcToBtc).unwrap();
+
+        // Should have positive fee (no rebate)
+        assert!(result.total_fee > 0, "Imbalancing swap should have fee");
+        assert_eq!(result.rebate_amount, 0, "No rebate for imbalancing swap");
+        // Fee should be higher than base fee (30 bps on input)
+        let base_fee_approx = input as u64 * 30 / 10_000;
+        assert!(result.total_fee > base_fee_approx,
+            "Fee {} should be > base fee {}", result.total_fee, base_fee_approx);
+    }
+
+    #[test]
+    fn test_rebate_balanced_pool_gets_base_fee() {
+        // Balanced pool — swap makes it slightly imbalanced, should get base fee
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,
+            max_swap_pct_bps: 0,
+        };
+
+        // Balanced: 5M / 5M
+        let btc_bal = 5_000_000u64;
+        let ckbtc_bal = 5_000_000u64;
+        let input = 100_000u64;
+
+        let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc).unwrap();
+
+        // Balanced → any swap makes it slightly imbalanced → should get positive fee
+        assert!(result.total_fee > 0, "Balanced pool swap should have positive fee");
+        assert_eq!(result.rebate_amount, 0, "No rebate when pool starts balanced");
+    }
+
+    #[test]
+    fn test_rebate_disabled_when_zero() {
+        // rebate_bps = 0 → no rebate even for rebalancing swaps
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 0,            // disabled
+            max_swap_pct_bps: 0,
+        };
+
+        // Imbalanced: 500k BTC / 2M ckBTC, swap BTC → ckBTC (rebalancing)
+        let btc_bal = 500_000u64;
+        let ckbtc_bal = 2_000_000u64;
+        let input = 100_000u64;
+
+        let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc).unwrap();
+
+        // Should have positive fee even though swap rebalances
+        assert!(result.total_fee > 0, "Should charge fee when rebate disabled");
+        assert_eq!(result.rebate_amount, 0, "No rebate when rebate_bps=0");
+    }
+
+    #[test]
+    fn test_rebate_overshoot_partial_improvement() {
+        // Swap that overshoots balance (starts imbalanced one way, ends imbalanced the other)
+        // Should still get partial rebate based on improvement
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,
+            max_swap_pct_bps: 0,
+        };
+
+        // Heavily imbalanced: 200k BTC / 2M ckBTC
+        let btc_bal = 200_000u64;
+        let ckbtc_bal = 2_000_000u64;
+
+        // Large swap that will overshoot and make BTC > ckBTC
+        // With enough input to cross the balance point
+        let input = 1_500_000u64;
+
+        let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc);
+        // Should succeed regardless (may or may not have rebate depending on net improvement)
+        assert!(result.is_ok(), "Overshoot swap should succeed, got {:?}", result);
+    }
+
+    #[test]
+    fn test_get_swap_input_with_rebate() {
+        // Reverse computation should work with rebate — should require LESS input
+        let config_with_rebate = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,
+            max_swap_pct_bps: 0,
+        };
+        let config_no_rebate = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0,
+        };
+
+        // Imbalanced: 500k BTC / 2M ckBTC, reverse swap BTC → ckBTC (rebalancing)
+        let btc_bal = 500_000u64;
+        let ckbtc_bal = 2_000_000u64;
+        let desired_output = 50_000u64;
+
+        let result_rebate = get_swap_input(
+            &config_with_rebate, btc_bal, ckbtc_bal, desired_output, &SwapDirection::BtcToCkbtc,
+        ).unwrap();
+        let result_no_rebate = get_swap_input(
+            &config_no_rebate, btc_bal, ckbtc_bal, desired_output, &SwapDirection::BtcToCkbtc,
+        ).unwrap();
+
+        // With rebate, required input should be less (user gets bonus output)
+        assert!(result_rebate.output_amount <= result_no_rebate.output_amount,
+            "Rebate should reduce required input: {} vs {}",
+            result_rebate.output_amount, result_no_rebate.output_amount);
+    }
+
+    #[test]
+    fn test_compute_effective_fee_direction_aware() {
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 30,
+            protocol_fee_share_bps: 5000,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 100,
+            rebate_bps: 20,
+            max_swap_pct_bps: 0,
+        };
+
+        // Rebalancing: pool goes from imbalanced to more balanced
+        let fee_rebalance = compute_effective_fee(&config, 500, 2000, 600, 1900);
+        assert!(fee_rebalance < 30,
+            "Rebalancing should get fee < base ({}), got {}", 30, fee_rebalance);
+
+        // Imbalancing: pool goes from balanced to imbalanced
+        let fee_imbalance = compute_effective_fee(&config, 1000, 1000, 1100, 900);
+        assert!(fee_imbalance >= 30,
+            "Imbalancing should get fee >= base ({}), got {}", 30, fee_imbalance);
+
+        // Strong rebalancing: pool goes from very imbalanced to nearly balanced
+        let fee_strong = compute_effective_fee(&config, 100, 1900, 1000, 1000);
+        assert!(fee_strong < 0,
+            "Strong rebalancing should get negative fee (rebate), got {}", fee_strong);
+        assert!(fee_strong >= -20,
+            "Rebate should not exceed rebate_bps ({}), got {}", -20, fee_strong);
+    }
+
+    // -----------------------------------------------------------------------
+    // Max swap size tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_max_swap_pct_within_limit() {
+        // Swap that uses < 10% of the output pool should succeed
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 1000, // 10% limit
+        };
+        // Balanced pool: 1M each. Swap 50k BTC → ckBTC ≈ 5% of output pool.
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 50_000, &SwapDirection::BtcToCkbtc);
+        assert!(result.is_ok(), "Swap within 10% limit should succeed, got {:?}", result);
+    }
+
+    #[test]
+    fn test_max_swap_pct_exceeds_limit() {
+        // Swap that uses > 10% of the output pool should fail
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 1000, // 10% limit
+        };
+        // Balanced pool: 1M each. Swap 200k BTC → ckBTC ≈ 20% of output pool.
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 200_000, &SwapDirection::BtcToCkbtc);
+        match result {
+            Err(StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps }) => {
+                assert!(swap_pct_bps > 1000, "swap_pct_bps {} should exceed 1000", swap_pct_bps);
+                assert_eq!(max_swap_pct_bps, 1000);
+            }
+            other => panic!("Expected SwapSizeExceeded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_max_swap_pct_disabled_when_zero() {
+        // max_swap_pct_bps = 0 → no limit, even huge swaps should pass
+        let config = StableSwapConfig {
+            amplification: 200,
+            fee_bps: 0,
+            protocol_fee_share_bps: 0,
+            max_slippage_bps: 0,
+            imbalance_fee_bps: 0,
+            rebate_bps: 0,
+            max_swap_pct_bps: 0, // disabled
+        };
+        // Swap 500k out of 1M pool = 50%, should still succeed with check disabled
+        let result = get_swap_output(&config, 1_000_000, 1_000_000, 500_000, &SwapDirection::BtcToCkbtc);
+        assert!(result.is_ok(), "Should never reject when max_swap_pct_bps=0, got {:?}", result);
     }
 }

@@ -119,16 +119,14 @@ pub fn create_htlc_with_tx_details_impl(
     };
 
     // Validate per_commitment_point
-    let per_commitment_point: [u8; 33] = match request.per_commitment_point.clone().try_into() {
-        Ok(p) => p,
-        Err(_) => {
-            return CreateHtlcWithTxDetailsResponse {
-                success: false,
-                witness_script: None,
-                error: Some("per_commitment_point must be 33 bytes".to_string()),
-            };
-        }
-    };
+    let per_commitment_point: Vec<u8> = request.per_commitment_point.clone();
+    if per_commitment_point.len() != 33 {
+        return CreateHtlcWithTxDetailsResponse {
+            success: false,
+            witness_script: None,
+            error: Some("per_commitment_point must be 33 bytes".to_string()),
+        };
+    }
 
     // Parse public keys
     let sender_pubkey = match PublicKey::from_slice(&request.sender_pubkey) {

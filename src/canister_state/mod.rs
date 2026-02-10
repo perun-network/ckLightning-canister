@@ -76,7 +76,7 @@ use crate::error::ResultCkl;
 use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
 use crate::receiver;
 use crate::require;
-use candid::{Nat, Principal};
+use candid::{CandidType, Deserialize, Nat, Principal};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -209,10 +209,13 @@ where
 
     // Admin principal (can update config, withdraw protocol fees)
     pub(crate) admin: Option<Principal>,
+
+    // Configurable ICP anti-DDoS fee (in e8s). Default: 100_000_000 (1 ICP)
+    pub(crate) icp_ddos_fee_e8s: u64,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct ChannelSecretsInternal {
     pub htlc_base_secret: [u8; 32],
     pub revocation_base_secret: [u8; 32],
@@ -222,7 +225,7 @@ pub struct ChannelSecretsInternal {
 }
 
 /// Transaction details needed to sign an HTLC
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct HtlcTxDetails {
     pub channel_id: [u8; 32],
     pub htlc_outpoint_txid: [u8; 32],
@@ -230,7 +233,7 @@ pub struct HtlcTxDetails {
     pub htlc_amount_sat: u64,
     pub receiver_address: String,
     pub sender_address: String,
-    pub per_commitment_point: [u8; 33],
+    pub per_commitment_point: Vec<u8>,
     pub witness_script: Vec<u8>,
 }
 
@@ -497,9 +500,12 @@ where
                 protocol_fee_share_bps: 5000,
                 max_slippage_bps: 500,
                 imbalance_fee_bps: 100,
+                rebate_bps: 0,
+                max_swap_pct_bps: 0,
             },
             protocol_fees_ckbtc: 0,
             admin: None,
+            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
         }
     }
 
@@ -547,9 +553,12 @@ where
                 protocol_fee_share_bps: 5000,
                 max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
                 imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
+                rebate_bps: 0,            // disabled by default
+                max_swap_pct_bps: 0,      // disabled by default
             },
             protocol_fees_ckbtc: 0,
             admin: None,
+            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
         }
     }
 
@@ -851,5 +860,339 @@ where
                 }
             }
         }
+    }
+
+    /// Serialize all persistable state into a snapshot for stable memory.
+    pub fn to_snapshot(&self) -> CanisterStateSnapshot {
+        CanisterStateSnapshot {
+            version: 1,
+            principal: self.principal,
+            btc_liquidity_addresses: self.btc_liquidity_addresses.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            btc_invoice_address: self.btc_invoice_address.clone(),
+            lp_btc_address: self.lp_btc_address.clone(),
+            pending_btc_deposits: self.pending_btc_deposits.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            processed_utxos: self.processed_utxos.iter()
+                .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect(),
+            user_holdings: self.user_holdings.iter()
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            channels: self.channels.iter()
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            liq_pool: self.liq_pool.clone(),
+            swaps: self.swaps.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            ln_channels: self.ln_channels.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            onramp_requests: self.onramp_requests.iter()
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            offramp_requests: self.offramp_requests.iter()
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            channel_balances: self.channel_balances.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            total_btc_deposited: self.total_btc_deposited,
+            total_btc_in_channels: self.total_btc_in_channels,
+            reserved_utxos: self.reserved_utxos.iter()
+                .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect(),
+            htlc_manager: self.htlc_manager.clone(),
+            channel_secrets: self.channel_secrets.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            channel_counterparty_pubkeys: self.channel_counterparty_pubkeys.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            htlc_tx_details: self.htlc_tx_details.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            registered_relay: self.registered_relay.clone(),
+            onramp_rate_limits: self.onramp_rate_limits.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            offramp_rate_limits: self.offramp_rate_limits.iter()
+                .map(|(k, v)| (*k, v.clone())).collect(),
+            stableswap_config: self.stableswap_config.clone(),
+            protocol_fees_ckbtc: self.protocol_fees_ckbtc,
+            admin: self.admin,
+            icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
+        }
+    }
+
+    /// Restore state from a deserialized snapshot.
+    ///
+    /// Note: `icrc_receiver` is NOT restored (it's rebuilt from constructor).
+    /// Any in-flight ICRC deposits must be re-submitted after upgrade.
+    pub fn restore_from_snapshot(&mut self, snap: CanisterStateSnapshot) {
+        self.principal = snap.principal;
+        self.btc_liquidity_addresses = snap.btc_liquidity_addresses.into_iter().collect();
+        self.btc_invoice_address = snap.btc_invoice_address;
+        self.lp_btc_address = snap.lp_btc_address;
+        self.pending_btc_deposits = snap.pending_btc_deposits.into_iter().collect();
+        self.processed_utxos = snap.processed_utxos.into_iter()
+            .map(|(txid, vout, p)| ((txid, vout), p)).collect();
+        self.user_holdings = snap.user_holdings.into_iter().collect();
+        self.channels = snap.channels.into_iter().collect();
+        self.liq_pool = snap.liq_pool;
+        self.swaps = snap.swaps.into_iter().collect();
+        self.ln_channels = snap.ln_channels.into_iter().collect();
+        self.onramp_requests = snap.onramp_requests.into_iter().collect();
+        self.offramp_requests = snap.offramp_requests.into_iter().collect();
+        self.channel_balances = snap.channel_balances.into_iter().collect();
+        self.total_btc_deposited = snap.total_btc_deposited;
+        self.total_btc_in_channels = snap.total_btc_in_channels;
+        self.reserved_utxos = snap.reserved_utxos.into_iter()
+            .map(|(txid, vout, ch)| ((txid, vout), ch)).collect();
+        self.htlc_manager = snap.htlc_manager;
+        self.channel_secrets = snap.channel_secrets.into_iter().collect();
+        self.channel_counterparty_pubkeys = snap.channel_counterparty_pubkeys.into_iter().collect();
+        self.htlc_tx_details = snap.htlc_tx_details.into_iter().collect();
+        self.registered_relay = snap.registered_relay;
+        self.onramp_rate_limits = snap.onramp_rate_limits.into_iter().collect();
+        self.offramp_rate_limits = snap.offramp_rate_limits.into_iter().collect();
+        self.stableswap_config = snap.stableswap_config;
+        self.protocol_fees_ckbtc = snap.protocol_fees_ckbtc;
+        self.admin = snap.admin;
+        self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
+    }
+}
+
+// =============================================================================
+// Canister State Snapshot (for stable memory persistence across upgrades)
+// =============================================================================
+
+/// Serializable snapshot of all canister state for stable memory persistence.
+///
+/// HashMap fields are converted to Vec<(K, V)> for Candid compatibility.
+/// The `icrc_receiver` and test timeout fields are intentionally excluded:
+/// - `icrc_receiver` is rebuilt from principal + ledger ID on upgrade
+/// - Test timeouts are only for E2E testing, not persisted
+#[derive(CandidType, Deserialize)]
+pub struct CanisterStateSnapshot {
+    /// Schema version for forward compatibility
+    pub version: u8,
+    pub principal: Principal,
+    pub btc_liquidity_addresses: Vec<(Principal, String)>,
+    pub btc_invoice_address: Option<String>,
+    pub lp_btc_address: Option<String>,
+    pub pending_btc_deposits: Vec<([u8; 32], PendingBtcDeposit)>,
+    /// Flattened from HashMap<(Vec<u8>, u32), Principal>
+    pub processed_utxos: Vec<(Vec<u8>, u32, Principal)>,
+    pub user_holdings: Vec<(Funding, Amount)>,
+    pub channels: Vec<(ChannelId, RegisteredState)>,
+    pub liq_pool: LiquidityPool,
+    pub swaps: Vec<([u8; 32], SwapInfo)>,
+    pub ln_channels: Vec<([u8; 32], LnChannelInfo)>,
+    pub onramp_requests: Vec<(String, OnrampRequestInfo)>,
+    pub offramp_requests: Vec<(String, OfframpRequestInfo)>,
+    pub channel_balances: Vec<([u8; 32], LnChannelBalance)>,
+    pub total_btc_deposited: u64,
+    pub total_btc_in_channels: u64,
+    /// Flattened from HashMap<(Vec<u8>, u32), [u8; 32]>
+    pub reserved_utxos: Vec<(Vec<u8>, u32, [u8; 32])>,
+    pub htlc_manager: HtlcManager,
+    pub channel_secrets: Vec<([u8; 32], ChannelSecretsInternal)>,
+    pub channel_counterparty_pubkeys: Vec<([u8; 32], Vec<u8>)>,
+    pub htlc_tx_details: Vec<([u8; 32], HtlcTxDetails)>,
+    pub registered_relay: Option<RelayRegistration>,
+    pub onramp_rate_limits: Vec<(Principal, RateLimitInfo)>,
+    pub offramp_rate_limits: Vec<(Principal, RateLimitInfo)>,
+    pub stableswap_config: crate::stableswap::StableSwapConfig,
+    pub protocol_fees_ckbtc: u64,
+    pub admin: Option<Principal>,
+    pub icp_ddos_fee_e8s: u64,
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::ic_types::{
+        BtcOutpoint, LnChannelStatus, SwapState, DEVNET_CKBTC_LEDGER,
+    };
+
+    /// Creates a local CanisterState for testing (avoids mutating global STATE).
+    fn make_test_state() -> CanisterState<crate::receiver::CanisterTXQuerier> {
+        CanisterState::new_for_test(
+            crate::receiver::CanisterTXQuerier::new(
+                Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal")
+            ),
+        )
+    }
+
+    #[test]
+    fn test_snapshot_round_trip() {
+        let mut state = make_test_state();
+
+        // Populate state with representative data
+        let test_principal = Principal::from_text("aaaaa-aa").unwrap();
+        let test_principal_2 = Principal::from_text("2vxsx-fae").unwrap();
+        state.principal = test_principal;
+
+        // BTC addresses
+        state.btc_liquidity_addresses.insert(test_principal, "bcrt1qtest123".to_string());
+        state.btc_invoice_address = Some("bcrt1qinvoice".to_string());
+        state.lp_btc_address = Some("bcrt1qlpaddr".to_string());
+
+        // Pending BTC deposit
+        let txid_hash = [0xAA; 32];
+        state.pending_btc_deposits.insert(txid_hash, PendingBtcDeposit {
+            depositor: test_principal,
+            txid: vec![0xAA; 32],
+            vout: 0,
+            amount_sat: 50_000,
+            detected_at: 1000,
+            confirmations: 3,
+            credited: false,
+        });
+
+        // Processed UTXOs
+        state.processed_utxos.insert((vec![0xBB; 32], 1), test_principal);
+
+        // LP deposits
+        state.liq_pool.deposit(test_principal, PoolAsset::CkBTC, Nat::from(100_000u64));
+        state.liq_pool.deposit(test_principal, PoolAsset::BTC, Nat::from(50_000u64));
+
+        // Swaps
+        let swap_hash = [0xCC; 32];
+        state.swaps.insert(swap_hash, SwapInfo {
+            payment_hash: vec![0xCC; 32],
+            amount_msat: 1_000_000,
+            recipient: test_principal,
+            created_at: 2000,
+            expiry_timestamp: 3000,
+            state: SwapState::Pending,
+        });
+
+        // Lightning channels
+        let ch_id = [0xDD; 32];
+        state.ln_channels.insert(ch_id, LnChannelInfo {
+            channel_id: vec![0xDD; 32],
+            funding_outpoint: BtcOutpoint { txid: vec![0xEE; 32], vout: 0 },
+            capacity_sats: 1_000_000,
+            local_node_id: vec![0x02; 33],
+            remote_node_id: vec![0x03; 33],
+            funding_address: "bcrt1qfunding".to_string(),
+            registered_at: 4000,
+            last_verified_at: None,
+            status: LnChannelStatus::Pending,
+        });
+
+        // Channel balances
+        state.channel_balances.insert(ch_id, LnChannelBalance {
+            channel_id: vec![0xDD; 32],
+            capacity_sats: 1_000_000,
+            our_balance_sats: 600_000,
+            their_balance_sats: 400_000,
+            is_active: true,
+            last_updated: 5000,
+        });
+
+        // BTC tracking
+        state.total_btc_deposited = 500_000;
+        state.total_btc_in_channels = 200_000;
+
+        // Reserved UTXOs
+        state.reserved_utxos.insert((vec![0xFF; 32], 0), ch_id);
+
+        // Channel secrets
+        state.channel_secrets.insert(ch_id, ChannelSecretsInternal {
+            htlc_base_secret: [1; 32],
+            revocation_base_secret: [2; 32],
+            delayed_payment_base_secret: [3; 32],
+            payment_secret: [4; 32],
+            commitment_seed: [5; 32],
+        });
+
+        // Counterparty pubkeys
+        state.channel_counterparty_pubkeys.insert(ch_id, vec![0x02; 33]);
+
+        // Relay registration
+        state.registered_relay = Some(RelayRegistration {
+            principal: test_principal_2,
+            node_pubkey: vec![0x03; 33],
+            registered_at: 6000,
+            is_active: true,
+        });
+
+        // Rate limits
+        state.onramp_rate_limits.insert(test_principal, RateLimitInfo {
+            request_count: 5,
+            window_start: 7000,
+        });
+
+        // StableSwap config
+        state.stableswap_config = crate::stableswap::StableSwapConfig {
+            amplification: 300,
+            fee_bps: 15,
+            protocol_fee_share_bps: 4000,
+            max_slippage_bps: 600,
+            imbalance_fee_bps: 150,
+            rebate_bps: 5,
+            max_swap_pct_bps: 500,
+        };
+        state.protocol_fees_ckbtc = 12345;
+        state.admin = Some(test_principal_2);
+        state.icp_ddos_fee_e8s = 200_000_000; // 2 ICP
+
+        // Create snapshot
+        let snapshot = state.to_snapshot();
+
+        // Candid encode
+        let bytes = candid::encode_one(&snapshot).expect("Candid encode failed");
+
+        // Candid decode
+        let decoded: CanisterStateSnapshot = candid::decode_one(&bytes).expect("Candid decode failed");
+
+        // Verify snapshot fields
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.principal, test_principal);
+        assert_eq!(decoded.btc_liquidity_addresses.len(), 1);
+        assert_eq!(decoded.btc_invoice_address, Some("bcrt1qinvoice".to_string()));
+        assert_eq!(decoded.lp_btc_address, Some("bcrt1qlpaddr".to_string()));
+        assert_eq!(decoded.pending_btc_deposits.len(), 1);
+        assert_eq!(decoded.processed_utxos.len(), 1);
+        assert_eq!(decoded.swaps.len(), 1);
+        assert_eq!(decoded.ln_channels.len(), 1);
+        assert_eq!(decoded.channel_balances.len(), 1);
+        assert_eq!(decoded.total_btc_deposited, 500_000);
+        assert_eq!(decoded.total_btc_in_channels, 200_000);
+        assert_eq!(decoded.reserved_utxos.len(), 1);
+        assert_eq!(decoded.channel_secrets.len(), 1);
+        assert_eq!(decoded.channel_counterparty_pubkeys.len(), 1);
+        assert!(decoded.registered_relay.is_some());
+        assert_eq!(decoded.onramp_rate_limits.len(), 1);
+        assert_eq!(decoded.stableswap_config.amplification, 300);
+        assert_eq!(decoded.stableswap_config.max_swap_pct_bps, 500);
+        assert_eq!(decoded.protocol_fees_ckbtc, 12345);
+        assert_eq!(decoded.admin, Some(test_principal_2));
+        assert_eq!(decoded.icp_ddos_fee_e8s, 200_000_000);
+
+        // Restore from decoded snapshot into a fresh state
+        let mut restored = make_test_state();
+        restored.restore_from_snapshot(decoded);
+
+        // Verify restoration
+        assert_eq!(restored.principal, test_principal);
+        assert_eq!(restored.btc_liquidity_addresses.get(&test_principal), Some(&"bcrt1qtest123".to_string()));
+        assert_eq!(restored.btc_invoice_address, Some("bcrt1qinvoice".to_string()));
+        assert_eq!(restored.lp_btc_address, Some("bcrt1qlpaddr".to_string()));
+        assert_eq!(restored.pending_btc_deposits.len(), 1);
+        assert_eq!(restored.processed_utxos.len(), 1);
+        assert_eq!(restored.swaps.len(), 1);
+        assert_eq!(restored.swaps[&swap_hash].amount_msat, 1_000_000);
+        assert_eq!(restored.ln_channels.len(), 1);
+        assert_eq!(restored.channel_balances.len(), 1);
+        assert_eq!(restored.total_btc_deposited, 500_000);
+        assert_eq!(restored.total_btc_in_channels, 200_000);
+        assert_eq!(restored.reserved_utxos.len(), 1);
+        assert_eq!(restored.channel_secrets.len(), 1);
+        assert_eq!(restored.channel_secrets[&ch_id].htlc_base_secret, [1; 32]);
+        assert_eq!(restored.channel_counterparty_pubkeys.len(), 1);
+        assert!(restored.registered_relay.is_some());
+        assert_eq!(restored.registered_relay.as_ref().unwrap().principal, test_principal_2);
+        assert_eq!(restored.onramp_rate_limits.len(), 1);
+        assert_eq!(restored.stableswap_config.amplification, 300);
+        assert_eq!(restored.stableswap_config.max_swap_pct_bps, 500);
+        assert_eq!(restored.protocol_fees_ckbtc, 12345);
+        assert_eq!(restored.admin, Some(test_principal_2));
+        assert_eq!(restored.icp_ddos_fee_e8s, 200_000_000);
+
+        // Verify LP pool survived round-trip
+        assert_eq!(restored.liq_pool.get_balance(&test_principal, &PoolAsset::CkBTC), Nat::from(100_000u64));
+        assert_eq!(restored.liq_pool.get_balance(&test_principal, &PoolAsset::BTC), Nat::from(50_000u64));
     }
 }

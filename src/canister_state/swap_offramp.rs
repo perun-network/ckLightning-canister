@@ -7,7 +7,7 @@ use super::admin::check_offramp_rate_limit;
 use super::swaps::refund_icp_fee;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER, ICP_DDOS_FEE_E8S,
+    DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
     OfframpRequest, OfframpResponse, OfframpRequestInfo, OfframpRequestState,
     PendingOfframpRequest, CompleteOfframpRequest, CompleteOfframpResponse,
     FailOfframpRequest, FailOfframpResponse, GetOfframpStatusResponse,
@@ -23,7 +23,7 @@ use std::str::FromStr;
 /// Request an offramp (ckBTC → Lightning)
 ///
 /// Called by a user who wants to pay a Lightning invoice using their ckBTC.
-/// Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee + ckBTC amount.
+/// Requires prior ICRC-2 approval for the configured ICP anti-DDoS fee + ckBTC amount.
 /// The canister takes custody of ICP fee first, then ckBTC.
 /// If ckBTC collection fails, ICP fee is NOT refunded (this is the DDoS protection).
 /// ICP fee is only refunded on successful Lightning payment completion.
@@ -88,7 +88,9 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     let (ckbtc_required, amount_sats) = {
         let mut state = STATE.write().unwrap();
 
+        // BTC balance includes channel BTC for StableSwap pricing
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
+        let btc_balance = btc_balance + state.total_btc_in_channels;
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
         match crate::stableswap::get_swap_input(
@@ -117,6 +119,12 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
     let canister_principal = canister_self();
 
+    // Read configured ICP anti-DDoS fee from state
+    let icp_ddos_fee = {
+        let state = STATE.read().unwrap();
+        state.icp_ddos_fee_e8s
+    };
+
     // STEP 1: Collect ICP anti-DDoS fee first
     let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
     let icp_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
@@ -129,7 +137,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
             owner: canister_principal,
             subaccount: None,
         },
-        amount: candid::Nat::from(ICP_DDOS_FEE_E8S),
+        amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
         memo: None,
         created_at_time: None,
@@ -143,11 +151,12 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => block_index,
             Err(err) => {
+                let fee_icp = icp_ddos_fee as f64 / 1e8;
                 return OfframpResponse {
                     request_id: String::new(),
                     success: false,
                     amount_sats: Some(amount_sats),
-                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve 20 ICP?", err)),
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve {} ICP?", err, fee_icp)),
                 };
             }
         },
@@ -207,6 +216,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                     preimage: None,
                     icp_fee_block_index: Some(icp_fee_block_index),
                     icp_fee_refunded: false,
+                    ckbtc_collected: ckbtc_required,
                 };
 
                 {
@@ -283,7 +293,7 @@ pub fn mark_offramp_in_progress_impl(request_id: &str) -> bool {
 /// Complete an offramp request after successful payment
 ///
 /// Called by the relay after successfully paying the Lightning invoice.
-/// Refunds the 20 ICP anti-DDoS fee to the user on success.
+/// Refunds the ICP anti-DDoS fee to the user on success.
 pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
     // Validate preimage length
     if request.preimage.len() != 32 {
@@ -297,7 +307,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     let computed_hash = bitcoin::hashes::sha256::Hash::hash(&request.preimage);
     let computed_hash_bytes = computed_hash.as_byte_array();
 
-    // Get the user and verify state, mark as completed
+    // Get the user and verify state, mark as completed, credit LPs with ckBTC
     let user = {
         let mut state = STATE.write().unwrap();
 
@@ -333,7 +343,17 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
         };
         request_info.preimage = Some(request.preimage);
 
-        request_info.user
+        let user = request_info.user;
+        let ckbtc_collected = request_info.ckbtc_collected;
+
+        // Credit LPs proportionally with the ckBTC collected from the user.
+        // LPs are "selling" BTC (via Lightning channel) in exchange for ckBTC.
+        if ckbtc_collected > 0 {
+            let amount_nat = Nat::from(ckbtc_collected);
+            state.liq_pool.credit_proportional(PoolAsset::CkBTC, amount_nat);
+        }
+
+        user
     };
 
     // Refund ICP fee to the user (on success)

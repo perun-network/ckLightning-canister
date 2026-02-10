@@ -12,6 +12,7 @@ use crate::ic_types::{
 };
 
 use bitcoin::Address;
+use candid::Nat;
 use ic_cdk::api::time as blocktime;
 use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
 use std::str::FromStr;
@@ -213,16 +214,16 @@ pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
 }
 
 /// Called when a channel is successfully funded - update tracking
+///
+/// NOTE: total_btc_in_channels is already incremented in fund_channel_impl(),
+/// so we do NOT increment it again here to avoid double-counting.
 pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     let mut state = STATE.write().unwrap();
 
     // Remove from reserved UTXOs
     state.reserved_utxos.retain(|_, v| *v != channel_id);
 
-    // Update total BTC in channels
-    state.total_btc_in_channels += capacity_sats;
-
-    // Initialize channel balance
+    // Initialize channel balance tracking
     state.channel_balances.insert(channel_id, LnChannelBalance {
         channel_id: channel_id.to_vec(),
         capacity_sats,
@@ -233,12 +234,45 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     });
 }
 
-/// Called when a channel is closed - update tracking
+/// Called when a channel is closed - update tracking and credit LPs
+///
+/// Uses the last known `our_balance_sats` from `channel_balances` (updated
+/// by periodic `update_channel_balance` calls from the relay) to credit LPs
+/// proportionally with the BTC returned from the channel.
 pub fn channel_closed_impl(channel_id: [u8; 32]) {
     let mut state = STATE.write().unwrap();
 
-    if let Some(balance) = state.channel_balances.get_mut(&channel_id) {
+    // Try channel_balances first (has per-update balance tracking)
+    let (our_sats, capacity) = if let Some(balance) = state.channel_balances.get_mut(&channel_id) {
+        let our_sats = balance.our_balance_sats;
+        let capacity = balance.capacity_sats;
         balance.is_active = false;
-        // Note: total_btc_in_channels should be reduced when we receive the closing tx funds
+        (our_sats, capacity)
+    } else if let Some(channel_info) = state.ln_channels.get(&channel_id) {
+        // Fallback: channel was registered but no balance updates happened.
+        // Assume full capacity is returned (no payments routed through channel yet).
+        let capacity = channel_info.capacity_sats;
+        ic_cdk::println!(
+            "Channel closed (no balance tracking): using capacity {} sats as credit amount",
+            capacity
+        );
+        (capacity, capacity)
+    } else {
+        ic_cdk::println!("Channel closed: unknown channel_id, no LP credit applied");
+        return;
+    };
+
+    // Decrement the global channel counter by the original capacity
+    state.total_btc_in_channels = state.total_btc_in_channels.saturating_sub(capacity);
+
+    // Credit LPs proportionally with the returned BTC (our_balance_sats)
+    // If channel opened at 100k and closes with 95k, LPs get back 95k (5k was paid out)
+    if our_sats > 0 {
+        let amount_nat = Nat::from(our_sats);
+        let recipients = state.liq_pool.credit_proportional(PoolAsset::BTC, amount_nat);
+        ic_cdk::println!(
+            "Channel closed: credited {} sats back to {} LPs (capacity was {} sats)",
+            our_sats, recipients, capacity
+        );
     }
 }

@@ -29,7 +29,7 @@ pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 // Anti-DDoS ICP fee constants
-pub const ICP_DDOS_FEE_E8S: u64 = 2_000_000_000; // 20 ICP in e8s
+pub const ICP_DDOS_FEE_E8S: u64 = 100_000_000; // 1 ICP in e8s (default; configurable via admin endpoint)
 pub const ICP_TRANSFER_FEE_E8S: u64 = 10_000;     // 0.0001 ICP in e8s
 
 // Swap timeout constants (in nanoseconds)
@@ -93,7 +93,7 @@ pub struct GetRelayInfoResponse {
 // =============================================================================
 
 /// Rate limit tracking for a principal
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct RateLimitInfo {
     /// Number of requests in current window
     pub request_count: u32,
@@ -1276,6 +1276,8 @@ pub struct OfframpRequestInfo {
     pub icp_fee_block_index: Option<Nat>,
     /// Whether the ICP fee has been refunded (on success)
     pub icp_fee_refunded: bool,
+    /// ckBTC amount collected from user (StableSwap-computed, for LP crediting on completion)
+    pub ckbtc_collected: u64,
 }
 
 // =============================================================================
@@ -1807,6 +1809,10 @@ pub struct UpdateStableSwapConfigRequest {
     pub max_slippage_bps: Option<u64>,
     /// New imbalance fee in basis points (None = keep current). Must be >= fee_bps.
     pub imbalance_fee_bps: Option<u64>,
+    /// New rebate in basis points (None = keep current). Max rebate at full rebalance. 0 = disabled.
+    pub rebate_bps: Option<u64>,
+    /// New max swap size as % of output pool in bps (None = keep current). 0 = disabled, 1000 = 10%.
+    pub max_swap_pct_bps: Option<u64>,
 }
 
 /// Response from updating StableSwap configuration
@@ -1846,6 +1852,32 @@ pub struct WithdrawProtocolFeesResponse {
     pub btc_amount: u64,
     pub ckbtc_amount: u64,
     pub ckbtc_block_index: Option<Nat>,
+    pub error: Option<String>,
+}
+
+/// Response from setting the ICP anti-DDoS fee
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct SetIcpDdosFeeResponse {
+    pub success: bool,
+    pub fee_e8s: u64,
+    pub error: Option<String>,
+}
+
+/// Response from redistributing protocol fees to LPs
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct RedistributeFeesResponse {
+    pub success: bool,
+    pub amount_distributed: u64,
+    pub num_recipients: u64,
+    pub error: Option<String>,
+}
+
+/// Response from withdrawing accumulated ICP fees
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct WithdrawIcpFeesResponse {
+    pub success: bool,
+    pub amount_e8s: u64,
+    pub block_index: Option<Nat>,
     pub error: Option<String>,
 }
 

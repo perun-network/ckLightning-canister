@@ -85,12 +85,13 @@ use crate::ic_types::{
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,
+    SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal};
 use ic_cdk::bitcoin_canister::Network;
 
-use ic_cdk::{init, post_upgrade};
+use ic_cdk::{init, post_upgrade, pre_upgrade};
 use std::cell::Cell;
 
 /// Runtime configuration shared across all Bitcoin-related operations.
@@ -152,11 +153,57 @@ pub fn init(network: Network) {
     init_upgrade(network);
 }
 
+// Pre-upgrade hook.
+// Serializes canister state to stable memory before the Wasm module is replaced.
+#[pre_upgrade]
+fn pre_upgrade() {
+    let state = canister_state::STATE.read().unwrap();
+    let snapshot = state.to_snapshot();
+    let bytes = match candid::encode_one(&snapshot) {
+        Ok(b) => b,
+        Err(e) => {
+            ic_cdk::trap(&format!("pre_upgrade: failed to encode state: {}", e));
+        }
+    };
+
+    let len = bytes.len() as u64;
+    let pages_needed = (len + 8 + 65535) / 65536;
+    let current_pages = ic_cdk::stable::stable_size();
+    if current_pages < pages_needed {
+        if ic_cdk::stable::stable_grow(pages_needed - current_pages).is_err() {
+            ic_cdk::trap("pre_upgrade: failed to grow stable memory");
+        }
+    }
+    ic_cdk::stable::stable_write(0, &len.to_le_bytes());
+    ic_cdk::stable::stable_write(8, &bytes);
+}
+
 // Post-upgrade hook.
-// Reinitializes the BitcoinContext with the same logic as `init`.
+// Reinitializes the BitcoinContext and restores canister state from stable memory.
 #[post_upgrade]
 fn upgrade(network: Network) {
     init_upgrade(network);
+
+    // Restore state from stable memory
+    if ic_cdk::stable::stable_size() > 0 {
+        let mut len_bytes = [0u8; 8];
+        ic_cdk::stable::stable_read(0, &mut len_bytes);
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        if len > 0 {
+            let mut bytes = vec![0u8; len];
+            ic_cdk::stable::stable_read(8, &mut bytes);
+            let snapshot: canister_state::CanisterStateSnapshot = match candid::decode_one(&bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    ic_cdk::trap(&format!("post_upgrade: failed to decode state: {}", e));
+                }
+            };
+
+            let mut state = canister_state::STATE.write().unwrap();
+            state.restore_from_snapshot(snapshot);
+        }
+    }
 }
 
 /// Input structure for sending Bitcoin.
