@@ -61,6 +61,8 @@ use crate::canister_state::{
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
     set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl, redistribute_fees_impl,
     set_admin_impl,
+    // HTTPS outcall helpers
+    transform_webhook_response,
 };
 use crate::helpers::{
     get_ln_funding_pubkey_impl, get_ln_invoice_impl, send_btc_tx_impl, sign_ln_message_impl,
@@ -841,6 +843,22 @@ fn register_relay(request: RegisterRelayRequest) -> RegisterRelayResponse {
 #[candid_method(query)]
 fn get_relay_info() -> GetRelayInfoResponse {
     get_relay_info_impl()
+}
+
+// =============================================================================
+// HTTPS Outcall Transform Endpoint
+// =============================================================================
+
+/// Transform function for HTTPS outcalls (required by IC consensus).
+///
+/// Ensures deterministic response across replicas by stripping response body.
+/// Name must match the string in `TransformContext::from_name()` in http_outcall.rs.
+#[query(name = "transform_webhook_response")]
+#[candid_method(query, rename = "transform_webhook_response")]
+fn transform_webhook_response_query(
+    args: ic_cdk::api::management_canister::http_request::TransformArgs,
+) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    transform_webhook_response(args)
 }
 
 // =============================================================================

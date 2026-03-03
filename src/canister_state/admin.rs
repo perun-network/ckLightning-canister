@@ -254,12 +254,15 @@ pub fn register_relay_impl(request: RegisterRelayRequest) -> RegisterRelayRespon
         node_pubkey: request.node_pubkey.clone(),
         registered_at: blocktime(),
         is_active: true,
+        relay_http_url: request.relay_http_url.clone(),
+        relay_auth_token: request.relay_auth_token.clone(),
     };
 
     ic_cdk::println!(
-        "Relay registered: principal={}, node_pubkey={}",
+        "Relay registered: principal={}, node_pubkey={}, http_url={:?}",
         caller,
-        hex::encode(&request.node_pubkey)
+        hex::encode(&request.node_pubkey),
+        request.relay_http_url
     );
 
     state.registered_relay = Some(registration);
