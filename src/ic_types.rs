@@ -63,6 +63,10 @@ pub struct RelayRegistration {
     pub registered_at: u64,
     /// Whether the relay is currently active
     pub is_active: bool,
+    /// HTTP base URL for webhook outcalls (e.g. "http://host:9740")
+    pub relay_http_url: Option<String>,
+    /// Auth token for webhook Bearer authentication
+    pub relay_auth_token: Option<String>,
 }
 
 /// Request to register a relay
@@ -70,6 +74,10 @@ pub struct RelayRegistration {
 pub struct RegisterRelayRequest {
     /// The Lightning node pubkey (33 bytes compressed secp256k1)
     pub node_pubkey: Vec<u8>,
+    /// Optional HTTP base URL for webhook outcalls (e.g. "http://host:9740")
+    pub relay_http_url: Option<String>,
+    /// Optional auth token for webhook Bearer authentication
+    pub relay_auth_token: Option<String>,
 }
 
 /// Response from registering a relay

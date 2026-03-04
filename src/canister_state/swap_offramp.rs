@@ -4,6 +4,7 @@
 
 use super::STATE;
 use super::admin::check_offramp_rate_limit;
+use super::http_outcall::notify_relay_webhook;
 use super::swaps::refund_icp_fee;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
@@ -223,6 +224,9 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                     let mut state = STATE.write().unwrap();
                     state.offramp_requests.insert(request_id.clone(), request_info);
                 }
+
+                // Notify relay via webhook outcall (fire-and-forget)
+                notify_relay_webhook("/webhook/offramp");
 
                 OfframpResponse {
                     request_id,

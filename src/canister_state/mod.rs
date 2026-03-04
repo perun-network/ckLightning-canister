@@ -25,6 +25,7 @@ pub mod htlc_signing;
 pub mod bolt3_keys;
 pub mod commitment_signing;
 pub mod admin;
+pub mod http_outcall;
 
 // Re-export all public items so `crate::canister_state::*` still works
 pub use swaps::*;
@@ -39,6 +40,7 @@ pub use htlc_signing::*;
 pub use bolt3_keys::*;
 pub use commitment_signing::*;
 pub use admin::*;
+pub use http_outcall::{notify_relay_webhook, transform_webhook_response};
 
 use crate::BtcPurpose;
 use crate::btc::address::get_balance;

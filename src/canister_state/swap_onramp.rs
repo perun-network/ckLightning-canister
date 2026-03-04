@@ -4,6 +4,7 @@
 
 use super::STATE;
 use super::admin::{check_onramp_rate_limit, verify_invoice_node_pubkey};
+use super::http_outcall::notify_relay_webhook;
 use crate::ic_types::{
     DEVNET_ICP_LEDGER,
     OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestInfo, OnrampRequestState,
@@ -127,6 +128,9 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         let mut state = STATE.write().unwrap();
         state.onramp_requests.insert(request_id.clone(), request_info);
     }
+
+    // Notify relay via webhook outcall (fire-and-forget)
+    notify_relay_webhook("/webhook/onramp");
 
     OnrampInvoiceResponse {
         request_id,
