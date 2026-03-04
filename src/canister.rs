@@ -304,6 +304,7 @@ async fn request_onramp_invoice(request: OnrampInvoiceRequest) -> OnrampInvoiceR
 #[query]
 #[candid_method(query)]
 fn get_pending_invoice_requests() -> Vec<PendingInvoiceRequest> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_invoice_requests_impl()
 }
 
@@ -351,6 +352,7 @@ async fn request_offramp(request: OfframpRequest) -> OfframpResponse {
 #[query]
 #[candid_method(query)]
 fn get_pending_offramp_requests() -> Vec<PendingOfframpRequest> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_offramp_requests_impl()
 }
 
@@ -728,6 +730,7 @@ fn timeout_htlc(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
 #[query]
 #[candid_method(query)]
 fn get_htlc(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
+    if assert_relay_caller().is_err() { return None; }
     get_htlc_impl(payment_hash)
 }
 
@@ -735,6 +738,7 @@ fn get_htlc(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
 #[query]
 #[candid_method(query)]
 fn get_pending_htlcs() -> Vec<HtlcInfo> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_htlcs_impl()
 }
 
@@ -746,6 +750,7 @@ fn get_pending_htlcs() -> Vec<HtlcInfo> {
 #[query]
 #[candid_method(query)]
 fn get_channel_secrets_info(channel_id: Vec<u8>) -> Option<ChannelSecretsInfo> {
+    if assert_relay_caller().is_err() { return None; }
     get_channel_secrets_info_impl(channel_id)
 }
 
@@ -1068,6 +1073,9 @@ async fn generate_channel_secrets(
 #[query]
 #[candid_method(query)]
 fn get_per_commitment_point(request: GetPerCommitmentPointRequest) -> GetPerCommitmentPointResponse {
+    if let Err(e) = assert_relay_caller() {
+        return GetPerCommitmentPointResponse { success: false, point: None, error: Some(e) };
+    }
     get_per_commitment_point_impl(request)
 }
 
@@ -1080,6 +1088,9 @@ fn get_per_commitment_point(request: GetPerCommitmentPointRequest) -> GetPerComm
 fn release_commitment_secret(
     request: ReleaseCommitmentSecretRequest,
 ) -> ReleaseCommitmentSecretResponse {
+    if let Err(e) = assert_relay_caller() {
+        return ReleaseCommitmentSecretResponse { success: false, secret: None, error: Some(e) };
+    }
     release_commitment_secret_impl(request)
 }
 

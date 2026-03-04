@@ -92,10 +92,7 @@ pub fn assert_relay_caller() -> Result<(), String> {
     let state = STATE.read().unwrap();
     match &state.registered_relay {
         Some(relay) if relay.principal == caller => Ok(()),
-        Some(relay) => Err(format!(
-            "Unauthorized: caller {} is not the registered relay {}",
-            caller, relay.principal
-        )),
+        Some(_) => Err("Unauthorized: caller is not the registered relay".to_string()),
         None => Err("Unauthorized: no relay is registered".to_string()),
     }
 }
