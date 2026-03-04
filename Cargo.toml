@@ -33,6 +33,9 @@ num-traits = "0.2.19"
 rand = "0.8"
 bitcoin_hashes = "0.11.0"
 
+[profile.release]
+overflow-checks = true
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ic-agent = { version = "0.39.3", features = ["wasm-bindgen"] }

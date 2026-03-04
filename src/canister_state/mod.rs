@@ -85,6 +85,21 @@ use std::sync::RwLock;
 
 use crate::ic_types::RelayRegistration;
 
+/// Check that the caller is the registered relay.
+/// Returns Ok(()) if authorized, Err(String) with descriptive error otherwise.
+pub fn assert_relay_caller() -> Result<(), String> {
+    let caller = msg_caller();
+    let state = STATE.read().unwrap();
+    match &state.registered_relay {
+        Some(relay) if relay.principal == caller => Ok(()),
+        Some(relay) => Err(format!(
+            "Unauthorized: caller {} is not the registered relay {}",
+            caller, relay.principal
+        )),
+        None => Err("Unauthorized: no relay is registered".to_string()),
+    }
+}
+
 #[cfg(not(test))]
 lazy_static! {
     pub(crate) static ref STATE: RwLock<CanisterState<receiver::CanisterTXQuerier>> =
