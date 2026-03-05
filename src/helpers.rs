@@ -191,7 +191,7 @@ pub async fn send_btc_tx_impl(
             (address, pubkey)
         }
         BtcAddressType::P2TR => {
-            todo!()
+            return Err(BtcError::Other("P2TR address type not yet supported".to_string()));
         }
     };
 
@@ -278,7 +278,7 @@ pub async fn send_btc_tx_impl(
             signed_tx.compute_txid().to_string()
         }
         BtcAddressType::P2TR => {
-            todo!()
+            return Err(BtcError::Other("P2TR transaction sending not yet supported".to_string()));
         }
     };
 
@@ -417,7 +417,10 @@ pub async fn get_ln_invoice_impl(
 
     // 6. Build and SIGN real invoice
     let secp_ctx = Secp256k1::new();
-    let privkey = SecretKey::from_slice(&[41; 32]).expect("canister signing key"); // TODO: proper key mgmt
+    // Legacy: This endpoint is unused in the canister-first architecture (relay creates invoices).
+    // Using a deterministic key here since this invoice is never routable — the relay's node key
+    // is what matters for real invoice signing. This endpoint should be removed in cleanup.
+    let privkey = SecretKey::from_slice(&[41; 32]).expect("deterministic signing key for legacy invoice endpoint");
 
     let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
         .description(format!("ckBTC_SWAP:{}", caller).into())

@@ -42,7 +42,7 @@ fn get_funding_redeemscript(channel_keys_id: &[u8; 32]) -> Result<bitcoin::Scrip
     drop(state);
 
     // Get canister's funding pubkey
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+    let _ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
     let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
         .iter()
         .map(|s| s.to_vec())

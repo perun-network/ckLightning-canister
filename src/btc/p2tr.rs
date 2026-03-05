@@ -70,6 +70,7 @@ pub enum SelectUtxosMode {
 
 // Builds a P2TR transaction to send the given `amount` of satoshis to the
 // destination address.
+#[allow(dead_code)]
 pub(crate) async fn build_transaction(
     ctx: &BitcoinContext,
     own_address: &Address,

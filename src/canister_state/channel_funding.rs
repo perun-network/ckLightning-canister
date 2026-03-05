@@ -18,7 +18,7 @@ use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
 use std::str::FromStr;
 
 /// Get available UTXOs from the LP's BTC address for channel funding
-pub async fn get_funding_utxos_impl(min_amount_sats: u64) -> Result<GetFundingUtxosResponse, BtcError> {
+pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingUtxosResponse, BtcError> {
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
     // Get the LP BTC address
@@ -39,7 +39,7 @@ pub async fn get_funding_utxos_impl(min_amount_sats: u64) -> Result<GetFundingUt
     };
 
     // Parse address
-    let address = Address::from_str(&lp_address)
+    let _address = Address::from_str(&lp_address)
         .map_err(|e| BtcError::Other(format!("Invalid LP address: {}", e)))?
         .require_network(ctx.bitcoin_network)
         .map_err(|e| BtcError::Other(format!("LP address network mismatch: {:?}", e)))?;

@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -101,10 +101,10 @@ use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
+    ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
     HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
-    NotifyArgs, QueryBtcAddressResponse, QueryLnChannelRequest, QueryLnChannelsResponse,
+    NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
     RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
     RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
     VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,

@@ -630,9 +630,9 @@ where
     async fn send_funds_to_l1(
         &self,
         receiver: Principal,
-        pubkey: &Vec<u8>,
+        _pubkey: &Vec<u8>,
         amount: Amount,
-        asset: &PoolAsset,
+        _asset: &PoolAsset,
     ) -> ResultCkl<()> {
         let transfer_arg = TransferArg {
             from_subaccount: None,
@@ -662,7 +662,7 @@ where
     }
 
     // Correct usage:
-    pub fn withdraw_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
+    pub fn withdraw_channel(&mut self, _funding: Funding, _amount: Amount) -> ResultCkl<()> {
         // TODO: withdrawal logic as part of the L2 Lightning protocol
 
         return Ok(());
@@ -684,7 +684,7 @@ where
     }
     pub fn deposit_icrc(
         &mut self,
-        time: Timestamp,
+        _time: Timestamp,
         funding: Funding,
         signature_bytes: &[u8], // added signature argument
     ) -> ResultCkl<()> {

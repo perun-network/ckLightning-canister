@@ -26,7 +26,7 @@ if [ -f "canister_ids.json" ]; then
 fi
 
 # Reset Bitcoin regtest for clean state (no leftover UTXOs from prior runs)
-BITCOIN_DIR="/home/ilja/workrepos/bitcoin-25.0"
+BITCOIN_DIR="${BITCOIN_DIR:-/home/ilja/workrepos/bitcoin-25.0}"
 BITCOIN_CLI="$BITCOIN_DIR/bin/bitcoin-cli -regtest -rpcuser=ic-btc-integration -rpcpassword=QPQiNaph19FqUsCrBRN0FII7lyM26B51fAMeBQzCb-E="
 
 echo "=== Resetting Bitcoin regtest ==="
