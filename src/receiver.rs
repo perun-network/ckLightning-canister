@@ -129,6 +129,7 @@ pub trait TXQuerier {
 // }
 
 /// Real ICP transaction querier using inter-canister calls to the ICP ledger.
+#[allow(dead_code)]
 pub struct CanisterTXQuerier {
     ledger: Principal,
 }

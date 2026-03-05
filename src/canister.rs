@@ -101,10 +101,10 @@ use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    BtcPurpose, ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
+    ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
     HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
-    NotifyArgs, QueryBtcAddressResponse, QueryLnChannelRequest, QueryLnChannelsResponse,
+    NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
     RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
     RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
     VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,

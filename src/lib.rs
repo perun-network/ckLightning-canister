@@ -46,16 +46,14 @@ use crate::ic_types::{
     // User BTC operations
     SendFromDepositorRequest, SendFromDepositorResponse, DepositorBtcBalanceResponse,
     // Onramp invoice request types
-    OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestState, PendingInvoiceRequest,
+    OnrampInvoiceRequest, OnrampInvoiceResponse, PendingInvoiceRequest,
     SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
     // Offramp types (ckBTC → Lightning)
-    OfframpRequest, OfframpResponse, OfframpRequestState, PendingOfframpRequest,
+    OfframpRequest, OfframpResponse, PendingOfframpRequest,
     CompleteOfframpRequest, CompleteOfframpResponse, FailOfframpRequest, FailOfframpResponse,
-    GetOfframpStatusResponse, OfframpRequestInfo,
-    // LP Liquidity types
-    LpBtcUtxo, GetFundingUtxosRequest, GetFundingUtxosResponse,
+    GetOfframpStatusResponse, GetFundingUtxosResponse,
     UpdateChannelBalanceRequest, UpdateChannelBalanceResponse,
-    LpLiquidityStatus, LnChannelBalance,
+    LpLiquidityStatus,
     // HTLC types
     CreateHtlcRequest, CreateHtlcResponse,
     FulfillHtlcRequest, FulfillHtlcResponse,
@@ -81,7 +79,7 @@ use crate::ic_types::{
     // Rate limiting types
     RateLimitStatus,
     // StableSwap types
-    StableSwapConfig, SwapDirection,
+    StableSwapConfig,
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,

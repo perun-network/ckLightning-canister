@@ -904,7 +904,7 @@ pub struct RegisteredState {
 }
 
 #[derive(CandidType)]
-pub struct ckAccount {
+pub struct CkAccount {
     pub owner: Principal,
     pub subaccount: Option<Vec<u8>>,
 }

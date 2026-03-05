@@ -254,7 +254,7 @@ pub fn sign_htlc_success_impl(request: SignHtlcSuccessRequest) -> SignHtlcRespon
     };
 
     // Get HTLC info
-    let htlc = match state.htlc_manager.get_htlc(&payment_hash) {
+    let _htlc = match state.htlc_manager.get_htlc(&payment_hash) {
         Some(h) => h.clone(),
         None => {
             return SignHtlcResponse {
