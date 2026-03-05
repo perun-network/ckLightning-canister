@@ -15,3 +15,6 @@
 
 dfx.json
 /ledger.*
+
+# Private keys
+*.pem

@@ -11,6 +11,7 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
+use crate::canister_state::assert_relay_caller;
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
     complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
@@ -136,6 +137,7 @@ use ic_cdk::heartbeat;
 #[update]
 #[candid_method(update)]
 async fn send_btc_tx(args: SendBtcTxArgs) -> std::result::Result<SendBtcTxMsg, BtcError> {
+    assert_relay_caller().map_err(BtcError::Other)?;
     let recipient = args.recipient;
     let from_address_type = args.from_address_type;
     let amount = args.amount;
@@ -235,6 +237,7 @@ fn query_state(id: ChannelId) -> Option<RegisteredState> {
 #[update]
 #[candid::candid_method]
 async fn trigger_withdraw(req: WithdrawalReq) -> Result<Nat, CklError> {
+    assert_relay_caller().map_err(|_| CklError::UnauthorizedCaller)?;
     trigger_withdraw_impl(req).await
 }
 
@@ -249,6 +252,9 @@ async fn trigger_withdraw(req: WithdrawalReq) -> Result<Nat, CklError> {
 #[update]
 #[candid_method(update)]
 fn register_swap(request: RegisterSwapRequest) -> RegisterSwapResponse {
+    if let Err(e) = assert_relay_caller() {
+        return RegisterSwapResponse { success: false, error: Some(e) };
+    }
     register_swap_impl(request)
 }
 
@@ -259,6 +265,9 @@ fn register_swap(request: RegisterSwapRequest) -> RegisterSwapResponse {
 #[update]
 #[candid_method(update)]
 async fn complete_swap(request: CompleteSwapRequest) -> CompleteSwapResponse {
+    if let Err(e) = assert_relay_caller() {
+        return CompleteSwapResponse { success: false, block_index: None, error: Some(e) };
+    }
     complete_swap_impl(request).await
 }
 
@@ -295,6 +304,7 @@ async fn request_onramp_invoice(request: OnrampInvoiceRequest) -> OnrampInvoiceR
 #[query]
 #[candid_method(query)]
 fn get_pending_invoice_requests() -> Vec<PendingInvoiceRequest> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_invoice_requests_impl()
 }
 
@@ -305,6 +315,9 @@ fn get_pending_invoice_requests() -> Vec<PendingInvoiceRequest> {
 #[update]
 #[candid_method(update)]
 fn submit_invoice(request: SubmitInvoiceRequest) -> SubmitInvoiceResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SubmitInvoiceResponse { success: false, error: Some(e) };
+    }
     submit_invoice_impl(request)
 }
 
@@ -339,6 +352,7 @@ async fn request_offramp(request: OfframpRequest) -> OfframpResponse {
 #[query]
 #[candid_method(query)]
 fn get_pending_offramp_requests() -> Vec<PendingOfframpRequest> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_offramp_requests_impl()
 }
 
@@ -348,6 +362,7 @@ fn get_pending_offramp_requests() -> Vec<PendingOfframpRequest> {
 #[update]
 #[candid_method(update)]
 fn mark_offramp_in_progress(request_id: String) -> bool {
+    if assert_relay_caller().is_err() { return false; }
     mark_offramp_in_progress_impl(&request_id)
 }
 
@@ -359,6 +374,9 @@ fn mark_offramp_in_progress(request_id: String) -> bool {
 #[update]
 #[candid_method(update)]
 async fn complete_offramp(request: CompleteOfframpRequest) -> CompleteOfframpResponse {
+    if let Err(e) = assert_relay_caller() {
+        return CompleteOfframpResponse { success: false, error: Some(e) };
+    }
     complete_offramp_impl(request).await
 }
 
@@ -369,6 +387,9 @@ async fn complete_offramp(request: CompleteOfframpRequest) -> CompleteOfframpRes
 #[update]
 #[candid_method(update)]
 async fn fail_offramp(request: FailOfframpRequest) -> FailOfframpResponse {
+    if let Err(e) = assert_relay_caller() {
+        return FailOfframpResponse { success: false, refund_block_index: None, error: Some(e) };
+    }
     fail_offramp_impl(request).await
 }
 
@@ -392,6 +413,9 @@ fn get_offramp_status(request_id: String) -> GetOfframpStatusResponse {
 #[update]
 #[candid_method(update)]
 fn register_ln_channel(request: RegisterLnChannelRequest) -> RegisterLnChannelResponse {
+    if let Err(e) = assert_relay_caller() {
+        return RegisterLnChannelResponse { success: false, error: Some(e) };
+    }
     register_ln_channel_impl(request)
 }
 
@@ -459,6 +483,9 @@ async fn get_ln_funding_pubkey() -> LnFundingPubkeyResponse {
 #[update]
 #[candid_method(update)]
 async fn sign_ln_message(request: LnSignRequest) -> LnSignResponse {
+    if let Err(e) = assert_relay_caller() {
+        return LnSignResponse { success: false, signature: None, error: Some(e) };
+    }
     sign_ln_message_impl(request).await
 }
 
@@ -581,6 +608,9 @@ async fn send_btc_from_depositor_address(request: SendFromDepositorRequest) -> S
 #[update]
 #[candid_method(update)]
 async fn fund_channel(request: FundChannelRequest) -> FundChannelResponse {
+    if let Err(e) = assert_relay_caller() {
+        return FundChannelResponse { success: false, signed_tx: None, txid: None, error: Some(e) };
+    }
     fund_channel_impl(request).await
 }
 
@@ -595,6 +625,7 @@ async fn fund_channel(request: FundChannelRequest) -> FundChannelResponse {
 #[update]
 #[candid_method(update)]
 async fn get_funding_utxos(min_amount_sats: u64) -> Result<GetFundingUtxosResponse, BtcError> {
+    assert_relay_caller().map_err(BtcError::Other)?;
     get_funding_utxos_impl(min_amount_sats).await
 }
 
@@ -605,6 +636,9 @@ async fn get_funding_utxos(min_amount_sats: u64) -> Result<GetFundingUtxosRespon
 #[update]
 #[candid_method(update)]
 fn update_channel_balance(request: UpdateChannelBalanceRequest) -> UpdateChannelBalanceResponse {
+    if let Err(e) = assert_relay_caller() {
+        return UpdateChannelBalanceResponse { success: false, error: Some(e) };
+    }
     update_channel_balance_impl(request)
 }
 
@@ -615,6 +649,7 @@ fn update_channel_balance(request: UpdateChannelBalanceRequest) -> UpdateChannel
 #[update]
 #[candid_method(update)]
 async fn get_lp_liquidity_status() -> Result<LpLiquidityStatus, BtcError> {
+    assert_relay_caller().map_err(BtcError::Other)?;
     get_lp_liquidity_status_impl().await
 }
 
@@ -625,6 +660,7 @@ async fn get_lp_liquidity_status() -> Result<LpLiquidityStatus, BtcError> {
 #[update]
 #[candid_method(update)]
 fn channel_funded(channel_id: Vec<u8>, capacity_sats: u64) -> Result<(), String> {
+    assert_relay_caller()?;
     let channel_id: [u8; 32] = channel_id
         .try_into()
         .map_err(|_| "Invalid channel_id length")?;
@@ -639,6 +675,7 @@ fn channel_funded(channel_id: Vec<u8>, capacity_sats: u64) -> Result<(), String>
 #[update]
 #[candid_method(update)]
 fn channel_closed(channel_id: Vec<u8>) -> Result<(), String> {
+    assert_relay_caller()?;
     let channel_id: [u8; 32] = channel_id
         .try_into()
         .map_err(|_| "Invalid channel_id length")?;
@@ -657,6 +694,9 @@ fn channel_closed(channel_id: Vec<u8>) -> Result<(), String> {
 #[update]
 #[candid_method(update)]
 fn create_htlc(request: CreateHtlcRequest) -> CreateHtlcResponse {
+    if let Err(e) = assert_relay_caller() {
+        return CreateHtlcResponse { success: false, error: Some(e) };
+    }
     create_htlc_impl(request)
 }
 
@@ -667,6 +707,9 @@ fn create_htlc(request: CreateHtlcRequest) -> CreateHtlcResponse {
 #[update]
 #[candid_method(update)]
 fn fulfill_htlc(request: FulfillHtlcRequest) -> FulfillHtlcResponse {
+    if let Err(e) = assert_relay_caller() {
+        return FulfillHtlcResponse { success: false, payment_hash: None, amount_msat: None, error: Some(e) };
+    }
     fulfill_htlc_impl(request)
 }
 
@@ -677,6 +720,9 @@ fn fulfill_htlc(request: FulfillHtlcRequest) -> FulfillHtlcResponse {
 #[update]
 #[candid_method(update)]
 fn timeout_htlc(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
+    if let Err(e) = assert_relay_caller() {
+        return TimeoutHtlcResponse { success: false, amount_msat: None, error: Some(e) };
+    }
     timeout_htlc_impl(request)
 }
 
@@ -684,6 +730,7 @@ fn timeout_htlc(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
 #[query]
 #[candid_method(query)]
 fn get_htlc(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
+    if assert_relay_caller().is_err() { return None; }
     get_htlc_impl(payment_hash)
 }
 
@@ -691,6 +738,7 @@ fn get_htlc(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
 #[query]
 #[candid_method(query)]
 fn get_pending_htlcs() -> Vec<HtlcInfo> {
+    if assert_relay_caller().is_err() { return vec![]; }
     get_pending_htlcs_impl()
 }
 
@@ -702,6 +750,7 @@ fn get_pending_htlcs() -> Vec<HtlcInfo> {
 #[query]
 #[candid_method(query)]
 fn get_channel_secrets_info(channel_id: Vec<u8>) -> Option<ChannelSecretsInfo> {
+    if assert_relay_caller().is_err() { return None; }
     get_channel_secrets_info_impl(channel_id)
 }
 
@@ -718,6 +767,9 @@ fn get_channel_secrets_info(channel_id: Vec<u8>) -> Option<ChannelSecretsInfo> {
 fn create_htlc_with_tx_details(
     request: CreateHtlcWithTxDetailsRequest,
 ) -> CreateHtlcWithTxDetailsResponse {
+    if let Err(e) = assert_relay_caller() {
+        return CreateHtlcWithTxDetailsResponse { success: false, witness_script: None, error: Some(e) };
+    }
     create_htlc_with_tx_details_impl(request)
 }
 
@@ -738,6 +790,9 @@ fn create_htlc_with_tx_details(
 #[update]
 #[candid_method(update)]
 fn sign_htlc_success(request: SignHtlcSuccessRequest) -> SignHtlcResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SignHtlcResponse { success: false, signed_tx: None, txid: None, error: Some(e) };
+    }
     sign_htlc_success_impl(request)
 }
 
@@ -754,6 +809,9 @@ fn sign_htlc_success(request: SignHtlcSuccessRequest) -> SignHtlcResponse {
 #[update]
 #[candid_method(update)]
 fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SignHtlcResponse { success: false, signed_tx: None, txid: None, error: Some(e) };
+    }
     sign_htlc_timeout_impl(request)
 }
 
@@ -790,6 +848,15 @@ fn get_expired_swap_counts_query() -> (u64, u64) {
 #[update]
 #[candid_method(update)]
 async fn check_expired_swaps() {
+    // Admin or relay only for manual trigger
+    let caller = ic_cdk::api::msg_caller();
+    let state = crate::canister_state::STATE.read().unwrap();
+    let is_admin = matches!(state.admin, Some(admin) if admin == caller);
+    let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+    drop(state);
+    if !is_admin && !is_relay {
+        return; // silently ignore unauthorized callers
+    }
     check_expired_swaps_impl().await;
 }
 
@@ -801,6 +868,14 @@ async fn check_expired_swaps() {
 #[update]
 #[candid_method(update)]
 fn set_test_timeouts(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
+    // Admin-only: test timeouts should not be callable by anyone
+    let caller = ic_cdk::api::msg_caller();
+    let state = crate::canister_state::STATE.read().unwrap();
+    match state.admin {
+        Some(admin) if admin == caller => {},
+        _ => { ic_cdk::trap("Unauthorized: only admin can set test timeouts"); }
+    }
+    drop(state);
     set_test_timeouts_impl(onramp_timeout_ns, offramp_timeout_ns);
 }
 
@@ -833,6 +908,18 @@ fn get_timeout_values() -> (u64, u64) {
 #[update]
 #[candid_method(update)]
 fn register_relay(request: RegisterRelayRequest) -> RegisterRelayResponse {
+    // Admin or controller only (first relay registration requires controller)
+    let caller = ic_cdk::api::msg_caller();
+    let state = crate::canister_state::STATE.read().unwrap();
+    let is_admin = matches!(state.admin, Some(admin) if admin == caller);
+    let is_existing_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+    drop(state);
+    if !is_admin && !is_existing_relay && !ic_cdk::api::is_controller(&caller) {
+        return RegisterRelayResponse {
+            success: false,
+            error: Some("Unauthorized: only admin, controller, or existing relay can register".to_string()),
+        };
+    }
     register_relay_impl(request)
 }
 
@@ -971,6 +1058,12 @@ fn redistribute_fees() -> RedistributeFeesResponse {
 async fn generate_channel_secrets(
     request: GenerateChannelSecretsRequest,
 ) -> GenerateChannelSecretsResponse {
+    if let Err(e) = assert_relay_caller() {
+        return GenerateChannelSecretsResponse {
+            success: false, htlc_basepoint: None, revocation_basepoint: None,
+            delayed_payment_basepoint: None, payment_point: None, error: Some(e),
+        };
+    }
     generate_channel_secrets_impl(request).await
 }
 
@@ -980,6 +1073,9 @@ async fn generate_channel_secrets(
 #[query]
 #[candid_method(query)]
 fn get_per_commitment_point(request: GetPerCommitmentPointRequest) -> GetPerCommitmentPointResponse {
+    if let Err(e) = assert_relay_caller() {
+        return GetPerCommitmentPointResponse { success: false, point: None, error: Some(e) };
+    }
     get_per_commitment_point_impl(request)
 }
 
@@ -992,6 +1088,9 @@ fn get_per_commitment_point(request: GetPerCommitmentPointRequest) -> GetPerComm
 fn release_commitment_secret(
     request: ReleaseCommitmentSecretRequest,
 ) -> ReleaseCommitmentSecretResponse {
+    if let Err(e) = assert_relay_caller() {
+        return ReleaseCommitmentSecretResponse { success: false, secret: None, error: Some(e) };
+    }
     release_commitment_secret_impl(request)
 }
 
@@ -1002,6 +1101,7 @@ fn release_commitment_secret(
 #[update]
 #[candid_method(update)]
 fn register_channel_info(request: RegisterChannelInfoRequest) -> bool {
+    if assert_relay_caller().is_err() { return false; }
     register_channel_info_impl(request)
 }
 
@@ -1019,6 +1119,9 @@ fn register_channel_info(request: RegisterChannelInfoRequest) -> bool {
 async fn sign_counterparty_commitment(
     request: SignCounterpartyCommitmentRequest,
 ) -> SignCounterpartyCommitmentResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SignCounterpartyCommitmentResponse { success: false, commitment_sig: None, htlc_sigs: None, error: Some(e) };
+    }
     sign_counterparty_commitment_impl(request).await
 }
 
@@ -1030,6 +1133,9 @@ async fn sign_counterparty_commitment(
 async fn sign_holder_commitment_v2(
     request: SignHolderCommitmentRequest,
 ) -> SignHolderCommitmentResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) };
+    }
     sign_holder_commitment_impl(request).await
 }
 
@@ -1037,6 +1143,9 @@ async fn sign_holder_commitment_v2(
 #[update]
 #[candid_method(update)]
 async fn sign_closing_tx(request: SignClosingTxRequest) -> SignHolderCommitmentResponse {
+    if let Err(e) = assert_relay_caller() {
+        return SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) };
+    }
     sign_closing_tx_impl(request).await
 }
 
@@ -1051,6 +1160,9 @@ async fn sign_closing_tx(request: SignClosingTxRequest) -> SignHolderCommitmentR
 #[update]
 #[candid_method(update)]
 fn sign_justice_tx(request: SignJusticeTxRequest) -> LnSignResponse {
+    if let Err(e) = assert_relay_caller() {
+        return LnSignResponse { success: false, signature: None, error: Some(e) };
+    }
     sign_justice_tx_impl(request)
 }
 
@@ -1061,6 +1173,9 @@ fn sign_justice_tx(request: SignJusticeTxRequest) -> LnSignResponse {
 #[update]
 #[candid_method(update)]
 fn sign_htlc_tx(request: SignHtlcTxRequest) -> LnSignResponse {
+    if let Err(e) = assert_relay_caller() {
+        return LnSignResponse { success: false, signature: None, error: Some(e) };
+    }
     sign_htlc_tx_impl(request)
 }
 
