@@ -1,0 +1,76 @@
+{
+    "canisters": {
+        "mock_contract": {
+            "type": "custom",
+            "candid": "canisters/mock/mock_config.did",
+            "wasm": "canisters/mock/mock.wasm"
+        },
+        "minter": {
+            "type": "custom",
+            "wasm": "canisters/ckbtc/minter/ckbtc_minter.wasm",
+            "candid": "canisters/ckbtc/minter/ckbtc_minter.did"
+        },
+        "btcledger": {
+            "type": "custom",
+            "wasm": "canisters/btcledger/ledger_canister.wasm",
+            "candid": "canisters/btcledger/ledger.did"
+        },
+        "ledger": {
+            "type": "custom",
+            "wasm": "https://download.dfinity.systems/ic/aba60ffbc46acfc8990bf4d5685c1360bd7026b9/canisters/ledger-canister.wasm.gz",
+            "candid": "https://raw.githubusercontent.com/dfinity/ic/aba60ffbc46acfc8990bf4d5685c1360bd7026b9/rs/ledger_suite/icp/ledger.did"
+        },
+        "archive": {
+            "type": "custom",
+            "wasm": "canisters/btcledger/archive_canister.wasm",
+            "candid": "canisters/btcledger/archive.did"
+        },
+        "index": {
+            "type": "custom",
+            "wasm": "canisters/btcledger/index_ng_canister.wasm",
+            "candid": "canisters/btcledger/index-ng.did"
+        },
+        "btc_checker": {
+            "type": "custom",
+            "wasm": "canisters/checker/btc_checker_canister.wasm",
+            "candid": "canisters/checker/btc_checker_canister.did"
+        },
+        "cklightning": {
+            "type": "custom",
+            "wasm": "canisters/ckl/cklightning.wasm",
+            "candid": "canisters/ckl/cklightning.did",
+            "metadata": [
+                {
+                    "name": "candid:service"
+                },
+                {
+                    "name": "icp:public name",
+                    "content": "ckLightning v0.1.0-alpha"
+                }
+            ]
+        },
+        "basic_bitcoin": {
+            "type": "custom",
+            "wasm": "canisters/basic_bitcoin/basic_bitcoin.wasm",
+            "candid": "canisters/basic_bitcoin/basic_bitcoin.did"
+        }
+    },
+    "defaults": {
+        "build": {
+            "args": "",
+            "packtool": ""
+        },
+        "bitcoin": {
+            "enabled": true,
+            "nodes": ["127.0.0.1:18444"]
+        }
+    },
+    "networks": {
+        "local": {
+            "bind": "127.0.0.1:4943",
+            "type": "persistent"
+        }
+    },
+    "output_env_file": ".env",
+    "version": 1
+}

@@ -13,7 +13,8 @@
 # rust build files
 /target/
 
-dfx.json
+/dfx.json
+!/ic/dfx.json
 /ledger.*
 
 # Private keys
