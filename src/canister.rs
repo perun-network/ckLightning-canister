@@ -31,7 +31,7 @@ use crate::canister_state::{
     get_invoice_by_request_impl,
     // Offramp functions (ckBTC → Lightning)
     request_offramp_impl, get_pending_offramp_requests_impl, mark_offramp_in_progress_impl,
-    complete_offramp_impl, fail_offramp_impl, get_offramp_status_impl,
+    complete_offramp_impl, fail_offramp_impl, retry_offramp_refund_impl, get_offramp_status_impl,
     // LP Liquidity management functions
     get_funding_utxos_impl, update_channel_balance_impl, get_lp_liquidity_status_impl,
     channel_funded_impl, channel_closed_impl,
@@ -394,6 +394,29 @@ async fn fail_offramp(request: FailOfframpRequest) -> FailOfframpResponse {
         return FailOfframpResponse { success: false, refund_block_index: None, error: Some(e) };
     }
     fail_offramp_impl(request).await
+}
+
+/// Retry a failed offramp ckBTC refund
+///
+/// Called by admin/relay to retry refund for requests stuck in FailedPendingRefund.
+#[update]
+#[candid_method(update)]
+async fn retry_offramp_refund(request_id: String) -> FailOfframpResponse {
+    // Allow both relay and admin to retry
+    let caller = ic_cdk::api::msg_caller();
+    let relay_ok = assert_relay_caller().is_ok();
+    let admin_ok = {
+        let state = crate::canister_state::STATE.read().unwrap();
+        state.admin == Some(caller)
+    };
+    if !relay_ok && !admin_ok {
+        return FailOfframpResponse {
+            success: false,
+            refund_block_index: None,
+            error: Some("Only relay or admin can retry refunds".to_string()),
+        };
+    }
+    retry_offramp_refund_impl(request_id).await
 }
 
 /// Get the status of an offramp request
@@ -830,6 +853,83 @@ fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
 ///
 /// - Onramp: Marks expired requests, ICP fee NOT refunded (anti-DDoS)
 /// - Offramp: Marks expired requests, refunds ckBTC to user (not LP)
+// =============================================================================
+// Ingress Message Filtering
+// =============================================================================
+
+/// Pre-execution filter for update calls.
+///
+/// Rejects unauthorized callers BEFORE decoding arguments, saving cycles.
+/// Queries are not subject to inspect_message (they go through query handlers).
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    use crate::canister_state::STATE;
+
+    let method = ic_cdk::api::msg_method_name();
+    let caller = ic_cdk::api::msg_caller();
+
+    let allowed = match method.as_str() {
+        // Controller-only
+        "set_admin" => ic_cdk::api::is_controller(&caller),
+
+        // Admin-only
+        "update_stableswap_config" | "withdraw_protocol_fees" | "set_icp_ddos_fee"
+        | "withdraw_icp_fees" | "redistribute_fees" | "prune_state"
+        | "set_test_timeouts" => {
+            let state = STATE.read().unwrap();
+            state.admin == Some(caller)
+        }
+
+        // Relay or admin
+        "retry_offramp_refund" => {
+            let state = STATE.read().unwrap();
+            let is_admin = state.admin == Some(caller);
+            let is_relay = match &state.registered_relay {
+                Some(relay) => relay.principal == caller,
+                None => false,
+            };
+            is_admin || is_relay
+        }
+
+        // Relay-only
+        "send_btc_tx" | "register_swap" | "complete_swap" | "submit_invoice"
+        | "mark_offramp_in_progress" | "complete_offramp" | "fail_offramp"
+        | "register_ln_channel" | "verify_ln_channel" | "get_utxos_for_address"
+        | "get_ln_funding_pubkey" | "sign_ln_message"
+        | "fund_channel" | "get_funding_utxos" | "update_channel_balance"
+        | "get_lp_liquidity_status" | "channel_funded" | "channel_closed"
+        | "create_htlc" | "fulfill_htlc" | "timeout_htlc"
+        | "create_htlc_with_tx_details" | "sign_htlc_success" | "sign_htlc_timeout"
+        | "generate_channel_secrets" | "sign_counterparty_commitment"
+        | "sign_holder_commitment_v2" | "sign_closing_tx"
+        | "sign_justice_tx" | "sign_htlc_tx" | "register_channel_info"
+        | "check_expired_swaps" | "register_relay" => {
+            let state = STATE.read().unwrap();
+            match &state.registered_relay {
+                Some(relay) => relay.principal == caller,
+                None => false,
+            }
+        }
+
+        // User methods — anyone can call (they are self-scoped by msg_caller)
+        "get_ln_address" | "query_ln_invoice" | "get_btc_liquidity_address_for_caller"
+        | "set_btc_liquidity_address" | "get_btc_balance" | "set_btc_address"
+        | "transaction_notification" | "deposit_channel" | "withdraw_lp" | "deposit_lp"
+        | "trigger_withdraw" | "request_onramp_invoice" | "request_offramp"
+        | "deposit_ckbtc" | "withdraw_ckbtc" | "get_lp_btc_address"
+        | "deposit_btc" | "withdraw_btc" | "get_depositor_btc_balance"
+        | "send_btc_from_depositor_address" => true,
+
+        // Unknown method — reject
+        _ => false,
+    };
+
+    if allowed {
+        ic_cdk::api::call::accept_message();
+    }
+    // Otherwise: message silently rejected, no cycles spent on arg decoding
+}
+
 ///
 /// Timeout periods:
 /// - Onramp: 30 minutes

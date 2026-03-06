@@ -1096,7 +1096,9 @@ pub enum OfframpRequestState {
     PaymentInProgress,
     /// Invoice paid successfully
     Completed { preimage: Vec<u8> },
-    /// Payment failed, refund initiated
+    /// Payment failed, ckBTC refund pending (refund transfer not yet confirmed)
+    FailedPendingRefund { reason: String },
+    /// Payment failed, refund attempted but transfer failed (retryable)
     Failed { reason: String },
     /// ckBTC refunded to user
     Refunded { block_index: Nat },

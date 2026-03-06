@@ -417,8 +417,12 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
             }
         };
 
-        // Check state
-        if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+        // Check state — allow retry from FailedPendingRefund (refund transfer failed previously)
+        if !matches!(request_info.state,
+            OfframpRequestState::Pending
+            | OfframpRequestState::PaymentInProgress
+            | OfframpRequestState::FailedPendingRefund { .. }
+        ) {
             return FailOfframpResponse {
                 success: false,
                 refund_block_index: None,
@@ -426,8 +430,8 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
             };
         }
 
-        // Mark as failed first
-        request_info.state = OfframpRequestState::Failed {
+        // Mark as pending refund — the ckBTC transfer hasn't succeeded yet
+        request_info.state = OfframpRequestState::FailedPendingRefund {
             reason: request.reason.clone(),
         };
 
@@ -473,10 +477,93 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
                 }
             }
             Err(err) => {
+                // State remains FailedPendingRefund — retryable
                 FailOfframpResponse {
                     success: false,
                     refund_block_index: None,
-                    error: Some(format!("Refund transfer failed: {:?}", err)),
+                    error: Some(format!("Refund transfer failed (retryable): {:?}", err)),
+                }
+            }
+        },
+        Err((code, msg)) => {
+            // State remains FailedPendingRefund — retryable
+            FailOfframpResponse {
+                success: false,
+                refund_block_index: None,
+                error: Some(format!("Refund call failed (retryable): {:?} - {}", code, msg)),
+            }
+        }
+    }
+}
+
+/// Retry a failed offramp refund
+///
+/// Called by admin/relay to retry ckBTC refund for requests stuck in FailedPendingRefund.
+pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpResponse {
+    let (user, ckbtc_collected) = {
+        let state = STATE.read().unwrap();
+
+        let request_info = match state.offramp_requests.get(&request_id) {
+            Some(info) => info,
+            None => {
+                return FailOfframpResponse {
+                    success: false,
+                    refund_block_index: None,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+        };
+
+        if !matches!(request_info.state, OfframpRequestState::FailedPendingRefund { .. }) {
+            return FailOfframpResponse {
+                success: false,
+                refund_block_index: None,
+                error: Some(format!("Request not in FailedPendingRefund state: {:?}", request_info.state)),
+            };
+        }
+
+        (request_info.user, request_info.ckbtc_collected)
+    };
+
+    // Retry ckBTC refund
+    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+
+    let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
+        from_subaccount: None,
+        to: icrc_ledger_types::icrc1::account::Account {
+            owner: user,
+            subaccount: None,
+        },
+        amount: candid::Nat::from(ckbtc_collected),
+        fee: None,
+        memo: None,
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+
+    let call_result: CallResult<(
+        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
+    )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_args,)).await;
+
+    match call_result {
+        Ok((inner_result,)) => match inner_result {
+            Ok(block_index) => {
+                let mut state = STATE.write().unwrap();
+                if let Some(request_info) = state.offramp_requests.get_mut(&request_id) {
+                    request_info.state = OfframpRequestState::Refunded {
+                        block_index: block_index.clone(),
+                    };
+                }
+                FailOfframpResponse {
+                    success: true,
+                    refund_block_index: Some(block_index),
+                    error: None,
+                }
+            }
+            Err(err) => {
+                FailOfframpResponse {
+                    success: false,
+                    refund_block_index: None,
+                    error: Some(format!("Refund transfer failed (retryable): {:?}", err)),
                 }
             }
         },
@@ -484,7 +571,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
             FailOfframpResponse {
                 success: false,
                 refund_block_index: None,
-                error: Some(format!("Refund call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Refund call failed (retryable): {:?} - {}", code, msg)),
             }
         }
     }
