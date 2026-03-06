@@ -79,9 +79,8 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         .map(|d| d.as_secs())
         .unwrap_or(ic_cdk::api::time() / 1_000_000_000 + 3600); // Default 1 hour
 
-    // Generate request_id from payment_hash
+    // Generate request_id from full payment_hash
     let request_id = payment_hash.iter()
-        .take(16)
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
