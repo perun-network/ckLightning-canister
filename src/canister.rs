@@ -1192,3 +1192,4 @@ fn sign_htlc_tx(request: SignHtlcTxRequest) -> LnSignResponse {
 fn set_admin(principal: Principal) {
     set_admin_impl(principal)
 }
+

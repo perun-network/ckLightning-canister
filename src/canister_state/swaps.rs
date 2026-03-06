@@ -103,10 +103,12 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     let mut payment_hash_arr = [0u8; 32];
     payment_hash_arr.copy_from_slice(&request.payment_hash);
 
-    // Get swap info and verify state
-    let swap_info = {
-        let state = STATE.read().unwrap();
-        match state.swaps.get(&payment_hash_arr) {
+    // Atomically: verify state, set InFlight, compute swap, deduct LP — all in ONE write lock.
+    // This prevents TOCTOU double-spend: a concurrent call will see InFlight and bail out.
+    let (swap_info, ckbtc_out) = {
+        let mut state = STATE.write().unwrap();
+
+        let swap = match state.swaps.get(&payment_hash_arr) {
             Some(info) => info.clone(),
             None => {
                 return CompleteSwapResponse {
@@ -115,60 +117,57 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                     error: Some("Swap not found for this payment_hash".to_string()),
                 };
             }
-        }
-    };
+        };
 
-    // Check swap state
-    match &swap_info.state {
-        SwapState::Pending => {} // OK to proceed
-        SwapState::Completed { .. } => {
-            return CompleteSwapResponse {
-                success: false,
-                block_index: None,
-                error: Some("Swap already completed".to_string()),
-            };
-        }
-        SwapState::Expired => {
-            return CompleteSwapResponse {
-                success: false,
-                block_index: None,
-                error: Some("Swap has expired".to_string()),
-            };
-        }
-        SwapState::Failed { reason } => {
-            return CompleteSwapResponse {
-                success: false,
-                block_index: None,
-                error: Some(format!("Swap failed: {}", reason)),
-            };
-        }
-    }
-
-    // Convert amount from millisatoshis to satoshis
-    let input_sat = swap_info.amount_msat / 1000;
-    if input_sat == 0 {
-        // Mark as failed
-        {
-            let mut state = STATE.write().unwrap();
-            if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
-                swap.state = SwapState::Failed {
-                    reason: "Amount too small".to_string(),
+        // Check swap state — reject anything that isn't Pending
+        match &swap.state {
+            SwapState::Pending => {} // OK to proceed
+            SwapState::InFlight => {
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some("Swap already in progress".to_string()),
+                };
+            }
+            SwapState::Completed { .. } => {
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some("Swap already completed".to_string()),
+                };
+            }
+            SwapState::Expired => {
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some("Swap has expired".to_string()),
+                };
+            }
+            SwapState::Failed { reason } => {
+                return CompleteSwapResponse {
+                    success: false,
+                    block_index: None,
+                    error: Some(format!("Swap failed: {}", reason)),
                 };
             }
         }
-        return CompleteSwapResponse {
-            success: false,
-            block_index: None,
-            error: Some("Amount too small (< 1000 msat)".to_string()),
-        };
-    }
 
-    // Use StableSwap AMM to compute ckBTC output for BTC input
-    let ckbtc_out = {
-        let mut state = STATE.write().unwrap();
+        // Convert amount from millisatoshis to satoshis
+        let input_sat = swap.amount_msat / 1000;
+        if input_sat == 0 {
+            if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
+                s.state = SwapState::Failed {
+                    reason: "Amount too small".to_string(),
+                };
+            }
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some("Amount too small (< 1000 msat)".to_string()),
+            };
+        }
 
-        // Get pool balances for StableSwap pricing
-        // BTC balance includes channel BTC (it's still system BTC, just in channels not on-chain)
+        // Compute StableSwap output
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
         let btc_balance = btc_balance + state.total_btc_in_channels;
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
@@ -182,8 +181,8 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         ) {
             Ok(r) => r,
             Err(e) => {
-                if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
-                    swap.state = SwapState::Failed {
+                if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
+                    s.state = SwapState::Failed {
                         reason: format!("StableSwap error: {}", e),
                     };
                 }
@@ -200,11 +199,11 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 
         let ckbtc_out = swap_result.output_amount;
 
-        // Deduct ckBTC from LP proportionally (only the output amount — LP fee stays in pool)
+        // Deduct ckBTC from LP proportionally
         let amount_nat = Nat::from(ckbtc_out);
         if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, amount_nat) {
-            if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
-                swap.state = SwapState::Failed {
+            if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
+                s.state = SwapState::Failed {
                     reason: "Insufficient LP liquidity".to_string(),
                 };
             }
@@ -215,7 +214,12 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             };
         }
 
-        ckbtc_out
+        // Mark as InFlight BEFORE releasing the lock — prevents concurrent double-spend
+        if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
+            s.state = SwapState::InFlight;
+        }
+
+        (swap, ckbtc_out)
     };
 
     // Execute ckBTC transfer
@@ -266,17 +270,28 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 
                 // Refund ICP fee to the fee payer (if there was one)
                 if let Some(fee_payer) = icp_fee_payer {
-                    let refund_result = refund_icp_fee(fee_payer).await;
-                    if let Err(e) = refund_result {
-                        ic_cdk::println!("Warning: Failed to refund ICP fee: {}", e);
-                        // Don't fail the swap - ckBTC was already transferred successfully
-                    } else {
-                        // Mark ICP fee as refunded
+                    // Mark as refunded BEFORE the call to prevent double-refund race
+                    // (e.g. heartbeat expiry triggering a concurrent refund path)
+                    {
                         let mut state = STATE.write().unwrap();
                         for request in state.onramp_requests.values_mut() {
                             if let Some(ref ph) = request.payment_hash {
                                 if ph.as_slice() == payment_hash_arr.as_slice() {
                                     request.icp_fee_refunded = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let refund_result = refund_icp_fee(fee_payer).await;
+                    if let Err(e) = refund_result {
+                        ic_cdk::println!("Warning: Failed to refund ICP fee: {}", e);
+                        // Roll back the flag on failure so it can be retried
+                        let mut state = STATE.write().unwrap();
+                        for request in state.onramp_requests.values_mut() {
+                            if let Some(ref ph) = request.payment_hash {
+                                if ph.as_slice() == payment_hash_arr.as_slice() {
+                                    request.icp_fee_refunded = false;
                                     break;
                                 }
                             }

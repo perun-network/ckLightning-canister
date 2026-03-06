@@ -85,9 +85,22 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
+    // Reject duplicate offramp requests for the same invoice (prevents ckBTC loss via overwrite)
+    {
+        let state = STATE.read().unwrap();
+        if state.offramp_requests.contains_key(&request_id) {
+            return OfframpResponse {
+                request_id,
+                success: false,
+                amount_sats: Some(btc_out as u64),
+                error: Some("Duplicate offramp request: this invoice has already been submitted".to_string()),
+            };
+        }
+    }
+
     // Use StableSwap to compute how much ckBTC the user must pay for the desired BTC output
-    let (ckbtc_required, amount_sats) = {
-        let mut state = STATE.write().unwrap();
+    let (ckbtc_required, amount_sats, protocol_fee) = {
+        let state = STATE.read().unwrap();
 
         // BTC balance includes channel BTC for StableSwap pricing
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
@@ -102,10 +115,9 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
             &crate::stableswap::SwapDirection::CkbtcToBtc,
         ) {
             Ok(swap_result) => {
-                // Track protocol fees
-                state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(swap_result.protocol_fee);
+                // Don't track protocol fees yet — only after both ICP and ckBTC collection succeed.
                 // output_amount in get_swap_input is the required input
-                (swap_result.output_amount, btc_out as u64)
+                (swap_result.output_amount, btc_out as u64, swap_result.protocol_fee)
             }
             Err(e) => {
                 return OfframpResponse {
@@ -222,6 +234,8 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
                 {
                     let mut state = STATE.write().unwrap();
+                    // Track protocol fees only AFTER both ICP and ckBTC collection succeeded
+                    state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(protocol_fee);
                     state.offramp_requests.insert(request_id.clone(), request_info);
                 }
 
@@ -384,7 +398,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
 /// Called by the relay when it fails to pay the Lightning invoice.
 /// The ckBTC is refunded to the user.
 pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpResponse {
-    let (user, amount_sats) = {
+    let (user, ckbtc_collected) = {
         let mut state = STATE.write().unwrap();
 
         let request_info = match state.offramp_requests.get_mut(&request.request_id) {
@@ -412,7 +426,9 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
             reason: request.reason.clone(),
         };
 
-        (request_info.user, request_info.amount_sats)
+        // Refund ckbtc_collected (the actual amount taken from the user), NOT amount_sats
+        // (which is the BTC invoice amount before StableSwap premium).
+        (request_info.user, request_info.ckbtc_collected)
     };
 
     // Refund ckBTC to user
@@ -424,7 +440,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
             owner: user,
             subaccount: None,
         },
-        amount: candid::Nat::from(amount_sats),
+        amount: candid::Nat::from(ckbtc_collected),
         fee: None,
         memo: None,
         created_at_time: None,

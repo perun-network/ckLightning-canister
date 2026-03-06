@@ -62,13 +62,32 @@ pub async fn check_expired_swaps_impl() {
             .collect()
     };
 
-    // Mark expired onramp requests
+    // Mark expired onramp requests AND their corresponding SwapInfo entries
     if !expired_onramp_ids.is_empty() {
         let mut state = STATE.write().unwrap();
+
+        // Collect payment hashes to expire from swaps map
+        let mut swap_hashes_to_expire: Vec<[u8; 32]> = Vec::new();
         for id in &expired_onramp_ids {
             if let Some(req) = state.onramp_requests.get_mut(id) {
+                if let Some(ref ph) = req.payment_hash {
+                    if ph.len() == 32 {
+                        let mut hash_arr = [0u8; 32];
+                        hash_arr.copy_from_slice(ph);
+                        swap_hashes_to_expire.push(hash_arr);
+                    }
+                }
                 req.state = OnrampRequestState::Expired;
                 ic_cdk::println!("Onramp request {} expired (ICP fee not refunded)", id);
+            }
+        }
+
+        // Now expire the corresponding SwapInfo entries
+        for hash_arr in swap_hashes_to_expire {
+            if let Some(swap) = state.swaps.get_mut(&hash_arr) {
+                if matches!(swap.state, crate::ic_types::SwapState::Pending) {
+                    swap.state = crate::ic_types::SwapState::Expired;
+                }
             }
         }
     }
@@ -79,21 +98,24 @@ pub async fn check_expired_swaps_impl() {
         state.offramp_requests
             .iter()
             .filter(|(_, req)| {
-                matches!(req.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress)
+                // Only expire Pending requests — NEVER expire PaymentInProgress.
+                // If the relay is actively paying an invoice, expiring it would cause
+                // the user to get both a ckBTC refund AND the BTC Lightning payment.
+                matches!(req.state, OfframpRequestState::Pending)
                     && now > req.created_at + offramp_timeout
             })
-            .map(|(id, req)| (id.clone(), req.user, req.amount_sats))
+            .map(|(id, req)| (id.clone(), req.user, req.ckbtc_collected))
             .collect()
     };
 
     // Process offramp expirations one at a time (each requires async refund)
-    for (request_id, user, amount_sats) in expired_offramp_requests {
+    for (request_id, user, ckbtc_collected) in expired_offramp_requests {
         // Mark as expired first
         {
             let mut state = STATE.write().unwrap();
             if let Some(req) = state.offramp_requests.get_mut(&request_id) {
                 // Double-check state hasn't changed
-                if !matches!(req.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+                if !matches!(req.state, OfframpRequestState::Pending) {
                     continue;
                 }
                 req.state = OfframpRequestState::Expired { refund_block_index: None };
@@ -110,7 +132,7 @@ pub async fn check_expired_swaps_impl() {
                 owner: user,
                 subaccount: None,
             },
-            amount: candid::Nat::from(amount_sats),
+            amount: candid::Nat::from(ckbtc_collected),
             fee: None,
             memo: None,
             created_at_time: None,

@@ -900,6 +900,8 @@ pub enum BtcAddressType {
 pub enum SwapState {
     /// Swap registered, waiting for Lightning payment
     Pending,
+    /// LP balance deducted, ckBTC transfer in progress (prevents TOCTOU double-spend)
+    InFlight,
     /// Lightning payment received, ckBTC transfer completed
     Completed { block_index: Nat },
     /// Swap expired (Lightning payment not received in time)
