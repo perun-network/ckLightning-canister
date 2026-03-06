@@ -885,53 +885,107 @@ where
 
     /// Serialize all persistable state into a snapshot for stable memory.
     pub fn to_snapshot(&self) -> CanisterStateSnapshot {
+        // Sort all HashMap-derived Vecs for deterministic serialization.
+        // This ensures identical state produces identical snapshot bytes
+        // regardless of HashMap iteration order.
+        let mut btc_liquidity_addresses: Vec<_> = self.btc_liquidity_addresses.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        btc_liquidity_addresses.sort_by_key(|(k, _)| *k);
+
+        let mut pending_btc_deposits: Vec<_> = self.pending_btc_deposits.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        pending_btc_deposits.sort_by_key(|(k, _)| *k);
+
+        let mut processed_utxos: Vec<_> = self.processed_utxos.iter()
+            .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect();
+        processed_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+
+        let mut user_holdings: Vec<_> = self.user_holdings.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        user_holdings.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+
+        let mut channels: Vec<_> = self.channels.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        channels.sort_by_key(|(k, _)| k.clone());
+
+        let mut swaps: Vec<_> = self.swaps.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        swaps.sort_by_key(|(k, _)| *k);
+
+        let mut ln_channels: Vec<_> = self.ln_channels.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        ln_channels.sort_by_key(|(k, _)| *k);
+
+        let mut onramp_requests: Vec<_> = self.onramp_requests.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        onramp_requests.sort_by_key(|(k, _)| k.clone());
+
+        let mut offramp_requests: Vec<_> = self.offramp_requests.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        offramp_requests.sort_by_key(|(k, _)| k.clone());
+
+        let mut channel_balances: Vec<_> = self.channel_balances.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        channel_balances.sort_by_key(|(k, _)| *k);
+
+        let mut reserved_utxos: Vec<_> = self.reserved_utxos.iter()
+            .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect();
+        reserved_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+
+        let mut channel_secrets: Vec<_> = self.channel_secrets.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        channel_secrets.sort_by_key(|(k, _)| *k);
+
+        let mut channel_counterparty_pubkeys: Vec<_> = self.channel_counterparty_pubkeys.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        channel_counterparty_pubkeys.sort_by_key(|(k, _)| *k);
+
+        let mut htlc_tx_details: Vec<_> = self.htlc_tx_details.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        htlc_tx_details.sort_by_key(|(k, _)| *k);
+
+        let mut onramp_rate_limits: Vec<_> = self.onramp_rate_limits.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        onramp_rate_limits.sort_by_key(|(k, _)| *k);
+
+        let mut offramp_rate_limits: Vec<_> = self.offramp_rate_limits.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        offramp_rate_limits.sort_by_key(|(k, _)| *k);
+
+        let mut funded_channels: Vec<String> = self.funded_channels.iter().cloned().collect();
+        funded_channels.sort();
+
         CanisterStateSnapshot {
             version: 1,
             principal: self.principal,
-            btc_liquidity_addresses: self.btc_liquidity_addresses.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            btc_liquidity_addresses,
             btc_invoice_address: self.btc_invoice_address.clone(),
             lp_btc_address: self.lp_btc_address.clone(),
-            pending_btc_deposits: self.pending_btc_deposits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            processed_utxos: self.processed_utxos.iter()
-                .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect(),
-            user_holdings: self.user_holdings.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            channels: self.channels.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            pending_btc_deposits,
+            processed_utxos,
+            user_holdings,
+            channels,
             liq_pool: self.liq_pool.clone(),
-            swaps: self.swaps.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            ln_channels: self.ln_channels.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            onramp_requests: self.onramp_requests.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            offramp_requests: self.offramp_requests.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            channel_balances: self.channel_balances.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            swaps,
+            ln_channels,
+            onramp_requests,
+            offramp_requests,
+            channel_balances,
             total_btc_deposited: self.total_btc_deposited,
             total_btc_in_channels: self.total_btc_in_channels,
-            reserved_utxos: self.reserved_utxos.iter()
-                .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect(),
+            reserved_utxos,
             htlc_manager: self.htlc_manager.clone(),
-            channel_secrets: self.channel_secrets.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            channel_counterparty_pubkeys: self.channel_counterparty_pubkeys.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            htlc_tx_details: self.htlc_tx_details.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            channel_secrets,
+            channel_counterparty_pubkeys,
+            htlc_tx_details,
             registered_relay: self.registered_relay.clone(),
-            onramp_rate_limits: self.onramp_rate_limits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            offramp_rate_limits: self.offramp_rate_limits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            onramp_rate_limits,
+            offramp_rate_limits,
             stableswap_config: self.stableswap_config.clone(),
             protocol_fees_ckbtc: self.protocol_fees_ckbtc,
             admin: self.admin,
             icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
-            funded_channels: self.funded_channels.iter().cloned().collect(),
+            funded_channels,
         }
     }
 
