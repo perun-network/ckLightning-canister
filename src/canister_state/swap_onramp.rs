@@ -152,7 +152,7 @@ pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
             request_id: req.request_id.clone(),
             recipient: req.recipient,
             amount_sats: req.amount_sats,
-            amount_msat: req.amount_sats * 1000,
+            amount_msat: req.amount_sats.saturating_mul(1000),
             created_at: req.created_at,
         })
         .collect()
@@ -218,7 +218,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
 
     let swap_info = SwapInfo {
         payment_hash: request.payment_hash,
-        amount_msat: request_info.amount_sats * 1000,
+        amount_msat: request_info.amount_sats.saturating_mul(1000),
         recipient: request_info.recipient,
         created_at: blocktime(),
         expiry_timestamp: request.expiry_timestamp,

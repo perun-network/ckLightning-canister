@@ -642,9 +642,13 @@ pub fn update_stableswap_config_impl(
 pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtocolFeesResponse {
     let caller = msg_caller();
 
+    // Zero the counter atomically BEFORE the transfer to prevent double-withdrawal race.
+    // Restore on failure.
     let (admin, amount) = {
-        let state = STATE.read().unwrap();
-        (state.admin, state.protocol_fees_ckbtc)
+        let mut state = STATE.write().unwrap();
+        let amount = state.protocol_fees_ckbtc;
+        state.protocol_fees_ckbtc = 0;
+        (state.admin, amount)
     };
 
     // Check admin authorization
@@ -693,10 +697,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
     match call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                // Reset the counter on success
-                let mut state = STATE.write().unwrap();
-                state.protocol_fees_ckbtc = 0;
-
+                // Counter already zeroed before transfer
                 WithdrawProtocolFeesResponse {
                     success: true,
                     btc_amount: 0,
@@ -706,6 +707,9 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
                 }
             }
             Err(e) => {
+                // Restore counter on failure
+                let mut state = STATE.write().unwrap();
+                state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(amount);
                 ic_cdk::println!("Protocol fee withdrawal failed: {:?}", e);
                 WithdrawProtocolFeesResponse {
                     success: false,
@@ -717,6 +721,9 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
             }
         },
         Err((code, msg)) => {
+            // Restore counter on failure
+            let mut state = STATE.write().unwrap();
+            state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(amount);
             ic_cdk::println!("Protocol fee withdrawal call failed: {:?} - {}", code, msg);
             WithdrawProtocolFeesResponse {
                 success: false,

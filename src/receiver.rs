@@ -320,8 +320,8 @@ impl TransactionICRCNotification {
         // Convert Nat to u64 (if possible)
         let amount = transfer.amount.0.to_u64().unwrap_or(0);
 
-        // Get the Memo, if present
-        let memo = transfer.memo.clone().unwrap();
+        // Get the Memo, if present — return None if no memo
+        let memo = transfer.memo.clone()?;
 
         Some(Self {
             to: to_identifier,

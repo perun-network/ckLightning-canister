@@ -426,6 +426,9 @@ fn register_ln_channel(request: RegisterLnChannelRequest) -> RegisterLnChannelRe
 #[update]
 #[candid_method(update)]
 async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelResponse {
+    if let Err(e) = assert_relay_caller() {
+        return VerifyLnChannelResponse { verified: false, confirmations: None, utxo_value_sats: None, error: Some(e) };
+    }
     verify_ln_channel_impl(request).await
 }
 
@@ -433,6 +436,7 @@ async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelRes
 #[update]
 #[candid_method(update)]
 async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canister::GetUtxosResponse, String> {
+    assert_relay_caller().map_err(|e| e)?;
     use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
     use crate::BTC_CONTEXT;
 

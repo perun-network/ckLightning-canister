@@ -290,9 +290,11 @@ pub async fn set_btc_address_impl(
     let address_type = set_btc_address_args.address_type;
     let principal = msg_caller();
 
-    assert!(principal == set_btc_address_args.principal.unwrap());
-
-    assert!(!state.btc_liquidity_addresses.contains_key(&principal));
+    match set_btc_address_args.principal {
+        Some(p) if p == principal => {}
+        Some(_) => return Err(BtcError::Other("Principal mismatch: caller does not match request principal".into())),
+        None => return Err(BtcError::Other("Principal is required".into())),
+    }
 
     // Check if address for this type exists
     if let Some(address) = state.btc_liquidity_addresses.get(&principal) {
@@ -855,7 +857,7 @@ where
         }
 
         let total = amount.clone() - needed;
-        let total_u64 = total.0.to_u64_digits()[0];
+        let total_u64 = total.0.to_u64_digits().first().copied().unwrap_or(0);
         Ok((total_u64, to_deduct))
     }
 

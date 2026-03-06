@@ -234,7 +234,8 @@ pub fn build_htlc_timeout_tx(
 ) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
-        lock_time: LockTime::from_height(cltv_expiry).expect("valid locktime"),
+        lock_time: LockTime::from_height(cltv_expiry.min(499_999_999))
+            .expect("clamped locktime is always valid"),
         input: vec![TxIn {
             previous_output: htlc_outpoint,
             script_sig: ScriptBuf::new(),
