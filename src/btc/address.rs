@@ -23,10 +23,6 @@ use ic_cdk::{
 };
 use std::str::FromStr;
 
-#[derive(candid::CandidType, candid::Deserialize)]
-pub struct SetLiquidityPoolAddressArgs {
-    pub address: String,
-}
 #[update]
 
 pub async fn get_segwit_address(purpose: BtcPurpose) -> Result<String, BtcError> {

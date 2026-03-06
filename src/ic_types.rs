@@ -292,12 +292,6 @@ pub struct FundingLPQueryArgs {
 }
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
 
-pub struct SendBtcArgs {
-    pub to_address: String,
-    pub amount_sat: Nat,
-}
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
-
 pub struct SendFromP2pkhAddressArgs {
     pub destination_address: String,
     pub amount_in_satoshi: u64,
@@ -667,24 +661,6 @@ pub struct ChannelSecrets {
     pub commitment_seed: Vec<u8>,
 }
 
-/// Request to register channel secrets (called by relay when channel opens)
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct RegisterChannelSecretsRequest {
-    pub secrets: ChannelSecrets,
-}
-
-/// Response from registering channel secrets
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct RegisterChannelSecretsResponse {
-    pub success: bool,
-    /// Public keys derived from the secrets (for verification)
-    pub htlc_basepoint: Option<Vec<u8>>,
-    pub revocation_basepoint: Option<Vec<u8>>,
-    pub delayed_payment_basepoint: Option<Vec<u8>>,
-    pub payment_point: Option<Vec<u8>>,
-    pub error: Option<String>,
-}
-
 /// Query channel secrets status
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct ChannelSecretsInfo {
@@ -818,37 +794,6 @@ pub struct Params {
     pub challenge_duration: Duration,
 }
 
-#[derive(Deserialize, CandidType, Default, Clone)]
-pub struct LiquidityPoolState {
-    pub total_ckbtc: Amount,
-    pub locked_ckbtc: Amount,
-    pub total_btc: Amount,
-    pub locked_btc: Amount,
-}
-#[derive(Deserialize, CandidType, Default, Clone)]
-pub enum WithdrawalState {
-    #[default]
-    Idle,
-    AwaitingConfirmations {
-        txid: String,
-        confirmations: u64,
-    },
-}
-#[derive(Deserialize, CandidType, Default, Clone)]
-pub enum DepositingState {
-    #[default]
-    Idle,
-    AwaitingConfirmations {
-        txid: String,
-        confirmations: u64,
-    },
-}
-
-#[derive(Deserialize, CandidType, Default, Clone)]
-pub struct CklChannelState {
-    pub depositing: DepositingState,
-    pub total_btc: Amount,
-}
 #[derive(Deserialize, CandidType, Default, Clone, Debug)]
 
 pub enum CklChannelAction {
@@ -901,12 +846,6 @@ pub struct RegisteredState {
     /// The challenge timeout after which the currently registered state becomes
     /// available for withdrawing. Ignored for finalized channels.
     pub timeout: Timestamp,
-}
-
-#[derive(CandidType)]
-pub struct CkAccount {
-    pub owner: Principal,
-    pub subaccount: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize, CandidType, Clone)]
