@@ -115,6 +115,7 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
     let mut total_credited: u64 = 0;
 
     // Process each UTXO
+    // Use a single write lock for the check-and-insert to prevent TOCTOU double-credit
     for utxo in &utxos_response.utxos {
         // Calculate confirmations
         let confirmations = if utxo.height > 0 {
@@ -128,15 +129,6 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
             continue;
         }
 
-        // Check if this UTXO was already processed
-        let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
-        {
-            let state = STATE.read().unwrap();
-            if state.processed_utxos.contains_key(&utxo_key) {
-                continue;
-            }
-        }
-
         // If a specific txid was provided, only process matching UTXOs
         if let Some(ref expected_txid) = request.txid {
             if utxo.outpoint.txid.as_slice() != expected_txid.as_slice() {
@@ -144,12 +136,16 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
             }
         }
 
-        // Credit this UTXO to the caller
+        // Atomically check+insert processed_utxos and credit in one write lock
+        let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
         let amount = utxo.value;
         {
             let mut state = STATE.write().unwrap();
-            state.liq_pool.deposit(caller, PoolAsset::BTC, Nat::from(amount));
+            if state.processed_utxos.contains_key(&utxo_key) {
+                continue;
+            }
             state.processed_utxos.insert(utxo_key, caller);
+            state.liq_pool.deposit(caller, PoolAsset::BTC, Nat::from(amount));
         }
 
         total_credited += amount;
@@ -488,6 +484,19 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
         };
     }
 
+    // Idempotency guard: reject duplicate fund_channel for the same address
+    {
+        let state = STATE.read().unwrap();
+        if state.funded_channels.contains(&request.funding_address) {
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some("Channel already funded for this address".to_string()),
+            };
+        }
+    }
+
     // Parse and validate funding address
     let funding_address = match Address::from_str(&request.funding_address) {
         Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
@@ -565,7 +574,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     // Check we have enough funds (with some margin for fees)
     let total_available: u64 = own_utxos.iter().map(|u| u.value).sum();
     let fee_margin = 5000u64; // 5000 sats buffer for fees
-    if total_available < request.amount_sat + fee_margin {
+    if total_available < request.amount_sat.saturating_add(fee_margin) {
         return FundChannelResponse {
             success: false,
             signed_tx: None,
@@ -608,9 +617,18 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     let tx_bytes = serialize(&signed_tx);
     let txid = signed_tx.compute_txid().to_string();
 
-    // Track the funding in canister state
+    // Track the funding in canister state (atomically with idempotency guard)
     {
         let mut state = STATE.write().unwrap();
+        if !state.funded_channels.insert(request.funding_address.clone()) {
+            // Race: another call funded this address between our read check and here
+            return FundChannelResponse {
+                success: false,
+                signed_tx: None,
+                txid: None,
+                error: Some("Channel already funded for this address".to_string()),
+            };
+        }
         state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(request.amount_sat);
         // Deduct from LPs proportionally — each LP's BTC balance decreases by their share
         let amount_nat = Nat::from(request.amount_sat);

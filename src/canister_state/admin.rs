@@ -483,7 +483,7 @@ pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
 
     // BTC balance includes channel BTC for StableSwap pricing
     let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
-    let btc_balance = btc_balance + state.total_btc_in_channels;
+    let btc_balance = btc_balance.saturating_add(state.total_btc_in_channels);
     let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
     let effective_fee_bps = crate::stableswap::compute_effective_fee_bps(

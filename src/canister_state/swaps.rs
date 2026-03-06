@@ -169,7 +169,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 
         // Compute StableSwap output
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
-        let btc_balance = btc_balance + state.total_btc_in_channels;
+        let btc_balance = btc_balance.saturating_add(state.total_btc_in_channels);
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
         let swap_result = match crate::stableswap::get_swap_output(

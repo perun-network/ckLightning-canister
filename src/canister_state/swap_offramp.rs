@@ -104,7 +104,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
         // BTC balance includes channel BTC for StableSwap pricing
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
-        let btc_balance = btc_balance + state.total_btc_in_channels;
+        let btc_balance = btc_balance.saturating_add(state.total_btc_in_channels);
         let ckbtc_balance: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC).0.clone().try_into().unwrap_or(0);
 
         match crate::stableswap::get_swap_input(
@@ -375,15 +375,20 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     };
 
     // Refund ICP fee to the user (on success)
-    let refund_result = refund_icp_fee(user).await;
-    if let Err(e) = refund_result {
-        ic_cdk::println!("Warning: Failed to refund ICP fee for offramp: {}", e);
-        // Don't fail the completion - Lightning payment was successful
-    } else {
-        // Mark ICP fee as refunded
+    // Mark as refunded BEFORE the call to prevent double-refund race
+    {
         let mut state = STATE.write().unwrap();
         if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
             request_info.icp_fee_refunded = true;
+        }
+    }
+    let refund_result = refund_icp_fee(user).await;
+    if let Err(e) = refund_result {
+        ic_cdk::println!("Warning: Failed to refund ICP fee for offramp: {}", e);
+        // Roll back the flag so a retry can attempt the refund
+        let mut state = STATE.write().unwrap();
+        if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
+            request_info.icp_fee_refunded = false;
         }
     }
 

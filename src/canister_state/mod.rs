@@ -80,7 +80,7 @@ use crate::receiver;
 use crate::require;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use lazy_static::lazy_static;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use crate::ic_types::RelayRegistration;
@@ -226,6 +226,9 @@ where
 
     // Configurable ICP anti-DDoS fee (in e8s). Default: 100_000_000 (1 ICP)
     pub(crate) icp_ddos_fee_e8s: u64,
+
+    // Funded channel addresses (idempotency guard for fund_channel)
+    pub(crate) funded_channels: HashSet<String>,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -522,6 +525,7 @@ where
             protocol_fees_ckbtc: 0,
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            funded_channels: HashSet::new(),
         }
     }
 
@@ -575,6 +579,7 @@ where
             protocol_fees_ckbtc: 0,
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            funded_channels: HashSet::new(),
         }
     }
 
@@ -926,6 +931,7 @@ where
             protocol_fees_ckbtc: self.protocol_fees_ckbtc,
             admin: self.admin,
             icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
+            funded_channels: self.funded_channels.iter().cloned().collect(),
         }
     }
 
@@ -964,6 +970,7 @@ where
         self.protocol_fees_ckbtc = snap.protocol_fees_ckbtc;
         self.admin = snap.admin;
         self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
+        self.funded_channels = snap.funded_channels.into_iter().collect();
     }
 }
 
@@ -1011,6 +1018,7 @@ pub struct CanisterStateSnapshot {
     pub protocol_fees_ckbtc: u64,
     pub admin: Option<Principal>,
     pub icp_ddos_fee_e8s: u64,
+    pub funded_channels: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1145,6 +1153,7 @@ mod snapshot_tests {
         state.protocol_fees_ckbtc = 12345;
         state.admin = Some(test_principal_2);
         state.icp_ddos_fee_e8s = 200_000_000; // 2 ICP
+        state.funded_channels.insert("bcrt1qfunding".to_string());
 
         // Create snapshot
         let snapshot = state.to_snapshot();
@@ -1178,6 +1187,7 @@ mod snapshot_tests {
         assert_eq!(decoded.protocol_fees_ckbtc, 12345);
         assert_eq!(decoded.admin, Some(test_principal_2));
         assert_eq!(decoded.icp_ddos_fee_e8s, 200_000_000);
+        assert_eq!(decoded.funded_channels.len(), 1);
 
         // Restore from decoded snapshot into a fresh state
         let mut restored = make_test_state();
@@ -1208,6 +1218,7 @@ mod snapshot_tests {
         assert_eq!(restored.protocol_fees_ckbtc, 12345);
         assert_eq!(restored.admin, Some(test_principal_2));
         assert_eq!(restored.icp_ddos_fee_e8s, 200_000_000);
+        assert!(restored.funded_channels.contains("bcrt1qfunding"));
 
         // Verify LP pool survived round-trip
         assert_eq!(restored.liq_pool.get_balance(&test_principal, &PoolAsset::CkBTC), Nat::from(100_000u64));
