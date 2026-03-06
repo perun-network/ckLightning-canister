@@ -18,7 +18,6 @@ type ChannelSecretsInfo = record {
   htlc_basepoint : blob;
   delayed_payment_basepoint : blob;
 };
-type ChannelTime = record { time : nat64; chanid : blob };
 type CklChannelAction = variant { Depositing; Idle; Withdrawing };
 type CklError = variant {
   InvalidInput;
@@ -83,11 +82,6 @@ type DepositorBtcBalanceResponse = record {
   error : opt text;
   address : text;
   balance_sat : nat64;
-};
-type Event = variant {
-  Disputed : record { state : RegisteredState; timestamp : nat64 };
-  Funded : record { who : blob; total : nat; timestamp : nat64 };
-  Concluded : record { state : RegisteredState; timestamp : nat64 };
 };
 type FailOfframpRequest = record {
   request_id : text;
@@ -181,6 +175,12 @@ type HtlcInfo = record {
   sender_pubkey : blob;
   state : text;
   amount_msat : nat64;
+};
+type HttpHeader = record { value : text; name : text };
+type HttpResponse = record {
+  status : nat;
+  body : blob;
+  headers : vec HttpHeader;
 };
 type ICPReceiverError = variant {
   TxMapNotFound;
@@ -349,7 +349,12 @@ type RateLimitStatus = record {
   max_onramp_per_window : nat32;
   window_resets_in_seconds : nat64;
 };
-type RegEvent = record { time : nat64; event : Event; chanid : blob };
+type RedistributeFeesResponse = record {
+  error : opt text;
+  success : bool;
+  num_recipients : nat64;
+  amount_distributed : nat64;
+};
 type RegisterChannelInfoRequest = record {
   channel_keys_id : blob;
   counterparty_funding_pubkey : blob;
@@ -363,7 +368,11 @@ type RegisterLnChannelRequest = record {
   remote_node_id : blob;
   local_node_id : blob;
 };
-type RegisterRelayRequest = record { node_pubkey : blob };
+type RegisterRelayRequest = record {
+  relay_auth_token : opt text;
+  relay_http_url : opt text;
+  node_pubkey : blob;
+};
 type RegisterSwapRequest = record {
   payment_hash : blob;
   recipient : principal;
@@ -429,6 +438,11 @@ type SetBtcAddressMsg = variant {
   BtcAddressSetFailedSingle : BtcAddressType;
 };
 type SetBtcAddressResponse = record { msg : SetBtcAddressMsg; address : text };
+type SetIcpDdosFeeResponse = record {
+  fee_e8s : nat64;
+  error : opt text;
+  success : bool;
+};
 type SetLiquidityBtcAddressResponse = record {
   already_existed : bool;
   address : text;
@@ -503,8 +517,10 @@ type SignedCandidInvoice = record {
   payment_secret : blob;
 };
 type StableSwapConfig = record {
+  max_swap_pct_bps : nat64;
   amplification : nat64;
   imbalance_fee_bps : nat64;
+  rebate_bps : nat64;
   fee_bps : nat64;
   protocol_fee_share_bps : nat64;
   max_slippage_bps : nat64;
@@ -558,14 +574,17 @@ type TransactionICRCNotification = record {
   timestamp : opt nat64;
   amount : nat64;
 };
+type TransformArgs = record { context : blob; response : HttpResponse };
 type UpdateChannelBalanceRequest = record {
   channel_id : blob;
   our_balance_sats : nat64;
   their_balance_sats : nat64;
 };
 type UpdateStableSwapConfigRequest = record {
+  max_swap_pct_bps : opt nat64;
   amplification : opt nat64;
   imbalance_fee_bps : opt nat64;
+  rebate_bps : opt nat64;
   fee_bps : opt nat64;
   protocol_fee_share_bps : opt nat64;
   max_slippage_bps : opt nat64;
@@ -581,6 +600,12 @@ type VerifyLnChannelResponse = record {
   verified : bool;
   utxo_value_sats : opt nat64;
   error : opt text;
+};
+type WithdrawIcpFeesResponse = record {
+  block_index : opt nat;
+  error : opt text;
+  amount_e8s : nat64;
+  success : bool;
 };
 type WithdrawProtocolFeesResponse = record {
   error : opt text;
@@ -619,7 +644,7 @@ service : (Network) -> {
   // 
   // Called by the relay after successfully paying the Lightning invoice.
   // Requires the payment preimage as proof of payment.
-  // Refunds the 20 ICP anti-DDoS fee to the user on success.
+  // Refunds the ICP anti-DDoS fee to the user on success.
   __candid_method_complete_offramp : (CompleteOfframpRequest) -> (
       CompleteOfframpResponse,
     );
@@ -714,6 +739,8 @@ service : (Network) -> {
   __candid_method_get_funding_utxos : (nat64) -> (Result_4);
   // Get an HTLC by payment hash
   __candid_method_get_htlc : (blob) -> (opt HtlcInfo) query;
+  // Get the current ICP anti-DDoS fee amount.
+  __candid_method_get_icp_ddos_fee : () -> (nat64) query;
   // Get the invoice for a request (client polling)
   // 
   // Called by clients to check if their invoice is ready.
@@ -800,7 +827,6 @@ service : (Network) -> {
   // 
   // Called by the relay when it starts attempting to pay the invoice.
   __candid_method_mark_offramp_in_progress : (text) -> (bool);
-  __candid_method_query_events : (ChannelTime) -> (text) query;
   // Query a specific Lightning channel by ID
   __candid_method_query_ln_channel : (QueryLnChannelRequest) -> (
       opt LnChannelInfo,
@@ -815,6 +841,11 @@ service : (Network) -> {
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
       Result_9,
     ) query;
+  // Redistribute accumulated ckBTC protocol fees to LPs (admin-only).
+  // 
+  // Credits each LP's ckBTC balance proportionally based on their pool share,
+  // then resets the protocol fee counter.
+  __candid_method_redistribute_fees : () -> (RedistributeFeesResponse);
   // Register counterparty channel info for a channel.
   // 
   // Stores the counterparty's funding pubkey so the canister can reconstruct
@@ -822,8 +853,6 @@ service : (Network) -> {
   __candid_method_register_channel_info : (RegisterChannelInfoRequest) -> (
       bool,
     );
-  __candid_method_register_event : (blob, nat64, Event) -> ();
-  __candid_method_register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
   // 
   // Called by the relay node when a channel is opened.
@@ -869,18 +898,18 @@ service : (Network) -> {
   // 
   // Called by clients to initiate a swap. Returns a request_id that can be
   // used to poll for the invoice once the relay creates it.
-  // Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
+  // Requires prior ICRC-2 approval for the configured ICP anti-DDoS fee.
   // 
   // Flow:
-  // 1. Client approves 20 ICP for canister via ICP ledger icrc2_approve
+  // 1. Client approves ICP for canister via ICP ledger icrc2_approve
   // 2. Client calls this endpoint with (recipient, amount)
-  // 3. Canister takes 20 ICP fee, creates pending request, returns request_id
+  // 3. Canister takes ICP fee, creates pending request, returns request_id
   // 4. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
   // 5. Relay calls submit_invoice with the invoice
   // 6. Client polls get_invoice_by_request until invoice is ready
   // 7. Client pays the invoice
   // 8. Relay receives payment, calls complete_swap
-  // 9. Canister transfers ckBTC AND refunds 20 ICP to user
+  // 9. Canister transfers ckBTC AND refunds ICP to user
   __candid_method_request_onramp_invoice : (OnrampInvoiceRequest) -> (
       OnrampInvoiceResponse,
     );
@@ -901,6 +930,11 @@ service : (Network) -> {
   __candid_method_set_admin : (principal) -> ();
   __candid_method_set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   __candid_method_set_btc_liquidity_address : () -> (Result_12);
+  // Set the ICP anti-DDoS fee amount (admin-only).
+  // 
+  // Controls how much ICP is collected as a security deposit for swap requests.
+  // The fee is refunded on successful swap completion.
+  __candid_method_set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.
@@ -1014,6 +1048,10 @@ service : (Network) -> {
   // Withdraws the specified amount of ckBTC from the caller's LP balance.
   // The ckBTC is transferred directly to the caller's principal.
   __candid_method_withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
+  // Withdraw accumulated ICP fees from the canister (admin-only).
+  // 
+  // Transfers the canister's ICP balance (minus transfer fee) to the recipient.
+  __candid_method_withdraw_icp_fees : (principal) -> (WithdrawIcpFeesResponse);
   __candid_method_withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
   // Withdraw accumulated protocol fees (admin-only).
   // 
@@ -1037,12 +1075,11 @@ service : (Network) -> {
   // This allows E2E tests to trigger the expiry check without waiting for heartbeat.
   // In production, the heartbeat handles this automatically.
   check_expired_swaps : () -> ();
-  clear : () -> ();
   // Complete an offramp request after successful payment
   // 
   // Called by the relay after successfully paying the Lightning invoice.
   // Requires the payment preimage as proof of payment.
-  // Refunds the 20 ICP anti-DDoS fee to the user on success.
+  // Refunds the ICP anti-DDoS fee to the user on success.
   complete_offramp : (CompleteOfframpRequest) -> (CreateHtlcResponse);
   // Complete a Lightning → ckBTC swap after payment received
   // 
@@ -1082,8 +1119,6 @@ service : (Network) -> {
   // The canister will pull ckBTC from the caller and credit their LP balance.
   deposit_ckbtc : (nat) -> (LpDepositResponse);
   deposit_lp : (FundingLPArgs) -> (Result_1);
-  dequeue : () -> (opt text);
-  enqueue : (text) -> ();
   // Fail an offramp request and initiate refund
   // 
   // Called by the relay when it fails to pay the Lightning invoice.
@@ -1131,6 +1166,8 @@ service : (Network) -> {
   get_funding_utxos : (nat64) -> (Result_4);
   // Get an HTLC by payment hash
   get_htlc : (blob) -> (opt HtlcInfo) query;
+  // Get the current ICP anti-DDoS fee amount.
+  get_icp_ddos_fee : () -> (nat64) query;
   // Get the invoice for a request (client polling)
   // 
   // Called by clients to check if their invoice is ready.
@@ -1221,8 +1258,6 @@ service : (Network) -> {
   // 
   // Called by the relay when it starts attempting to pay the invoice.
   mark_offramp_in_progress : (text) -> (bool);
-  peek : () -> (opt text) query;
-  query_events : (ChannelTime) -> (text) query;
   // Query a specific Lightning channel by ID
   query_ln_channel : (QueryLnChannelRequest) -> (opt LnChannelInfo) query;
   // Query all registered Lightning channels
@@ -1233,13 +1268,16 @@ service : (Network) -> {
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_9) query;
+  // Redistribute accumulated ckBTC protocol fees to LPs (admin-only).
+  // 
+  // Credits each LP's ckBTC balance proportionally based on their pool share,
+  // then resets the protocol fee counter.
+  redistribute_fees : () -> (RedistributeFeesResponse);
   // Register counterparty channel info for a channel.
   // 
   // Stores the counterparty's funding pubkey so the canister can reconstruct
   // the funding redeemscript for sighash computation during signing.
   register_channel_info : (RegisterChannelInfoRequest) -> (bool);
-  register_event : (blob, nat64, Event) -> ();
-  register_event_isolated : (RegEvent) -> ();
   // Register a new Lightning channel for funding verification
   // 
   // Called by the relay node when a channel is opened.
@@ -1281,18 +1319,18 @@ service : (Network) -> {
   // 
   // Called by clients to initiate a swap. Returns a request_id that can be
   // used to poll for the invoice once the relay creates it.
-  // Requires prior ICRC-2 approval for 20 ICP anti-DDoS fee.
+  // Requires prior ICRC-2 approval for the configured ICP anti-DDoS fee.
   // 
   // Flow:
-  // 1. Client approves 20 ICP for canister via ICP ledger icrc2_approve
+  // 1. Client approves ICP for canister via ICP ledger icrc2_approve
   // 2. Client calls this endpoint with (recipient, amount)
-  // 3. Canister takes 20 ICP fee, creates pending request, returns request_id
+  // 3. Canister takes ICP fee, creates pending request, returns request_id
   // 4. Relay polls get_pending_invoice_requests, creates BOLT11 invoice
   // 5. Relay calls submit_invoice with the invoice
   // 6. Client polls get_invoice_by_request until invoice is ready
   // 7. Client pays the invoice
   // 8. Relay receives payment, calls complete_swap
-  // 9. Canister transfers ckBTC AND refunds 20 ICP to user
+  // 9. Canister transfers ckBTC AND refunds ICP to user
   request_onramp_invoice : (OnrampInvoiceRequest) -> (OnrampInvoiceResponse);
   // Send BTC from the caller's depositor address to a destination
   // 
@@ -1312,6 +1350,11 @@ service : (Network) -> {
   set_admin : (principal) -> ();
   set_btc_address : (SetBtcAddressArgs) -> (Result_11);
   set_btc_liquidity_address : () -> (Result_12);
+  // Set the ICP anti-DDoS fee amount (admin-only).
+  // 
+  // Controls how much ICP is collected as a security deposit for swap requests.
+  // The fee is refunded on successful swap completion.
+  set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.
@@ -1372,7 +1415,6 @@ service : (Network) -> {
   // HTLC transactions, or closing transactions. The canister signs using its
   // Lightning funding key derived via chainkey ECDSA.
   sign_ln_message : (LnSignRequest) -> (LnSignResponse);
-  size : () -> (nat64) query;
   // Submit a created invoice for a pending request
   // 
   // Called by the relay after creating a BOLT11 invoice for a pending request.
@@ -1384,6 +1426,11 @@ service : (Network) -> {
   // The sender can reclaim the funds.
   timeout_htlc : (TimeoutHtlcRequest) -> (TimeoutHtlcResponse);
   transaction_notification : (NotifyArgs) -> (Result_13);
+  // Transform function for HTTPS outcalls (required by IC consensus).
+  // 
+  // Ensures deterministic response across replicas by stripping response body.
+  // Name must match the string in `TransformContext::from_name()` in http_outcall.rs.
+  transform_webhook_response : (TransformArgs) -> (HttpResponse) query;
   trigger_withdraw : (WithdrawalReq) -> (Result_14);
   // Update channel balance after Lightning payment activity
   // 
@@ -1414,6 +1461,10 @@ service : (Network) -> {
   // Withdraws the specified amount of ckBTC from the caller's LP balance.
   // The ckBTC is transferred directly to the caller's principal.
   withdraw_ckbtc : (nat) -> (LpWithdrawResponse);
+  // Withdraw accumulated ICP fees from the canister (admin-only).
+  // 
+  // Transfers the canister's ICP balance (minus transfer fee) to the recipient.
+  withdraw_icp_fees : (principal) -> (WithdrawIcpFeesResponse);
   withdraw_lp : (WithdrawalLPArgs) -> (Result_1);
   // Withdraw accumulated protocol fees (admin-only).
   // 

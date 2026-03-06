@@ -14,9 +14,7 @@
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 pub mod canister;
 pub mod canister_state;
-pub mod deq;
 pub mod error;
-pub mod events;
 pub mod helpers;
 pub mod htlc;
 pub mod ic_types;
@@ -24,12 +22,10 @@ pub mod liquidity_pool;
 use crate::ic_types::ChannelFunding;
 pub mod btc;
 use crate::ic_types::LnInvoiceRequest;
-pub mod msg;
 pub mod receiver;
 pub mod stableswap;
 use crate::error::ResultBtc;
 use crate::error::{BtcError, CklError};
-use crate::events::{ChannelTime, Event, RegEvent};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
     BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
