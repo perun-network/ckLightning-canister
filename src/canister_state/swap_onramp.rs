@@ -18,6 +18,7 @@ use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
+use std::str::FromStr;
 
 /// Request a new onramp invoice
 ///
@@ -68,7 +69,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(
@@ -183,6 +184,48 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
             success: false,
             error: Some(format!("Invoice verification failed: {}", e)),
         };
+    }
+
+    // SECURITY: Parse BOLT11 and verify payment_hash and amount match the submitted values.
+    // This prevents a compromised relay from submitting mismatched invoices.
+    let parsed_invoice = match lightning_invoice::Bolt11Invoice::from_str(&request.invoice) {
+        Ok(inv) => inv,
+        Err(e) => {
+            return SubmitInvoiceResponse {
+                success: false,
+                error: Some(format!("Invalid BOLT11 invoice: {}", e)),
+            };
+        }
+    };
+
+    // Verify payment_hash matches
+    let invoice_payment_hash: &[u8] = parsed_invoice.payment_hash().as_ref();
+    if invoice_payment_hash != request.payment_hash.as_slice() {
+        return SubmitInvoiceResponse {
+            success: false,
+            error: Some("Invoice payment_hash does not match submitted payment_hash".to_string()),
+        };
+    }
+
+    // Verify amount matches the request
+    if let Some(invoice_msat) = parsed_invoice.amount_milli_satoshis() {
+        // Look up the request to get expected amount
+        let expected_msat = {
+            let state = STATE.read().unwrap();
+            state.onramp_requests.get(&request.request_id)
+                .map(|req| req.amount_sats.saturating_mul(1000))
+        };
+        if let Some(expected) = expected_msat {
+            if invoice_msat != expected {
+                return SubmitInvoiceResponse {
+                    success: false,
+                    error: Some(format!(
+                        "Invoice amount {}msat does not match request amount {}msat",
+                        invoice_msat, expected
+                    )),
+                };
+            }
+        }
     }
 
     let mut state = STATE.write().unwrap();

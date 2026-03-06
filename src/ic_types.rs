@@ -2019,3 +2019,30 @@ pub struct RegisterChannelInfoRequest {
     /// Counterparty's funding public key (33 bytes compressed)
     pub counterparty_funding_pubkey: Vec<u8>,
 }
+
+// =============================================================================
+// State Pruning & Monitoring
+// =============================================================================
+
+/// Result of pruning old terminal-state entries from canister state.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct PruneResult {
+    pub swaps_pruned: u64,
+    pub onramp_requests_pruned: u64,
+    pub offramp_requests_pruned: u64,
+    pub rate_limits_pruned: u64,
+}
+
+/// Statistics about canister state collections (for monitoring growth).
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct StateStats {
+    pub swaps_count: u64,
+    pub onramp_requests_count: u64,
+    pub offramp_requests_count: u64,
+    pub processed_utxos_count: u64,
+    pub funded_channels_count: u64,
+    pub onramp_rate_limits_count: u64,
+    pub offramp_rate_limits_count: u64,
+    pub channel_secrets_count: u64,
+    pub htlc_tx_details_count: u64,
+}

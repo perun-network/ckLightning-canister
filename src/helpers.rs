@@ -72,7 +72,7 @@ pub async fn execute_ledger_transfer(
         amount: Nat(amount_u64.into()),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");

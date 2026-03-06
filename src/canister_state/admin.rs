@@ -7,7 +7,7 @@ use crate::ic_types::PoolAsset;
 use crate::ic_types::{
     DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER, ICP_TRANSFER_FEE_E8S,
     ONRAMP_TIMEOUT_NS, OFFRAMP_TIMEOUT_NS, DEFAULT_CKBTC_FEE,
-    OnrampRequestState, OfframpRequestState,
+    OnrampRequestState, OfframpRequestState, SwapState,
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
     RelayRegistration,
     RateLimitInfo, RateLimitStatus,
@@ -17,6 +17,7 @@ use crate::ic_types::{
     WithdrawProtocolFeesResponse,
     SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
     StableSwapConfig,
+    PruneResult, StateStats,
 };
 
 use candid::{Nat, Principal};
@@ -135,7 +136,7 @@ pub async fn check_expired_swaps_impl() {
             amount: candid::Nat::from(ckbtc_collected),
             fee: None,
             memo: None,
-            created_at_time: None,
+            created_at_time: Some(ic_cdk::api::time()),
         };
 
         let call_result: CallResult<(
@@ -685,7 +686,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
         amount: Nat(amount.into()),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
@@ -843,7 +844,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
         amount: Nat(withdraw_amount.into()),
         fee: Some(Nat(ICP_TRANSFER_FEE_E8S.into())),
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(
@@ -931,5 +932,99 @@ pub fn redistribute_fees_impl() -> RedistributeFeesResponse {
         amount_distributed: amount,
         num_recipients: recipients as u64,
         error: None,
+    }
+}
+
+// =============================================================================
+// State Pruning & Monitoring
+// =============================================================================
+
+/// Prune terminal-state entries older than `older_than_ns` (nanoseconds).
+///
+/// Removes Completed/Expired/Failed/Refunded entries from swaps, onramp_requests,
+/// offramp_requests, and stale rate limit entries. This prevents unbounded state
+/// growth that could brick pre_upgrade serialization.
+pub fn prune_state_impl(older_than_ns: u64) -> PruneResult {
+    let caller = msg_caller();
+    let mut state = STATE.write().unwrap();
+
+    // Admin-only
+    match state.admin {
+        Some(admin) if admin == caller => {}
+        _ => {
+            return PruneResult {
+                swaps_pruned: 0,
+                onramp_requests_pruned: 0,
+                offramp_requests_pruned: 0,
+                rate_limits_pruned: 0,
+            };
+        }
+    }
+
+    let cutoff = older_than_ns;
+
+    // Prune swaps
+    let swaps_before = state.swaps.len();
+    state.swaps.retain(|_, swap| {
+        let is_terminal = matches!(swap.state, SwapState::Completed { .. } | SwapState::Expired | SwapState::Failed { .. });
+        !(is_terminal && swap.created_at < cutoff)
+    });
+    let swaps_pruned = (swaps_before - state.swaps.len()) as u64;
+
+    // Prune onramp requests
+    let onramp_before = state.onramp_requests.len();
+    state.onramp_requests.retain(|_, req| {
+        let is_terminal = matches!(req.state,
+            OnrampRequestState::Completed { .. } | OnrampRequestState::Expired | OnrampRequestState::Failed { .. }
+        );
+        !(is_terminal && req.created_at < cutoff)
+    });
+    let onramp_pruned = (onramp_before - state.onramp_requests.len()) as u64;
+
+    // Prune offramp requests
+    let offramp_before = state.offramp_requests.len();
+    state.offramp_requests.retain(|_, req| {
+        let is_terminal = matches!(req.state,
+            OfframpRequestState::Completed { .. } | OfframpRequestState::Failed { .. }
+            | OfframpRequestState::Refunded { .. } | OfframpRequestState::Expired { .. }
+        );
+        !(is_terminal && req.created_at < cutoff)
+    });
+    let offramp_pruned = (offramp_before - state.offramp_requests.len()) as u64;
+
+    // Prune stale rate limit entries (older than the rate limit window)
+    let now = blocktime();
+    let onramp_rl_before = state.onramp_rate_limits.len();
+    state.onramp_rate_limits.retain(|_, rl| {
+        now.saturating_sub(rl.window_start) < RATE_LIMIT_WINDOW_NS
+    });
+    let offramp_rl_before = state.offramp_rate_limits.len();
+    state.offramp_rate_limits.retain(|_, rl| {
+        now.saturating_sub(rl.window_start) < RATE_LIMIT_WINDOW_NS
+    });
+    let rate_limits_pruned = (onramp_rl_before - state.onramp_rate_limits.len()
+        + offramp_rl_before - state.offramp_rate_limits.len()) as u64;
+
+    PruneResult {
+        swaps_pruned,
+        onramp_requests_pruned: onramp_pruned,
+        offramp_requests_pruned: offramp_pruned,
+        rate_limits_pruned,
+    }
+}
+
+/// Get statistics about canister state collection sizes.
+pub fn get_state_stats_impl() -> StateStats {
+    let state = STATE.read().unwrap();
+    StateStats {
+        swaps_count: state.swaps.len() as u64,
+        onramp_requests_count: state.onramp_requests.len() as u64,
+        offramp_requests_count: state.offramp_requests.len() as u64,
+        processed_utxos_count: state.processed_utxos.len() as u64,
+        funded_channels_count: state.funded_channels.len() as u64,
+        onramp_rate_limits_count: state.onramp_rate_limits.len() as u64,
+        offramp_rate_limits_count: state.offramp_rate_limits.len() as u64,
+        channel_secrets_count: state.channel_secrets.len() as u64,
+        htlc_tx_details_count: state.htlc_tx_details.len() as u64,
     }
 }

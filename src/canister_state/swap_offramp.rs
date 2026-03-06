@@ -153,7 +153,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let icp_call_result: CallResult<(
@@ -202,7 +202,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         amount: candid::Nat::from(ckbtc_required),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let ckbtc_call_result: CallResult<(
@@ -448,7 +448,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
         amount: candid::Nat::from(ckbtc_collected),
         fee: None,
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(

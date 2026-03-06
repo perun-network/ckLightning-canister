@@ -62,6 +62,8 @@ use crate::canister_state::{
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
     set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl, redistribute_fees_impl,
     set_admin_impl,
+    // State pruning & monitoring
+    prune_state_impl, get_state_stats_impl,
     // HTTPS outcall helpers
     transform_webhook_response,
 };
@@ -127,6 +129,7 @@ use crate::ic_types::{
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
     SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
+    PruneResult, StateStats,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -1195,5 +1198,22 @@ fn sign_htlc_tx(request: SignHtlcTxRequest) -> LnSignResponse {
 #[candid_method(update)]
 fn set_admin(principal: Principal) {
     set_admin_impl(principal)
+}
+
+/// Prune terminal-state entries older than cutoff (admin-only).
+///
+/// Pass a nanosecond timestamp; entries with `created_at < older_than_ns` in
+/// terminal states (Completed, Expired, Failed, Refunded) will be removed.
+#[update]
+#[candid_method(update)]
+fn prune_state(older_than_ns: u64) -> PruneResult {
+    prune_state_impl(older_than_ns)
+}
+
+/// Get statistics about canister state collection sizes.
+#[query]
+#[candid_method(query)]
+fn get_state_stats() -> StateStats {
+    get_state_stats_impl()
 }
 

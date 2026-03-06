@@ -48,7 +48,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
         amount: amount.clone(),
         fee: None, // Use default fee
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(
@@ -159,7 +159,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         amount: amount.clone(),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(

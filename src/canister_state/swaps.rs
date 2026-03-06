@@ -222,7 +222,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         (swap, ckbtc_out)
     };
 
-    // Execute ckBTC transfer
+    // Execute ckBTC transfer (with created_at_time for ledger deduplication)
     let transfer_arg = TransferArg {
         from_subaccount: None,
         to: Account {
@@ -234,7 +234,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(
             request.payment_hash.clone(),
         )),
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
@@ -365,7 +365,7 @@ pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> 
         amount: candid::Nat::from(refund_amount),
         fee: Some(candid::Nat::from(ICP_TRANSFER_FEE_E8S)),
         memo: None,
-        created_at_time: None,
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
     let call_result: CallResult<(

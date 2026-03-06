@@ -80,6 +80,7 @@ use crate::ic_types::{
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,
     SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
+    PruneResult, StateStats,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal};
