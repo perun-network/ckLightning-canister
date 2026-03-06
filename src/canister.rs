@@ -891,11 +891,22 @@ fn inspect_message() {
             is_admin || is_relay
         }
 
+        // Relay registration — admin, controller, or existing relay (endpoint does its own auth)
+        "register_relay" => {
+            let state = STATE.read().unwrap();
+            let is_admin = state.admin == Some(caller);
+            let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+            is_admin || is_relay || ic_cdk::api::is_controller(&caller)
+        }
+
+        // Public canister key — needed by relay at startup before registration
+        "get_ln_funding_pubkey" => true,
+
         // Relay-only
         "send_btc_tx" | "register_swap" | "complete_swap" | "submit_invoice"
         | "mark_offramp_in_progress" | "complete_offramp" | "fail_offramp"
         | "register_ln_channel" | "verify_ln_channel" | "get_utxos_for_address"
-        | "get_ln_funding_pubkey" | "sign_ln_message"
+        | "sign_ln_message"
         | "fund_channel" | "get_funding_utxos" | "update_channel_balance"
         | "get_lp_liquidity_status" | "channel_funded" | "channel_closed"
         | "create_htlc" | "fulfill_htlc" | "timeout_htlc"
@@ -903,7 +914,7 @@ fn inspect_message() {
         | "generate_channel_secrets" | "sign_counterparty_commitment"
         | "sign_holder_commitment_v2" | "sign_closing_tx"
         | "sign_justice_tx" | "sign_htlc_tx" | "register_channel_info"
-        | "check_expired_swaps" | "register_relay" => {
+        | "check_expired_swaps" => {
             let state = STATE.read().unwrap();
             match &state.registered_relay {
                 Some(relay) => relay.principal == caller,
