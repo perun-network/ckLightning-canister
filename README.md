@@ -2,6 +2,20 @@
 
 IC canister for the ckLightning bridge. Manages liquidity pools, atomic BTC/ckBTC swaps, channel signing, and fee collection.
 
+## Related Components
+
+| Component | Repo | Role |
+|-----------|------|------|
+| **ic-lightning-relay** | [perun-network/ic-lightning-relay](https://github.com/perun-network/ic-lightning-relay) | LDK Lightning node — swap execution, invoice creation, channel management |
+| **ckLightning-client** | [perun-network/ck-lightning-client](https://github.com/perun-network/ck-lightning-client) | CLI — user-facing swap requests, LP operations, admin |
+
+## Prerequisites
+
+- Rust toolchain (stable, with `wasm32-unknown-unknown` target)
+- `dfx` (version 0.29.2, set via `dfxvm default 0.29.2`)
+- `candid-extractor` (`cargo install candid-extractor`)
+- Bitcoin Core (`bitcoind`) for regtest
+
 ## Architecture
 
 - **Liquidity pools**: Dual-asset LP (ckBTC + BTC) with proportional share tracking
@@ -9,6 +23,8 @@ IC canister for the ckLightning bridge. Manages liquidity pools, atomic BTC/ckBT
 - **Channel signing**: Canister holds all channel secrets, signs commitment/HTLC transactions via local ECDSA and chainkey ECDSA
 - **Webhook outcalls**: HTTPS outcalls notify the relay on new swap requests
 - **Anti-DDoS**: Configurable ICP security deposit on swap requests (refunded on success)
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed component design, swap flows, and signing mechanics.
 
 ## Key Files
 
