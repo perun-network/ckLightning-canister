@@ -1120,6 +1120,8 @@ mod snapshot_tests {
             node_pubkey: vec![0x03; 33],
             registered_at: 6000,
             is_active: true,
+            relay_http_url: None,
+            relay_auth_token: None,
         });
 
         // Rate limits
