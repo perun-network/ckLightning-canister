@@ -177,6 +177,139 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
     }
 }
 
+/// Get the caller's per-user LP BTC deposit address
+///
+/// Each LP depositor gets a unique address derived from their principal.
+/// This prevents the first-claimer-wins issue of the shared address.
+pub async fn get_lp_btc_user_address_impl() -> Result<LpBtcAddressResponse, BtcError> {
+    let caller = msg_caller();
+
+    // Check cache first
+    {
+        let state = STATE.read().unwrap();
+        if let Some(addr) = state.btc_liquidity_addresses.get(&caller) {
+            return Ok(LpBtcAddressResponse {
+                address: addr.clone(),
+            });
+        }
+    }
+
+    // Derive per-user LP BTC address
+    let purpose = BtcPurpose::LiquidityDepositor(caller);
+    let address = get_segwit_address(purpose).await?;
+
+    // Cache it
+    {
+        let mut state = STATE.write().unwrap();
+        state.btc_liquidity_addresses.insert(caller, address.clone());
+    }
+
+    Ok(LpBtcAddressResponse { address })
+}
+
+/// Deposit BTC to the liquidity pool using the caller's per-user address
+///
+/// Scans the caller's own LP deposit address for new UTXOs with 6+ confirmations.
+/// Only the address owner can claim their UTXOs (no first-claimer-wins).
+pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
+    let caller = msg_caller();
+
+    // Get the caller's per-user LP BTC address
+    let user_address = match get_lp_btc_user_address_impl().await {
+        Ok(resp) => resp.address,
+        Err(e) => {
+            return LpBtcDepositResponse {
+                success: false,
+                credited_amount: Nat::from(0u64),
+                new_btc_balance: Nat::from(0u64),
+                error: Some(format!("Failed to get user LP address: {:?}", e)),
+            };
+        }
+    };
+
+    // Get Bitcoin context and query UTXOs on the per-user address
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    let utxos_result = bitcoin_get_utxos(&GetUtxosRequest {
+        address: user_address.clone(),
+        network: ctx.network,
+        filter: None,
+    })
+    .await;
+
+    let utxos_response = match utxos_result {
+        Ok(response) => response,
+        Err(e) => {
+            return LpBtcDepositResponse {
+                success: false,
+                credited_amount: Nat::from(0u64),
+                new_btc_balance: Nat::from(0u64),
+                error: Some(format!("Failed to query UTXOs: {:?}", e)),
+            };
+        }
+    };
+
+    let tip_height = utxos_response.tip_height;
+    let mut total_credited: u64 = 0;
+
+    // Process each UTXO — same TOCTOU-safe pattern as deposit_btc_impl
+    for utxo in &utxos_response.utxos {
+        let confirmations = if utxo.height > 0 {
+            tip_height.saturating_sub(utxo.height) + 1
+        } else {
+            0
+        };
+
+        if confirmations < REQUIRED_BTC_CONFIRMATIONS as u32 {
+            continue;
+        }
+
+        if let Some(ref expected_txid) = request.txid {
+            if utxo.outpoint.txid.as_slice() != expected_txid.as_slice() {
+                continue;
+            }
+        }
+
+        // Atomically check+insert processed_utxos and credit
+        let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
+        let amount = utxo.value;
+        {
+            let mut state = STATE.write().unwrap();
+            if state.processed_utxos.contains_key(&utxo_key) {
+                continue;
+            }
+            state.processed_utxos.insert(utxo_key, caller);
+            state.liq_pool.deposit(caller, PoolAsset::BTC, Nat::from(amount));
+        }
+
+        total_credited += amount;
+    }
+
+    let new_btc_balance = {
+        let state = STATE.read().unwrap();
+        state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
+    };
+
+    if total_credited > 0 {
+        LpBtcDepositResponse {
+            success: true,
+            credited_amount: Nat::from(total_credited),
+            new_btc_balance,
+            error: None,
+        }
+    } else {
+        LpBtcDepositResponse {
+            success: false,
+            credited_amount: Nat::from(0u64),
+            new_btc_balance,
+            error: Some(format!(
+                "No new deposits found with {} confirmations. Send BTC to {} first.",
+                REQUIRED_BTC_CONFIRMATIONS, user_address
+            )),
+        }
+    }
+}
+
 /// Withdraw BTC from the liquidity pool
 ///
 /// Sends BTC from the shared LP address to the user's destination address.

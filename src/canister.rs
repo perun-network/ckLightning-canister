@@ -24,6 +24,7 @@ use crate::canister_state::{
     deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
     // BTC LP functions
     get_lp_btc_address_impl, deposit_btc_impl, withdraw_btc_impl,
+    get_lp_btc_user_address_impl, deposit_btc_user_impl,
     // User BTC operations (from depositor address)
     get_depositor_btc_balance_impl, send_btc_from_depositor_address_impl,
     // Onramp invoice request functions
@@ -579,20 +580,39 @@ async fn get_lp_btc_address() -> Result<LpBtcAddressResponse, BtcError> {
     get_lp_btc_address_impl().await
 }
 
-/// Deposit BTC to the liquidity pool
+/// Deposit BTC to the liquidity pool (shared address — DEPRECATED)
+///
+/// Use deposit_btc_user() instead for per-user deposit addresses.
+#[update]
+#[candid_method(update)]
+async fn deposit_btc(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
+    ic_cdk::println!("WARNING: deposit_btc (shared address) called — use deposit_btc_user instead");
+    deposit_btc_impl(request).await
+}
+
+/// Get the caller's per-user LP BTC deposit address
+///
+/// Each LP depositor gets a unique address derived from their principal.
+/// This prevents the first-claimer-wins issue of the shared address.
+#[update]
+#[candid_method(update)]
+async fn get_lp_btc_user_address() -> Result<LpBtcAddressResponse, BtcError> {
+    get_lp_btc_user_address_impl().await
+}
+
+/// Deposit BTC to the liquidity pool using per-user address
 ///
 /// Flow:
-/// 1. Call get_lp_btc_address() to get the deposit address
+/// 1. Call get_lp_btc_user_address() to get your unique deposit address
 /// 2. Send BTC to that address (off-chain, via wallet)
 /// 3. Wait for 6 confirmations
 /// 4. Call this function to claim your deposit
 ///
-/// The canister will scan UTXOs at the LP address and credit new deposits
-/// to the caller's LP balance.
+/// Only UTXOs at the caller's own address are credited.
 #[update]
 #[candid_method(update)]
-async fn deposit_btc(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
-    deposit_btc_impl(request).await
+async fn deposit_btc_user(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
+    deposit_btc_user_impl(request).await
 }
 
 /// Withdraw BTC from the liquidity pool
@@ -941,7 +961,8 @@ fn inspect_message() {
         | "trigger_withdraw" | "request_onramp_invoice" | "request_offramp"
         | "deposit_ckbtc" | "withdraw_ckbtc" | "get_lp_btc_address"
         | "deposit_btc" | "withdraw_btc" | "get_depositor_btc_balance"
-        | "send_btc_from_depositor_address" => true,
+        | "send_btc_from_depositor_address"
+        | "get_lp_btc_user_address" | "deposit_btc_user" => true,
 
         // Unknown method — reject
         _ => false,
