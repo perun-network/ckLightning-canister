@@ -53,7 +53,7 @@ pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLn
 
     // Check if channel already exists
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: register_ln_channel read");
         if state.ln_channels.contains_key(&channel_id_arr) {
             return RegisterLnChannelResponse {
                 success: false,
@@ -80,7 +80,7 @@ pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLn
 
     // Store channel
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: register_ln_channel write");
         state.ln_channels.insert(channel_id_arr, channel_info);
     }
 
@@ -112,7 +112,7 @@ pub async fn verify_ln_channel_impl(
 
     // Get channel info
     let channel_info = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: verify_ln_channel read");
         match state.ln_channels.get(&channel_id_arr) {
             Some(info) => info.clone(),
             None => {
@@ -187,7 +187,7 @@ pub async fn verify_ln_channel_impl(
             // Update channel status
             let current_time = blocktime();
             {
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: verify_ln_channel write");
                 if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
                     channel.last_verified_at = Some(current_time);
                     if value_matches && confirmations >= 3 {
@@ -231,7 +231,7 @@ pub async fn verify_ln_channel_impl(
             // UTXO not found - channel might be closed or funding tx not yet confirmed
             let current_time = blocktime();
             {
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: verify_ln_channel write 2");
                 if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
                     channel.last_verified_at = Some(current_time);
                     // Check if channel was previously verified - if so, it's now closed
@@ -268,13 +268,13 @@ pub fn query_ln_channel_impl(request: QueryLnChannelRequest) -> Option<LnChannel
     let mut channel_id_arr = [0u8; 32];
     channel_id_arr.copy_from_slice(&request.channel_id);
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: query_ln_channel");
     state.ln_channels.get(&channel_id_arr).cloned()
 }
 
 /// Query all registered Lightning channels
 pub fn query_ln_channels_impl() -> QueryLnChannelsResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: query_ln_channels");
     let channels: Vec<LnChannelInfo> = state.ln_channels.values().cloned().collect();
     QueryLnChannelsResponse { channels }
 }
@@ -288,7 +288,7 @@ pub fn update_ln_channel_status_impl(channel_id: Vec<u8>, status: LnChannelStatu
     let mut channel_id_arr = [0u8; 32];
     channel_id_arr.copy_from_slice(&channel_id);
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: update_ln_channel_status");
     if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
         channel.status = status;
         true

@@ -59,7 +59,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
         Ok((inner_result,)) => match inner_result {
             Ok(_block_index) => {
                 // Credit the caller's LP balance
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: deposit_ckbtc write");
                 state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
 
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
@@ -104,7 +104,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
 
     // Check available ckBTC (not reserved for pending swaps) and deduct from LP balance
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write");
 
         // Calculate ckBTC reserved for pending onramp requests
         // These are requests where invoice is created but payment not yet completed
@@ -169,7 +169,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     match call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                let state = STATE.read().unwrap();
+                let state = STATE.read().expect("STATE lock: withdraw_ckbtc read");
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
                 LpWithdrawResponse {
@@ -182,7 +182,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
             }
             Err(e) => {
                 // Transfer failed - restore the LP balance
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write 2");
                 state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
@@ -197,7 +197,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         },
         Err((code, msg)) => {
             // Call failed - restore the LP balance
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write 3");
             state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
             let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
@@ -215,7 +215,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
 /// Get the caller's LP balance
 pub fn get_my_lp_balance_impl() -> LpBalanceResponse {
     let caller = msg_caller();
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_my_lp_balance");
 
     LpBalanceResponse {
         ckbtc_balance: state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC),
@@ -225,7 +225,7 @@ pub fn get_my_lp_balance_impl() -> LpBalanceResponse {
 
 /// Get the total LP balance across all depositors
 pub fn get_total_lp_balance_impl() -> TotalLpBalanceResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_total_lp_balance");
 
     TotalLpBalanceResponse {
         total_ckbtc: state.liq_pool.get_total(&PoolAsset::CkBTC),

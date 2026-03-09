@@ -86,7 +86,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
     // Reject duplicate offramp requests for the same invoice (prevents ckBTC loss via overwrite)
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: request_offramp read");
         if state.offramp_requests.contains_key(&request_id) {
             return OfframpResponse {
                 request_id,
@@ -99,7 +99,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
     // Use StableSwap to compute how much ckBTC the user must pay for the desired BTC output
     let (ckbtc_required, amount_sats, protocol_fee) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: request_offramp read 2");
 
         // BTC balance includes channel BTC for StableSwap pricing
         let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
@@ -133,7 +133,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 
     // Read configured ICP anti-DDoS fee from state
     let icp_ddos_fee = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: request_offramp read 3");
         state.icp_ddos_fee_e8s
     };
 
@@ -232,7 +232,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                 };
 
                 {
-                    let mut state = STATE.write().unwrap();
+                    let mut state = STATE.write().expect("STATE lock: request_offramp write");
                     // Track protocol fees only AFTER both ICP and ckBTC collection succeeded
                     state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(protocol_fee);
                     state.offramp_requests.insert(request_id.clone(), request_info);
@@ -276,7 +276,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
 ///
 /// Called by the relay to find requests that need invoices paid.
 pub fn get_pending_offramp_requests_impl() -> Vec<PendingOfframpRequest> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_pending_offramp_requests");
 
     state.offramp_requests
         .values()
@@ -296,7 +296,7 @@ pub fn get_pending_offramp_requests_impl() -> Vec<PendingOfframpRequest> {
 ///
 /// Called by the relay when it starts attempting to pay the invoice.
 pub fn mark_offramp_in_progress_impl(request_id: &str) -> bool {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: mark_offramp_in_progress");
 
     if let Some(request) = state.offramp_requests.get_mut(request_id) {
         if matches!(request.state, OfframpRequestState::Pending) {
@@ -326,7 +326,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
 
     // Get the user and verify state, mark as completed, credit LPs with ckBTC
     let user = {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: complete_offramp write");
 
         let request_info = match state.offramp_requests.get_mut(&request.request_id) {
             Some(info) => info,
@@ -376,7 +376,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     // Refund ICP fee to the user (on success)
     // Mark as refunded BEFORE the call to prevent double-refund race
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: complete_offramp write 2");
         if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
             request_info.icp_fee_refunded = true;
         }
@@ -385,7 +385,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     if let Err(e) = refund_result {
         ic_cdk::println!("Warning: Failed to refund ICP fee for offramp: {}", e);
         // Roll back the flag so a retry can attempt the refund
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: complete_offramp write 3");
         if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
             request_info.icp_fee_refunded = false;
         }
@@ -403,7 +403,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
 /// The ckBTC is refunded to the user.
 pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpResponse {
     let (user, ckbtc_collected) = {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: fail_offramp write");
 
         let request_info = match state.offramp_requests.get_mut(&request.request_id) {
             Some(info) => info,
@@ -462,7 +462,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
                 // Update state to refunded
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: fail_offramp write 2");
                 if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
                     request_info.state = OfframpRequestState::Refunded {
                         block_index: block_index.clone(),
@@ -500,7 +500,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
 /// Called by admin/relay to retry ckBTC refund for requests stuck in FailedPendingRefund.
 pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpResponse {
     let (user, ckbtc_collected) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: retry_offramp_refund read");
 
         let request_info = match state.offramp_requests.get(&request_id) {
             Some(info) => info,
@@ -546,7 +546,7 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
     match call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: retry_offramp_refund write");
                 if let Some(request_info) = state.offramp_requests.get_mut(&request_id) {
                     request_info.state = OfframpRequestState::Refunded {
                         block_index: block_index.clone(),
@@ -580,7 +580,7 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
 ///
 /// Called by users to check the status of their offramp.
 pub fn get_offramp_status_impl(request_id: String) -> GetOfframpStatusResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_offramp_status");
 
     match state.offramp_requests.get(&request_id) {
         Some(info) => GetOfframpStatusResponse {

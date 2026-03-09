@@ -19,7 +19,7 @@ use ic_cdk::{
         GetUtxosRequest, SendTransactionRequest, bitcoin_get_balance, bitcoin_get_utxos,
         bitcoin_send_transaction,
     },
-    trap, // update,
+    // trap, // update,
 };
 use std::str::FromStr;
 
@@ -54,7 +54,8 @@ pub async fn get_p2pkh_address() -> ResultBtc<String> {
     let public_key = get_ecdsa_public_key(&ctx, derivation_path.to_vec_u8_path()).await;
 
     // Convert the public key to the format used by the Bitcoin library
-    let public_key = PublicKey::from_slice(&public_key).unwrap();
+    let public_key = PublicKey::from_slice(&public_key)
+        .map_err(|e| BtcError::Other(format!("Invalid P2PKH public key: {}", e)))?;
 
     // Generate a legacy P2PKH address from the public key.
     // The address encoding (Base58) depends on the network type.
@@ -83,7 +84,10 @@ pub async fn get_p2tr_key_path_only_address() -> ResultBtc<String> {
     let internal_key = get_schnorr_public_key(&ctx, internal_key_path.to_vec_u8_path()).await;
 
     // Convert the internal key to an x-only public key, as required by Taproot (BIP-341).
-    let internal_key = XOnlyPublicKey::from(PublicKey::from_slice(&internal_key).unwrap());
+    let internal_key = XOnlyPublicKey::from(
+        PublicKey::from_slice(&internal_key)
+            .map_err(|e| BtcError::Other(format!("Invalid P2TR internal key: {}", e)))?,
+    );
 
     // Create a Taproot address using the internal key only.
     // We pass `None` as the Merkle root, which per BIP-341 means the address commits
@@ -106,7 +110,8 @@ pub async fn get_p2wpkh_address() -> ResultBtc<String> {
     let public_key = get_ecdsa_public_key(&ctx, derivation_path.to_vec_u8_path()).await;
 
     // Create a CompressedPublicKey from the raw public key bytes
-    let public_key = CompressedPublicKey::from_slice(&public_key).unwrap();
+    let public_key = CompressedPublicKey::from_slice(&public_key)
+        .map_err(|e| BtcError::Other(format!("Invalid P2WPKH compressed public key: {}", e)))?;
 
     // Generate a P2WPKH Bech32 address.
     // The network (mainnet, testnet, regtest) determines the HRP (e.g., "bc1" or "tb1").
@@ -121,19 +126,23 @@ pub struct SendRequest {
 }
 
 #[update]
-pub async fn send_from_p2pkh_address(request: SendRequest) -> String {
+pub async fn send_from_p2pkh_address(request: SendRequest) -> Result<String, BtcError> {
     let ctx = BTC_CONTEXT.with(|ctx| ctx.get());
 
+    if request.destination_address.len() > 200 {
+        return Err(BtcError::Other("Destination address too long (max 200 chars)".to_string()));
+    }
+
     if request.amount_in_satoshi == 0 {
-        trap("Amount must be greater than 0");
+        return Err(BtcError::Other("Amount must be greater than 0".to_string()));
     }
 
     // Parse and validate the destination address. The address type needs to be
     // valid for the Bitcoin network we are on.
     let dst_address = Address::from_str(&request.destination_address)
-        .unwrap()
+        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
         .require_network(ctx.bitcoin_network)
-        .unwrap();
+        .map_err(|e| BtcError::Other(format!("Address network mismatch: {}", e)))?;
 
     // Unique derivation paths are used for every address type generated, to ensure
     // each address has its own unique key pair. To generate a user-specific address,
@@ -144,7 +153,8 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> String {
     let own_public_key = get_ecdsa_public_key(&ctx, derivation_path.to_vec_u8_path()).await;
 
     // Convert the public key to the format used by the Bitcoin library.
-    let own_public_key = PublicKey::from_slice(&own_public_key).unwrap();
+    let own_public_key = PublicKey::from_slice(&own_public_key)
+        .map_err(|e| BtcError::Other(format!("Invalid own public key: {}", e)))?;
 
     // Generate a P2PKH address from the public key.
     let own_address = Address::p2pkh(own_public_key, ctx.bitcoin_network);
@@ -158,7 +168,7 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> String {
         filter: None,
     })
     .await
-    .unwrap()
+    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {}", e)))?
     .utxos;
 
     // Build the transaction.
@@ -190,10 +200,10 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> String {
         transaction: serialize(&signed_transaction),
     })
     .await
-    .unwrap();
+    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
 
     // Return the transaction ID.
-    signed_transaction.compute_txid().to_string()
+    Ok(signed_transaction.compute_txid().to_string())
 }
 
 pub async fn get_balance(get_balance_args: GetBtcBalanceArgs) -> Result<u64, BtcError> {

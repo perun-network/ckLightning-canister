@@ -64,7 +64,7 @@ impl LiquidityPool {
             PoolAsset::BTC => balance.btc_amount += amount.clone(),
         }
         // Update total holdings
-        *self.holdings_total.get_mut(&asset).unwrap() += amount;
+        *self.holdings_total.entry(asset).or_default() += amount;
     }
 
     /// Withdraw amount for a principal
@@ -82,7 +82,7 @@ impl LiquidityPool {
         }
 
         *depositor_amount -= amount.clone();
-        *self.holdings_total.get_mut(&asset).unwrap() -= amount;
+        *self.holdings_total.entry(asset).or_default() -= amount;
         Ok(())
     }
 

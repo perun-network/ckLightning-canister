@@ -43,7 +43,7 @@ pub async fn check_expired_swaps_impl() {
 
     // Get timeout values (use test overrides if set)
     let (onramp_timeout, offramp_timeout) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: check_expired_swaps read");
         (
             state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
             state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
@@ -52,7 +52,7 @@ pub async fn check_expired_swaps_impl() {
 
     // First, collect expired onramp request IDs
     let expired_onramp_ids: Vec<String> = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: check_expired_swaps read onramps");
         state.onramp_requests
             .iter()
             .filter(|(_, req)| {
@@ -65,7 +65,7 @@ pub async fn check_expired_swaps_impl() {
 
     // Mark expired onramp requests AND their corresponding SwapInfo entries
     if !expired_onramp_ids.is_empty() {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: check_expired_swaps write onramps");
 
         // Collect payment hashes to expire from swaps map
         let mut swap_hashes_to_expire: Vec<[u8; 32]> = Vec::new();
@@ -95,7 +95,7 @@ pub async fn check_expired_swaps_impl() {
 
     // Collect expired offramp requests that need refunds
     let expired_offramp_requests: Vec<(String, Principal, u64)> = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: check_expired_swaps read offramps");
         state.offramp_requests
             .iter()
             .filter(|(_, req)| {
@@ -113,7 +113,7 @@ pub async fn check_expired_swaps_impl() {
     for (request_id, user, ckbtc_collected) in expired_offramp_requests {
         // Mark as expired first
         {
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: check_expired_swaps write offramps");
             if let Some(req) = state.offramp_requests.get_mut(&request_id) {
                 // Double-check state hasn't changed
                 if !matches!(req.state, OfframpRequestState::Pending) {
@@ -146,7 +146,7 @@ pub async fn check_expired_swaps_impl() {
         match call_result {
             Ok((inner_result,)) => match inner_result {
                 Ok(block_index) => {
-                    let mut state = STATE.write().unwrap();
+                    let mut state = STATE.write().expect("STATE lock: check_expired_swaps write refund");
                     if let Some(req) = state.offramp_requests.get_mut(&request_id) {
                         req.state = OfframpRequestState::Expired {
                             refund_block_index: Some(block_index.clone()),
@@ -180,7 +180,7 @@ pub async fn check_expired_swaps_impl() {
 
 /// Get count of expired swaps for monitoring
 pub fn get_expired_swap_counts() -> (u64, u64) {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_expired_swap_counts");
 
     let expired_onramp = state.onramp_requests
         .values()
@@ -200,7 +200,7 @@ pub fn get_expired_swap_counts() -> (u64, u64) {
 /// Pass 0 to reset to default values.
 /// This allows tests to use shorter timeouts instead of waiting 10-30 minutes.
 pub fn set_test_timeouts_impl(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: set_test_timeouts");
 
     state.test_onramp_timeout_ns = if onramp_timeout_ns == 0 {
         None
@@ -223,7 +223,7 @@ pub fn set_test_timeouts_impl(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
 
 /// Get current timeout values (for testing/debugging)
 pub fn get_timeout_values_impl() -> (u64, u64) {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_timeout_values");
     (
         state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
         state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
@@ -255,7 +255,7 @@ pub fn register_relay_impl(request: RegisterRelayRequest) -> RegisterRelayRespon
         };
     }
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: register_relay");
 
     // Check if a relay is already registered
     if let Some(existing) = &state.registered_relay {
@@ -298,7 +298,7 @@ pub fn register_relay_impl(request: RegisterRelayRequest) -> RegisterRelayRespon
 
 /// Get information about the registered relay.
 pub fn get_relay_info_impl() -> GetRelayInfoResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_relay_info");
 
     match &state.registered_relay {
         Some(relay) => GetRelayInfoResponse {
@@ -332,7 +332,7 @@ fn extract_node_pubkey_from_invoice(invoice_str: &str) -> Result<Vec<u8>, String
 ///
 /// This is called during submit_invoice to prevent invoice substitution attacks.
 pub(super) fn verify_invoice_node_pubkey(invoice_str: &str) -> Result<(), String> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: extract_node_pubkey_from_invoice read");
 
     // Get registered relay
     let relay = match &state.registered_relay {
@@ -370,7 +370,7 @@ pub(super) fn verify_invoice_node_pubkey(invoice_str: &str) -> Result<(), String
 /// Also increments the request count if allowed.
 pub(super) fn check_onramp_rate_limit(caller: Principal) -> Result<(), String> {
     let now = blocktime();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: extract_node_pubkey_from_invoice write");
 
     if let Some(info) = state.onramp_rate_limits.get_mut(&caller) {
         // Check if window has expired
@@ -404,7 +404,7 @@ pub(super) fn check_onramp_rate_limit(caller: Principal) -> Result<(), String> {
 /// Also increments the request count if allowed.
 pub(super) fn check_offramp_rate_limit(caller: Principal) -> Result<(), String> {
     let now = blocktime();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: extract_node_pubkey_from_invoice write 2");
 
     if let Some(info) = state.offramp_rate_limits.get_mut(&caller) {
         // Check if window has expired
@@ -436,7 +436,7 @@ pub(super) fn check_offramp_rate_limit(caller: Principal) -> Result<(), String> 
 /// Get rate limit status for a principal.
 pub fn get_rate_limit_status_impl(principal: Principal) -> RateLimitStatus {
     let now = blocktime();
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_rate_limit_status");
 
     let (onramp_count, onramp_window_start) = match state.onramp_rate_limits.get(&principal) {
         Some(info) => {
@@ -480,7 +480,7 @@ pub fn get_rate_limit_status_impl(principal: Principal) -> RateLimitStatus {
 
 /// Preview a swap output without executing — read-only query.
 pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_swap_quote");
 
     // BTC balance includes channel BTC for StableSwap pricing
     let btc_balance: u64 = state.liq_pool.get_total(&PoolAsset::BTC).0.clone().try_into().unwrap_or(0);
@@ -529,7 +529,7 @@ pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
 
 /// Get the current StableSwap configuration.
 pub fn get_stableswap_config_impl() -> StableSwapConfig {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_stableswap_config");
     state.stableswap_config.clone()
 }
 
@@ -538,7 +538,7 @@ pub fn update_stableswap_config_impl(
     request: UpdateStableSwapConfigRequest,
 ) -> UpdateStableSwapConfigResponse {
     let caller = msg_caller();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: update_stableswap_config");
 
     // Check admin authorization
     match state.admin {
@@ -646,7 +646,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
     // Zero the counter atomically BEFORE the transfer to prevent double-withdrawal race.
     // Restore on failure.
     let (admin, amount) = {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: withdraw_protocol_fees write");
         let amount = state.protocol_fees_ckbtc;
         state.protocol_fees_ckbtc = 0;
         (state.admin, amount)
@@ -709,7 +709,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
             }
             Err(e) => {
                 // Restore counter on failure
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: withdraw_protocol_fees write 2");
                 state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(amount);
                 ic_cdk::println!("Protocol fee withdrawal failed: {:?}", e);
                 WithdrawProtocolFeesResponse {
@@ -723,7 +723,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
         },
         Err((code, msg)) => {
             // Restore counter on failure
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: withdraw_protocol_fees write 3");
             state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(amount);
             ic_cdk::println!("Protocol fee withdrawal call failed: {:?} - {}", code, msg);
             WithdrawProtocolFeesResponse {
@@ -743,7 +743,7 @@ pub fn set_admin_impl(principal: Principal) {
     if !ic_cdk::api::is_controller(&msg_caller()) {
         ic_cdk::trap("Only canister controllers can set admin");
     }
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: set_admin");
     state.admin = Some(principal);
     ic_cdk::println!("Admin set to: {}", principal);
 }
@@ -751,7 +751,7 @@ pub fn set_admin_impl(principal: Principal) {
 /// Set the ICP anti-DDoS fee amount (admin-only).
 pub fn set_icp_ddos_fee_impl(fee_e8s: u64) -> SetIcpDdosFeeResponse {
     let caller = msg_caller();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: set_icp_ddos_fee");
 
     match state.admin {
         Some(admin) if admin == caller => {}
@@ -776,7 +776,7 @@ pub fn set_icp_ddos_fee_impl(fee_e8s: u64) -> SetIcpDdosFeeResponse {
 
 /// Get the current ICP anti-DDoS fee.
 pub fn get_icp_ddos_fee_impl() -> u64 {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_icp_ddos_fee");
     state.icp_ddos_fee_e8s
 }
 
@@ -786,7 +786,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
     let caller = msg_caller();
 
     let admin = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: withdraw_icp_fees read");
         state.admin
     };
 
@@ -887,7 +887,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
 /// proportionally based on their share of the ckBTC pool. Resets the counter on success.
 pub fn redistribute_fees_impl() -> RedistributeFeesResponse {
     let caller = msg_caller();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: redistribute_fees");
 
     match state.admin {
         Some(admin) if admin == caller => {}
@@ -946,7 +946,7 @@ pub fn redistribute_fees_impl() -> RedistributeFeesResponse {
 /// growth that could brick pre_upgrade serialization.
 pub fn prune_state_impl(older_than_ns: u64) -> PruneResult {
     let caller = msg_caller();
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: prune_state");
 
     // Admin-only
     match state.admin {
@@ -1015,7 +1015,7 @@ pub fn prune_state_impl(older_than_ns: u64) -> PruneResult {
 
 /// Get statistics about canister state collection sizes.
 pub fn get_state_stats_impl() -> StateStats {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_state_stats");
     StateStats {
         swaps_count: state.swaps.len() as u64,
         onramp_requests_count: state.onramp_requests.len() as u64,

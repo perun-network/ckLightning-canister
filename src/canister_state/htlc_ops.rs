@@ -39,7 +39,7 @@ pub fn create_htlc_impl(request: CreateHtlcRequest) -> CreateHtlcResponse {
         };
     }
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: create_htlc");
     match state.htlc_manager.add_htlc(
         payment_hash,
         request.amount_msat,
@@ -63,7 +63,7 @@ pub fn create_htlc_impl(request: CreateHtlcRequest) -> CreateHtlcResponse {
 /// Called by the relay when a preimage is received (payment successful).
 /// Returns the payment_hash and amount for confirmation.
 pub fn fulfill_htlc_impl(request: FulfillHtlcRequest) -> FulfillHtlcResponse {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: fulfill_htlc");
     match state.htlc_manager.fulfill_htlc(request.preimage) {
         Ok((payment_hash, amount_msat)) => FulfillHtlcResponse {
             success: true,
@@ -96,7 +96,7 @@ pub fn timeout_htlc_impl(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
         }
     };
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: timeout_htlc");
     match state.htlc_manager.timeout_htlc(&payment_hash) {
         Ok(amount_msat) => TimeoutHtlcResponse {
             success: true,
@@ -114,7 +114,7 @@ pub fn timeout_htlc_impl(request: TimeoutHtlcRequest) -> TimeoutHtlcResponse {
 /// Get an HTLC by payment hash
 pub fn get_htlc_impl(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
     let payment_hash: [u8; 32] = payment_hash.try_into().ok()?;
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_htlc");
     state.htlc_manager.get_htlc(&payment_hash).map(|htlc| HtlcInfo {
         payment_hash: htlc.payment_hash.to_vec(),
         amount_msat: htlc.amount_msat,
@@ -127,7 +127,7 @@ pub fn get_htlc_impl(payment_hash: Vec<u8>) -> Option<HtlcInfo> {
 
 /// Get all pending HTLCs
 pub fn get_pending_htlcs_impl() -> Vec<HtlcInfo> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_pending_htlcs");
     state
         .htlc_manager
         .pending_htlcs()

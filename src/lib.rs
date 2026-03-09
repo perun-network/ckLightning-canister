@@ -152,7 +152,7 @@ pub fn init(network: Network) {
 // Serializes canister state to stable memory before the Wasm module is replaced.
 #[pre_upgrade]
 fn pre_upgrade() {
-    let state = canister_state::STATE.read().unwrap();
+    let state = canister_state::STATE.read().expect("STATE lock: pre_upgrade");
     let snapshot = state.to_snapshot();
     let bytes = match candid::encode_one(&snapshot) {
         Ok(b) => b,
@@ -195,7 +195,7 @@ fn upgrade(network: Network) {
                 }
             };
 
-            let mut state = canister_state::STATE.write().unwrap();
+            let mut state = canister_state::STATE.write().expect("STATE lock: post_upgrade");
             state.restore_from_snapshot(snapshot);
         }
     }

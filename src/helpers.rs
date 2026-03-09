@@ -150,6 +150,10 @@ pub async fn send_btc_tx_impl(
     from_address_type: BtcAddressType,
     amount_in_satoshi: u64,
 ) -> Result<SendBtcTxMsg, BtcError> {
+    if destination_address_str.len() > 200 {
+        return Err(BtcError::Other("Destination address too long (max 200 chars)".to_string()));
+    }
+
     if amount_in_satoshi == 0 {
         ic_cdk::trap("Amount must be greater than 0");
     }
@@ -293,6 +297,10 @@ pub async fn send_btc_from_lp_address(
     destination_address: String,
     amount_sat: u64,
 ) -> Result<String, BtcError> {
+    if destination_address.len() > 200 {
+        return Err(BtcError::Other("Destination address too long (max 200 chars)".to_string()));
+    }
+
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
     // Parse and validate destination address

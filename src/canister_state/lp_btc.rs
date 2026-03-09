@@ -38,7 +38,7 @@ const REQUIRED_BTC_CONFIRMATIONS: u32 = 6;
 pub async fn get_lp_btc_address_impl() -> Result<LpBtcAddressResponse, BtcError> {
     // Check cache first
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_lp_btc_address read");
         if let Some(addr) = state.lp_btc_address.as_ref() {
             return Ok(LpBtcAddressResponse {
                 address: addr.clone(),
@@ -52,7 +52,7 @@ pub async fn get_lp_btc_address_impl() -> Result<LpBtcAddressResponse, BtcError>
 
     // Cache it
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_lp_btc_address write");
         state.lp_btc_address = Some(address.clone());
     }
 
@@ -68,7 +68,7 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
 
     // Get the shared LP BTC address
     let lp_address = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: deposit_btc read");
         match state.lp_btc_address.as_ref() {
             Some(addr) => addr.clone(),
             None => {
@@ -140,7 +140,7 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
         let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
         let amount = utxo.value;
         {
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: deposit_btc write");
             if state.processed_utxos.contains_key(&utxo_key) {
                 continue;
             }
@@ -153,7 +153,7 @@ pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositRespo
 
     // Get updated balance
     let new_btc_balance = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: deposit_btc read 2");
         state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
     };
 
@@ -186,7 +186,7 @@ pub async fn get_lp_btc_user_address_impl() -> Result<LpBtcAddressResponse, BtcE
 
     // Check cache first
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_lp_btc_user_address read");
         if let Some(addr) = state.btc_liquidity_addresses.get(&caller) {
             return Ok(LpBtcAddressResponse {
                 address: addr.clone(),
@@ -200,7 +200,7 @@ pub async fn get_lp_btc_user_address_impl() -> Result<LpBtcAddressResponse, BtcE
 
     // Cache it
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_lp_btc_user_address write");
         state.btc_liquidity_addresses.insert(caller, address.clone());
     }
 
@@ -274,7 +274,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
         let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
         let amount = utxo.value;
         {
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: deposit_btc_user write");
             if state.processed_utxos.contains_key(&utxo_key) {
                 continue;
             }
@@ -286,7 +286,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
     }
 
     let new_btc_balance = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: deposit_btc_user read");
         state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
     };
 
@@ -319,6 +319,16 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
 pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawResponse {
     let caller = msg_caller();
 
+    if request.destination_address.len() > 200 {
+        return LpBtcWithdrawResponse {
+            success: false,
+            amount_withdrawn: Nat::from(0u64),
+            new_btc_balance: Nat::from(0u64),
+            txid: None,
+            error: Some("Destination address too long (max 200 chars)".to_string()),
+        };
+    }
+
     if request.amount_sat == 0 {
         return LpBtcWithdrawResponse {
             success: false,
@@ -335,7 +345,7 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
     // LP balances already reflect channel deductions (deduct_proportional on fund),
     // so we just check the individual LP balance via liq_pool.withdraw().
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: withdraw_btc write");
 
         if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::BTC, amount_nat.clone()) {
             let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
@@ -360,7 +370,7 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
     match send_result {
         Ok(txid) => {
             let new_btc_balance = {
-                let state = STATE.read().unwrap();
+                let state = STATE.read().expect("STATE lock: withdraw_btc read");
                 state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
             };
 
@@ -375,12 +385,12 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
         Err(e) => {
             // Restore the LP balance on failure
             {
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: withdraw_btc write 2");
                 state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
             }
 
             let new_btc_balance = {
-                let state = STATE.read().unwrap();
+                let state = STATE.read().expect("STATE lock: withdraw_btc read 2");
                 state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
             };
 
@@ -405,7 +415,7 @@ pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
 
     // Get or derive the caller's depositor address
     let address = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_depositor_btc_balance read");
         state.btc_liquidity_addresses.get(&caller).cloned()
     };
 
@@ -417,7 +427,7 @@ pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
             match get_segwit_address(purpose).await {
                 Ok(addr) => {
                     // Store it for future use
-                    let mut state = STATE.write().unwrap();
+                    let mut state = STATE.write().expect("STATE lock: get_depositor_btc_balance write");
                     state.btc_liquidity_addresses.insert(caller, addr.clone());
                     addr
                 }
@@ -464,6 +474,14 @@ pub async fn send_btc_from_depositor_address_impl(
 ) -> SendFromDepositorResponse {
     let caller = msg_caller();
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+
+    if request.destination_address.len() > 200 {
+        return SendFromDepositorResponse {
+            success: false,
+            txid: None,
+            error: Some("Destination address too long (max 200 chars)".to_string()),
+        };
+    }
 
     if request.amount_sat == 0 {
         return SendFromDepositorResponse {
@@ -619,7 +637,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
 
     // Idempotency guard: reject duplicate fund_channel for the same address
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: fund_channel read");
         if state.funded_channels.contains(&request.funding_address) {
             return FundChannelResponse {
                 success: false,
@@ -753,7 +771,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     // Track the funding in canister state (atomically with idempotency guard)
     // Two-phase model: create reservation only. LP deduction happens in channel_funded.
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: fund_channel write");
         if !state.funded_channels.insert(request.funding_address.clone()) {
             // Race: another call funded this address between our read check and here
             return FundChannelResponse {

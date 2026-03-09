@@ -408,7 +408,7 @@ async fn retry_offramp_refund(request_id: String) -> FailOfframpResponse {
     let caller = ic_cdk::api::msg_caller();
     let relay_ok = assert_relay_caller().is_ok();
     let admin_ok = {
-        let state = crate::canister_state::STATE.read().unwrap();
+        let state = crate::canister_state::STATE.read().expect("STATE lock: mark_offramp_in_progress");
         state.admin == Some(caller)
     };
     if !relay_ok && !admin_ok {
@@ -908,13 +908,13 @@ fn inspect_message() {
         "update_stableswap_config" | "withdraw_protocol_fees" | "set_icp_ddos_fee"
         | "withdraw_icp_fees" | "redistribute_fees" | "prune_state"
         | "set_test_timeouts" => {
-            let state = STATE.read().unwrap();
+            let state = STATE.read().expect("STATE lock: inspect_message");
             state.admin == Some(caller)
         }
 
         // Relay or admin
         "retry_offramp_refund" => {
-            let state = STATE.read().unwrap();
+            let state = STATE.read().expect("STATE lock: inspect_message");
             let is_admin = state.admin == Some(caller);
             let is_relay = match &state.registered_relay {
                 Some(relay) => relay.principal == caller,
@@ -925,7 +925,7 @@ fn inspect_message() {
 
         // Relay registration — admin, controller, or existing relay (endpoint does its own auth)
         "register_relay" => {
-            let state = STATE.read().unwrap();
+            let state = STATE.read().expect("STATE lock: inspect_message");
             let is_admin = state.admin == Some(caller);
             let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
             is_admin || is_relay || ic_cdk::api::is_controller(&caller)
@@ -947,7 +947,7 @@ fn inspect_message() {
         | "sign_holder_commitment_v2" | "sign_closing_tx"
         | "sign_justice_tx" | "sign_htlc_tx" | "register_channel_info"
         | "check_expired_swaps" => {
-            let state = STATE.read().unwrap();
+            let state = STATE.read().expect("STATE lock: inspect_message");
             match &state.registered_relay {
                 Some(relay) => relay.principal == caller,
                 None => false,
@@ -1002,7 +1002,7 @@ fn get_expired_swap_counts_query() -> (u64, u64) {
 async fn check_expired_swaps() {
     // Admin or relay only for manual trigger
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: get_expired_swap_counts_query");
     let is_admin = matches!(state.admin, Some(admin) if admin == caller);
     let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
     drop(state);
@@ -1022,7 +1022,7 @@ async fn check_expired_swaps() {
 fn set_test_timeouts(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
     // Admin-only: test timeouts should not be callable by anyone
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: set_test_timeouts");
     match state.admin {
         Some(admin) if admin == caller => {},
         _ => { ic_cdk::trap("Unauthorized: only admin can set test timeouts"); }
@@ -1062,7 +1062,7 @@ fn get_timeout_values() -> (u64, u64) {
 fn register_relay(request: RegisterRelayRequest) -> RegisterRelayResponse {
     // Admin or controller only (first relay registration requires controller)
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: register_relay");
     let is_admin = matches!(state.admin, Some(admin) if admin == caller);
     let is_existing_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
     drop(state);

@@ -2048,3 +2048,22 @@ pub struct StateStats {
     pub channel_secrets_count: u64,
     pub htlc_tx_details_count: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardcoded_principals_are_valid() {
+        Principal::from_text(MAINNET_ICP_LEDGER)
+            .expect("MAINNET_ICP_LEDGER is not a valid principal");
+        Principal::from_text(DEVNET_ICP_LEDGER)
+            .expect("DEVNET_ICP_LEDGER is not a valid principal");
+        Principal::from_text(DEVNET_CKBTC_LEDGER)
+            .expect("DEVNET_CKBTC_LEDGER is not a valid principal");
+        Principal::from_text(DEVNET_CKBTC_MINTER)
+            .expect("DEVNET_CKBTC_MINTER is not a valid principal");
+        Principal::from_text(DEVNET_BASIC_BITCOIN)
+            .expect("DEVNET_BASIC_BITCOIN is not a valid principal");
+    }
+}

@@ -32,14 +32,15 @@ pub async fn build_transaction(
     // rebuild the transaction, until the fee is set to the correct amount.
     let mut fee = 0;
     loop {
-        let utxos_to_spend = select_utxos_greedy(own_utxos, amount, fee).unwrap();
+        let utxos_to_spend = select_utxos_greedy(own_utxos, amount, fee)
+            .expect("Insufficient UTXOs for P2WPKH transaction");
         let (transaction, prevouts) = build_transaction_with_fee(
             utxos_to_spend,
             own_address,
             &PrimaryOutput::Address(dst_address.clone(), amount),
             fee,
         )
-        .unwrap();
+        .expect("Failed to build P2WPKH transaction with fee");
 
         // Sign the transaction. In this case, we only care about the size
         // of the signed transaction, so we use a mock signer here for efficiency.

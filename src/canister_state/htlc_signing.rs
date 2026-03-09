@@ -33,7 +33,7 @@ pub fn get_channel_secrets_info_impl(channel_id: Vec<u8>) -> Option<ChannelSecre
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
     let channel_id: [u8; 32] = channel_id.try_into().ok()?;
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_channel_secrets_info");
     let secrets = state.channel_secrets.get(&channel_id)?;
 
     let secp = Secp256k1::new();
@@ -160,7 +160,7 @@ pub fn create_htlc_with_tx_details_impl(
     );
 
     // Store HTLC in HtlcManager
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: create_htlc_with_tx_details");
 
     if let Err(e) = state.htlc_manager.add_htlc(
         payment_hash,
@@ -238,7 +238,7 @@ pub fn sign_htlc_success_impl(request: SignHtlcSuccessRequest) -> SignHtlcRespon
         };
     }
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: sign_htlc_success");
 
     // Get HTLC transaction details
     let tx_details = match state.htlc_tx_details.get(&payment_hash) {
@@ -378,7 +378,7 @@ pub fn sign_htlc_timeout_impl(request: SignHtlcTimeoutRequest) -> SignHtlcRespon
         }
     };
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: sign_htlc_timeout");
 
     // Get HTLC transaction details
     let tx_details = match state.htlc_tx_details.get(&payment_hash) {
@@ -536,7 +536,7 @@ pub async fn generate_channel_secrets_impl(
 
     // Check if secrets already exist for this channel
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: generate_channel_secrets read");
         if state.channel_secrets.contains_key(&channel_keys_id) {
             // Return existing public keys
             return match get_channel_secrets_info_impl(channel_keys_id.to_vec()) {
@@ -663,7 +663,7 @@ pub async fn generate_channel_secrets_impl(
     };
 
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: generate_channel_secrets write");
         state.channel_secrets.insert(channel_keys_id, internal_secrets);
     }
 
@@ -702,7 +702,7 @@ pub fn get_per_commitment_point_impl(
         }
     };
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_per_commitment_point");
     let secrets = match state.channel_secrets.get(&channel_keys_id) {
         Some(s) => s,
         None => {
@@ -757,7 +757,7 @@ pub fn release_commitment_secret_impl(
         }
     };
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: release_commitment_secret");
     let secrets = match state.channel_secrets.get(&channel_keys_id) {
         Some(s) => s,
         None => {
@@ -800,7 +800,7 @@ pub fn register_channel_info_impl(request: RegisterChannelInfoRequest) -> bool {
         return false;
     }
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: register_channel_info");
     state.channel_counterparty_pubkeys.insert(
         channel_keys_id,
         request.counterparty_funding_pubkey,
@@ -823,7 +823,7 @@ mod tests {
             payment_secret: [24u8; 32],
             commitment_seed: [25u8; 32],
         };
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: setup_test_channel_secrets");
         state.channel_secrets.insert(channel_keys_id, secrets.clone());
         secrets
     }
@@ -973,7 +973,7 @@ mod tests {
         assert!(result, "Should succeed with valid pubkey");
 
         // Verify it's stored in STATE
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: test_register_channel_info");
         let stored = state.channel_counterparty_pubkeys.get(&channel_keys_id).unwrap();
         assert_eq!(stored, &counterparty_pubkey, "Stored pubkey must match input");
     }

@@ -19,7 +19,7 @@ const OUTCALL_CYCLES: u128 = 49_000_000;
 pub fn notify_relay_webhook(path: &str) {
     // Read relay URL + token from state
     let (url, token) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: notify_relay_webhook");
         match &state.registered_relay {
             Some(relay) => {
                 match (&relay.relay_http_url, &relay.relay_auth_token) {

@@ -33,7 +33,7 @@ use bitcoin::Transaction;
 /// 1. The canister's funding pubkey (from chainkey ECDSA)
 /// 2. The counterparty's funding pubkey (stored via register_channel_info)
 fn get_funding_redeemscript(channel_keys_id: &[u8; 32]) -> Result<bitcoin::ScriptBuf, String> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_funding_redeemscript");
     let counterparty_pubkey = state
         .channel_counterparty_pubkeys
         .get(channel_keys_id)
@@ -114,7 +114,7 @@ fn compute_witness_sighash(
 
 /// Helper: look up channel secrets by channel_keys_id.
 fn get_channel_secrets(channel_keys_id: &[u8; 32]) -> Result<ChannelSecretsInternal, String> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_channel_secrets");
     state
         .channel_secrets
         .get(channel_keys_id)
@@ -723,7 +723,7 @@ mod tests {
             payment_secret: [14u8; 32],
             commitment_seed: [15u8; 32],
         };
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: setup_test_channel");
         state.channel_secrets.insert(channel_keys_id, secrets.clone());
         secrets
     }

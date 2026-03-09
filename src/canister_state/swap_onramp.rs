@@ -48,7 +48,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 
     // Read configured ICP anti-DDoS fee from state
     let icp_ddos_fee = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: request_onramp_invoice read");
         state.icp_ddos_fee_e8s
     };
 
@@ -126,7 +126,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 
     // Store the request
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: request_onramp_invoice write");
         state.onramp_requests.insert(request_id.clone(), request_info);
     }
 
@@ -144,7 +144,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 ///
 /// Called by the relay to find requests that need invoices created.
 pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_pending_invoice_requests");
 
     state.onramp_requests
         .values()
@@ -211,7 +211,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
     if let Some(invoice_msat) = parsed_invoice.amount_milli_satoshis() {
         // Look up the request to get expected amount
         let expected_msat = {
-            let state = STATE.read().unwrap();
+            let state = STATE.read().expect("STATE lock: submit_invoice read");
             state.onramp_requests.get(&request.request_id)
                 .map(|req| req.amount_sats.saturating_mul(1000))
         };
@@ -228,7 +228,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
         }
     }
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: submit_invoice write");
 
     // Find the request
     let request_info = match state.onramp_requests.get_mut(&request.request_id) {
@@ -280,7 +280,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
 ///
 /// Called by clients to check if their invoice is ready.
 pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_invoice_by_request");
 
     match state.onramp_requests.get(&request_id) {
         Some(info) => GetInvoiceResponse {
@@ -302,7 +302,7 @@ pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
 ///
 /// Internal function to update onramp request state when swap completes.
 pub fn mark_onramp_completed_impl(payment_hash: &[u8], block_index: Nat) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: mark_onramp_completed");
 
     // Find the request by payment_hash
     for request in state.onramp_requests.values_mut() {

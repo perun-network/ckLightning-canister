@@ -89,7 +89,7 @@ use crate::ic_types::RelayRegistration;
 /// Returns Ok(()) if authorized, Err(String) with descriptive error otherwise.
 pub fn assert_relay_caller() -> Result<(), String> {
     let caller = msg_caller();
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: assert_relay_caller");
     match &state.registered_relay {
         Some(relay) if relay.principal == caller => Ok(()),
         Some(_) => Err("Unauthorized: caller is not the registered relay".to_string()),
@@ -272,7 +272,7 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
 
     // First check state
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: set_btc_liquidity_address read");
         if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
             return Ok(SetLiquidityBtcAddressResponse {
                 address: addr.clone(),
@@ -287,7 +287,7 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
 
     // Store in state
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: set_btc_liquidity_address write");
         state
             .btc_liquidity_addresses
             .insert(depositor, address.clone());
@@ -302,7 +302,7 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
 pub async fn set_btc_address_impl(
     set_btc_address_args: SetBtcAddressArgs,
 ) -> Result<SetBtcAddressResponse, BtcError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: set_btc_address");
     let address_type = set_btc_address_args.address_type;
     let principal = msg_caller();
 
@@ -341,7 +341,7 @@ pub async fn set_btc_address_impl(
 pub async fn get_btc_balances_impl(
     confirmations: Option<u64>,
 ) -> Result<GetBtcBalancesResponse, BtcError> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_btc_balances");
 
     let mut balances: HashMap<Principal, Option<u64>> = HashMap::new();
     let mut any_address_set = false;
@@ -376,7 +376,7 @@ pub async fn get_btc_balances_impl(
 pub async fn get_ln_address_impl() -> Result<String, BtcError> {
     // Check global cache first
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_ln_address read");
         if let Some(addr) = state.btc_invoice_address.as_ref() {
             return Ok(addr.clone());
         }
@@ -388,7 +388,7 @@ pub async fn get_ln_address_impl() -> Result<String, BtcError> {
 
     // Store globally
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_ln_address write");
         state.btc_invoice_address = Some(address.clone());
     }
 
@@ -400,7 +400,7 @@ pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<
 
     // 1. Fast path: return existing address if present
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_btc_liquidity_address_for_caller read");
         if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
             return Ok(addr.clone());
         }
@@ -412,7 +412,7 @@ pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<
 
     // 3. Store in state and return
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_btc_liquidity_address_for_caller write");
         state
             .btc_liquidity_addresses
             .insert(depositor, address.clone());
@@ -424,7 +424,7 @@ pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<
 pub async fn transaction_notification_impl(
     notify_args: NotifyArgs,
 ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: transaction_notification");
     state
         .process_icrc_tx(
             notify_args.block_height,
@@ -437,7 +437,7 @@ pub async fn transaction_notification_impl(
 pub fn query_user_lp_holdings_impl(
     funding: FundingLPQueryArgs,
 ) -> std::result::Result<HoldingsResponse, CklError> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: query_user_lp_holdings");
     state.query_holdings(funding)
 }
 
@@ -445,7 +445,7 @@ pub async fn withdraw_lp_impl(
     withdrawal: WithdrawalLPArgs,
     sig_withdrawal: Vec<u8>,
 ) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: withdraw_lp");
     let pr_caller = msg_caller();
     let receiver = withdrawal.pool_withdrawal.depositor.0;
 
@@ -462,7 +462,7 @@ pub async fn withdraw_lp_impl(
 }
 
 pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Nat, CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: trigger_withdraw");
     state.withdraw_from_liq_pool(req).await
 }
 
@@ -470,7 +470,7 @@ pub fn deposit_channel_impl(
     funding: ChannelFunding,
     signature_bytes: &[u8],
 ) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: deposit_channel");
     state.deposit_icrc(blocktime(), Funding::Channel(funding), signature_bytes)
 }
 
@@ -478,7 +478,7 @@ pub fn deposit_lp_impl(
     funding: FundingLPArgs,
     signature_bytes: &[u8],
 ) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: deposit_lp");
 
     let pool_funding = funding.pool_funding;
 
@@ -486,7 +486,7 @@ pub fn deposit_lp_impl(
 }
 
 pub fn query_state_impl(id: ChannelId) -> Option<RegisteredState> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: query_state");
     state.state(&id)
 }
 
@@ -1014,6 +1014,12 @@ where
     /// Note: `icrc_receiver` is NOT restored (it's rebuilt from constructor).
     /// Any in-flight ICRC deposits must be re-submitted after upgrade.
     pub fn restore_from_snapshot(&mut self, snap: CanisterStateSnapshot) {
+        if snap.version != 1 {
+            ic_cdk::trap(&format!(
+                "Unsupported snapshot version: {} (expected 1)",
+                snap.version
+            ));
+        }
         self.principal = snap.principal;
         self.btc_liquidity_addresses = snap.btc_liquidity_addresses.into_iter().collect();
         self.btc_invoice_address = snap.btc_invoice_address;

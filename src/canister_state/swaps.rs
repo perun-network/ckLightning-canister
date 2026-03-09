@@ -38,7 +38,7 @@ pub fn register_swap_impl(request: RegisterSwapRequest) -> RegisterSwapResponse 
 
     // Check if swap already exists
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: register_swap read");
         if state.swaps.contains_key(&payment_hash_arr) {
             return RegisterSwapResponse {
                 success: false,
@@ -59,7 +59,7 @@ pub fn register_swap_impl(request: RegisterSwapRequest) -> RegisterSwapResponse 
 
     // Store swap
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: register_swap write");
         state.swaps.insert(payment_hash_arr, swap_info);
     }
 
@@ -106,7 +106,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     // Atomically: verify state, set InFlight, compute swap, deduct LP — all in ONE write lock.
     // This prevents TOCTOU double-spend: a concurrent call will see InFlight and bail out.
     let (swap_info, ckbtc_out) = {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: complete_swap write");
 
         let swap = match state.swaps.get(&payment_hash_arr) {
             Some(info) => info.clone(),
@@ -248,7 +248,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             Ok(block_index) => {
                 // Mark swap as completed and get ICP fee payer
                 let icp_fee_payer = {
-                    let mut state = STATE.write().unwrap();
+                    let mut state = STATE.write().expect("STATE lock: complete_swap write 2");
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
                         swap.state = SwapState::Completed {
                             block_index: block_index.clone(),
@@ -273,7 +273,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                     // Mark as refunded BEFORE the call to prevent double-refund race
                     // (e.g. heartbeat expiry triggering a concurrent refund path)
                     {
-                        let mut state = STATE.write().unwrap();
+                        let mut state = STATE.write().expect("STATE lock: complete_swap write 3");
                         for request in state.onramp_requests.values_mut() {
                             if let Some(ref ph) = request.payment_hash {
                                 if ph.as_slice() == payment_hash_arr.as_slice() {
@@ -287,7 +287,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                     if let Err(e) = refund_result {
                         ic_cdk::println!("Warning: Failed to refund ICP fee: {}", e);
                         // Roll back the flag on failure so it can be retried
-                        let mut state = STATE.write().unwrap();
+                        let mut state = STATE.write().expect("STATE lock: complete_swap write 4");
                         for request in state.onramp_requests.values_mut() {
                             if let Some(ref ph) = request.payment_hash {
                                 if ph.as_slice() == payment_hash_arr.as_slice() {
@@ -308,7 +308,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             Err(e) => {
                 // Restore LP balances proportionally and mark as failed
                 {
-                    let mut state = STATE.write().unwrap();
+                    let mut state = STATE.write().expect("STATE lock: complete_swap write 5");
                     let restore_nat = Nat::from(ckbtc_out);
                     state.liq_pool.credit_proportional(PoolAsset::CkBTC, restore_nat);
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
@@ -327,7 +327,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         Err((code, msg)) => {
             // Restore LP balances proportionally and mark as failed
             {
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: complete_swap write 6");
                 let restore_nat = Nat::from(ckbtc_out);
                 state.liq_pool.credit_proportional(PoolAsset::CkBTC, restore_nat);
                 if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
@@ -351,7 +351,7 @@ pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> 
 
     // Read configured fee from state and refund minus the transfer fee
     let icp_ddos_fee = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: complete_swap read");
         state.icp_ddos_fee_e8s
     };
     let refund_amount = icp_ddos_fee.saturating_sub(ICP_TRANSFER_FEE_E8S);

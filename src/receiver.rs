@@ -6,7 +6,7 @@
 //
 //    http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writiing, software
+//  Unless required by applicable law or agreed to in writing, software
 //  distributed under the License is distributed on an "AS IS" BASIS,
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
@@ -204,8 +204,14 @@ impl CanisterTXQuerier {
 
             for archive in result.archived_blocks.iter() {
                 for req in &archive.args {
-                    let start: u64 = req.start.clone().0.to_u64().unwrap();
-                    let len: u64 = req.length.clone().0.to_u64().unwrap();
+                    let start: u64 = match req.start.clone().0.to_u64() {
+                        Some(v) => v,
+                        None => continue, // Skip this archive entry if Nat overflows u64
+                    };
+                    let len: u64 = match req.length.clone().0.to_u64() {
+                        Some(v) => v,
+                        None => continue,
+                    };
 
                     if start <= block_height && block_height < start + len {
                         let archived_result: CallResult<(GetBlocksResult,)> = ic_cdk::call(
@@ -258,14 +264,14 @@ where
 
         match self.tx_querier.query_icrc_tx(block_height, amount).await {
             Ok(tx) => {
-                if !self.known_txs.insert(block_height) {
-                    return Err(ICPReceiverError::DuplicateTransaction);
-                }
                 if tx.to != self.my_account {
                     return Err(ICPReceiverError::Recipient);
                 }
                 *self.unspent.entry(funding.memo()).or_insert(0u64.into()) += amount;
-
+                // Only mark as known AFTER successful credit
+                if !self.known_txs.insert(block_height) {
+                    return Err(ICPReceiverError::DuplicateTransaction);
+                }
                 Ok(tx)
             }
             Err(e) => Err(e),
@@ -281,7 +287,7 @@ where
     pub fn drain_if_at_least(&mut self, memo: Memo, amount: Amount) -> Option<Amount> {
         if let Some(sum) = self.unspent.get(&memo) {
             if sum >= &amount {
-                return self.unspent.remove(&memo).unwrap().into();
+                return self.unspent.remove(&memo);
             }
         }
         None
