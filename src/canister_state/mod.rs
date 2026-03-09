@@ -229,6 +229,19 @@ where
 
     // Funded channel addresses (idempotency guard for fund_channel)
     pub(crate) funded_channels: HashSet<String>,
+
+    // Two-phase channel funding: reservations pending confirmation
+    // Keyed by funding address. Tracks amount reserved until channel_funded or cancel.
+    pub(crate) channel_funding_reservations: HashMap<String, ChannelFundingReservation>,
+}
+
+/// Tracks a pending channel funding between fund_channel (TX signed) and
+/// channel_funded (TX confirmed). LP balances are only deducted on confirmation.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ChannelFundingReservation {
+    pub amount_sat: u64,
+    pub created_at: u64,
+    pub funding_address: String,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -526,6 +539,7 @@ where
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
             funded_channels: HashSet::new(),
+            channel_funding_reservations: HashMap::new(),
         }
     }
 
@@ -580,6 +594,7 @@ where
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
             funded_channels: HashSet::new(),
+            channel_funding_reservations: HashMap::new(),
         }
     }
 
@@ -955,6 +970,10 @@ where
         let mut funded_channels: Vec<String> = self.funded_channels.iter().cloned().collect();
         funded_channels.sort();
 
+        let mut channel_funding_reservations: Vec<_> = self.channel_funding_reservations.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        channel_funding_reservations.sort_by_key(|(k, _)| k.clone());
+
         CanisterStateSnapshot {
             version: 1,
             principal: self.principal,
@@ -986,6 +1005,7 @@ where
             admin: self.admin,
             icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
             funded_channels,
+            channel_funding_reservations,
         }
     }
 
@@ -1025,6 +1045,7 @@ where
         self.admin = snap.admin;
         self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
         self.funded_channels = snap.funded_channels.into_iter().collect();
+        self.channel_funding_reservations = snap.channel_funding_reservations.into_iter().collect();
     }
 }
 
@@ -1073,6 +1094,8 @@ pub struct CanisterStateSnapshot {
     pub admin: Option<Principal>,
     pub icp_ddos_fee_e8s: u64,
     pub funded_channels: Vec<String>,
+    #[serde(default)]
+    pub channel_funding_reservations: Vec<(String, ChannelFundingReservation)>,
 }
 
 #[cfg(test)]

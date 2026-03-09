@@ -213,15 +213,48 @@ pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
     state.reserved_utxos.retain(|_, v| *v != channel_id);
 }
 
-/// Called when a channel is successfully funded - update tracking
+/// Called when a channel is successfully funded and TX confirmed.
 ///
-/// NOTE: total_btc_in_channels is already incremented in fund_channel_impl(),
-/// so we do NOT increment it again here to avoid double-counting.
+/// Two-phase model: this is where LP balances are actually deducted and
+/// total_btc_in_channels is incremented. Looks up the reservation by
+/// funding_address (from ln_channels registry) or falls back to capacity_sats.
 pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     let mut state = STATE.write().unwrap();
 
     // Remove from reserved UTXOs
     state.reserved_utxos.retain(|_, v| *v != channel_id);
+
+    // Find the funding address for this channel to look up the reservation
+    let funding_address = state.ln_channels.get(&channel_id)
+        .map(|ch| ch.funding_address.clone());
+
+    // Resolve reservation amount (prefer reservation, fall back to capacity_sats)
+    let amount_sat = if let Some(ref addr) = funding_address {
+        if let Some(reservation) = state.channel_funding_reservations.remove(addr) {
+            reservation.amount_sat
+        } else {
+            ic_cdk::println!(
+                "channel_funded: no reservation found for address {}, using capacity_sats={}",
+                addr, capacity_sats
+            );
+            capacity_sats
+        }
+    } else {
+        ic_cdk::println!(
+            "channel_funded: no ln_channel entry for channel, using capacity_sats={}",
+            capacity_sats
+        );
+        capacity_sats
+    };
+
+    // NOW commit: increment total and deduct from LPs
+    state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(amount_sat);
+    let amount_nat = Nat::from(amount_sat);
+    if let Err(e) = state.liq_pool.deduct_proportional(PoolAsset::BTC, amount_nat) {
+        ic_cdk::println!("ERROR: deduct_proportional failed on channel_funded: {:?}", e);
+        // Don't silently continue — this is a real accounting error
+        return;
+    }
 
     // Initialize channel balance tracking
     state.channel_balances.insert(channel_id, LnChannelBalance {
@@ -232,6 +265,53 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
         is_active: true,
         last_updated: blocktime(),
     });
+}
+
+/// Cancel a pending channel funding (TX never broadcast or failed).
+///
+/// Removes the idempotency guard and reservation so the channel can be re-attempted.
+/// No LP balance changes needed since deduction hasn't happened yet (two-phase model).
+pub fn cancel_channel_funding_impl(funding_address: String) -> Result<(), String> {
+    let mut state = STATE.write().unwrap();
+
+    // Remove idempotency guard
+    if !state.funded_channels.remove(&funding_address) {
+        return Err(format!("No funded_channels entry for address {}", funding_address));
+    }
+
+    // Remove reservation (may not exist if already timed out)
+    if state.channel_funding_reservations.remove(&funding_address).is_some() {
+        ic_cdk::println!("Cancelled channel funding reservation for {}", funding_address);
+    }
+
+    // Release any reserved UTXOs associated with this funding
+    // (UTXOs are keyed by outpoint, not funding address, so we can't easily map them here.
+    //  The relay should call release_reserved_utxos separately if needed.)
+
+    Ok(())
+}
+
+/// Expire stale channel funding reservations (called from heartbeat).
+///
+/// If a reservation is older than the timeout and channel_funded was never called,
+/// release the idempotency guard so the channel can be re-attempted.
+pub fn expire_channel_funding_reservations() {
+    let now = blocktime();
+    // 6 hours in nanoseconds (IC time is in nanoseconds)
+    const RESERVATION_TIMEOUT_NS: u64 = 6 * 60 * 60 * 1_000_000_000;
+
+    let mut state = STATE.write().unwrap();
+
+    let expired: Vec<String> = state.channel_funding_reservations.iter()
+        .filter(|(_, r)| now.saturating_sub(r.created_at) > RESERVATION_TIMEOUT_NS)
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    for addr in &expired {
+        state.channel_funding_reservations.remove(addr);
+        state.funded_channels.remove(addr);
+        ic_cdk::println!("Expired channel funding reservation for {}", addr);
+    }
 }
 
 /// Called when a channel is closed - update tracking and credit LPs

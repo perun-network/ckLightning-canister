@@ -618,6 +618,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     let txid = signed_tx.compute_txid().to_string();
 
     // Track the funding in canister state (atomically with idempotency guard)
+    // Two-phase model: create reservation only. LP deduction happens in channel_funded.
     {
         let mut state = STATE.write().unwrap();
         if !state.funded_channels.insert(request.funding_address.clone()) {
@@ -629,12 +630,16 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
                 error: Some("Channel already funded for this address".to_string()),
             };
         }
-        state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(request.amount_sat);
-        // Deduct from LPs proportionally — each LP's BTC balance decreases by their share
-        let amount_nat = Nat::from(request.amount_sat);
-        if let Err(e) = state.liq_pool.deduct_proportional(PoolAsset::BTC, amount_nat) {
-            ic_cdk::println!("WARNING: deduct_proportional failed on channel fund: {:?}", e);
-        }
+        // Reserve the amount — LP balances and total_btc_in_channels are NOT modified yet.
+        // They will be updated when channel_funded is called after TX confirmation.
+        state.channel_funding_reservations.insert(
+            request.funding_address.clone(),
+            super::ChannelFundingReservation {
+                amount_sat: request.amount_sat,
+                created_at: ic_cdk::api::time(),
+                funding_address: request.funding_address.clone(),
+            },
+        );
     }
 
     FundChannelResponse {

@@ -34,7 +34,8 @@ use crate::canister_state::{
     complete_offramp_impl, fail_offramp_impl, retry_offramp_refund_impl, get_offramp_status_impl,
     // LP Liquidity management functions
     get_funding_utxos_impl, update_channel_balance_impl, get_lp_liquidity_status_impl,
-    channel_funded_impl, channel_closed_impl,
+    channel_funded_impl, channel_closed_impl, cancel_channel_funding_impl,
+    expire_channel_funding_reservations,
     // Channel funding from LP BTC
     fund_channel_impl,
     // HTLC functions
@@ -713,6 +714,17 @@ fn channel_closed(channel_id: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+/// Cancel a pending channel funding (TX never broadcast or relay aborted).
+///
+/// Releases the idempotency guard and reservation so funding can be re-attempted.
+/// No LP balance changes occur since deduction hasn't happened yet (two-phase model).
+#[update]
+#[candid_method(update)]
+fn cancel_channel_funding(funding_address: String) -> Result<(), String> {
+    assert_relay_caller()?;
+    cancel_channel_funding_impl(funding_address)
+}
+
 // =============================================================================
 // HTLC Endpoints (Hash Time-Locked Contracts)
 // =============================================================================
@@ -908,7 +920,7 @@ fn inspect_message() {
         | "register_ln_channel" | "verify_ln_channel" | "get_utxos_for_address"
         | "sign_ln_message"
         | "fund_channel" | "get_funding_utxos" | "update_channel_balance"
-        | "get_lp_liquidity_status" | "channel_funded" | "channel_closed"
+        | "get_lp_liquidity_status" | "channel_funded" | "channel_closed" | "cancel_channel_funding"
         | "create_htlc" | "fulfill_htlc" | "timeout_htlc"
         | "create_htlc_with_tx_details" | "sign_htlc_success" | "sign_htlc_timeout"
         | "generate_channel_secrets" | "sign_counterparty_commitment"
@@ -948,6 +960,7 @@ fn inspect_message() {
 #[heartbeat]
 async fn heartbeat() {
     check_expired_swaps_impl().await;
+    expire_channel_funding_reservations();
 }
 
 /// Get count of expired swaps for monitoring
