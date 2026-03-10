@@ -362,6 +362,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
 
         let user = request_info.user;
         let ckbtc_collected = request_info.ckbtc_collected;
+        let amount_sats = request_info.amount_sats;
 
         // Credit LPs proportionally with the ckBTC collected from the user.
         // LPs are "selling" BTC (via Lightning channel) in exchange for ckBTC.
@@ -369,6 +370,9 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
             let amount_nat = Nat::from(ckbtc_collected);
             state.liq_pool.credit_proportional(PoolAsset::CkBTC, amount_nat);
         }
+
+        // Update BTC side: Lightning payment sent, so channel BTC decreased
+        state.total_btc_in_channels = state.total_btc_in_channels.saturating_sub(amount_sats);
 
         user
     };

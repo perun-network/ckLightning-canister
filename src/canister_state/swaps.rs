@@ -199,6 +199,9 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 
         let ckbtc_out = swap_result.output_amount;
 
+        // Update BTC side: Lightning payment arrived, so channel BTC increased
+        state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(input_sat as u64);
+
         // Deduct ckBTC from LP proportionally
         let amount_nat = Nat::from(ckbtc_out);
         if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, amount_nat) {
