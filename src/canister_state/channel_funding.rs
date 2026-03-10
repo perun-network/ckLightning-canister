@@ -228,33 +228,35 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     let funding_address = state.ln_channels.get(&channel_id)
         .map(|ch| ch.funding_address.clone());
 
-    // Resolve reservation amount (prefer reservation, fall back to capacity_sats)
+    // Look up reservation — only LP-funded channels have one (from fund_channel).
+    // Channels funded by the peer (e.g. inbound channels) have no reservation
+    // and must NOT be deducted from the LP pool.
     let amount_sat = if let Some(ref addr) = funding_address {
         if let Some(reservation) = state.channel_funding_reservations.remove(addr) {
             reservation.amount_sat
         } else {
+            // No reservation = channel was NOT funded from LP (peer-funded/inbound).
+            // Skip LP accounting entirely — no deduction, no channel balance tracking.
             ic_cdk::println!(
-                "channel_funded: no reservation found for address {}, using capacity_sats={}",
-                addr, capacity_sats
+                "channel_funded: no reservation for address {} — peer-funded channel, skipping LP deduction",
+                addr
             );
-            capacity_sats
+            return;
         }
     } else {
         ic_cdk::println!(
-            "channel_funded: no ln_channel entry for channel, using capacity_sats={}",
-            capacity_sats
+            "channel_funded: no ln_channel entry for channel — skipping LP deduction"
         );
-        capacity_sats
+        return;
     };
 
-    // NOW commit: increment total and deduct from LPs
-    state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(amount_sat);
+    // Deduct from LPs first, then increment total (avoids stale total on failure)
     let amount_nat = Nat::from(amount_sat);
     if let Err(e) = state.liq_pool.deduct_proportional(PoolAsset::BTC, amount_nat) {
         ic_cdk::println!("ERROR: deduct_proportional failed on channel_funded: {:?}", e);
-        // Don't silently continue — this is a real accounting error
         return;
     }
+    state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(amount_sat);
 
     // Initialize channel balance tracking
     state.channel_balances.insert(channel_id, LnChannelBalance {

@@ -124,8 +124,11 @@ where
 {
     pub(crate) principal: Principal,
 
-    // Multiple liquidity depositor addresses
+    // Per-user LP BTC deposit addresses (LiquidityPoolUser derivation)
     pub(crate) btc_liquidity_addresses: HashMap<Principal, String>,
+
+    // Personal depositor BTC addresses (LiquidityDepositor derivation)
+    pub(crate) btc_depositor_addresses: HashMap<Principal, String>,
 
     // SINGLE global invoice deposit address
     pub(crate) btc_invoice_address: Option<String>,
@@ -270,10 +273,10 @@ pub struct HtlcTxDetails {
 pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressResponse, BtcError> {
     let depositor = msg_caller(); // IC principal of the caller
 
-    // First check state
+    // First check state (personal depositor addresses)
     {
         let state = STATE.read().expect("STATE lock: set_btc_liquidity_address read");
-        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+        if let Some(addr) = state.btc_depositor_addresses.get(&depositor) {
             return Ok(SetLiquidityBtcAddressResponse {
                 address: addr.clone(),
                 already_existed: true,
@@ -281,15 +284,15 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
         }
     }
 
-    // Derive new SegWit address for this depositor
+    // Derive new SegWit address for this depositor (personal address)
     let purpose = BtcPurpose::LiquidityDepositor(depositor);
     let address = get_segwit_address(purpose).await?;
 
-    // Store in state
+    // Store in state (personal depositor addresses)
     {
         let mut state = STATE.write().expect("STATE lock: set_btc_liquidity_address write");
         state
-            .btc_liquidity_addresses
+            .btc_depositor_addresses
             .insert(depositor, address.clone());
     }
 
@@ -312,8 +315,8 @@ pub async fn set_btc_address_impl(
         None => return Err(BtcError::Other("Principal is required".into())),
     }
 
-    // Check if address for this type exists
-    if let Some(address) = state.btc_liquidity_addresses.get(&principal) {
+    // Check if address for this type exists (personal depositor addresses)
+    if let Some(address) = state.btc_depositor_addresses.get(&principal) {
         return Ok(SetBtcAddressResponse {
             address: address.clone(),
             msg: SetBtcAddressMsg::BtcAddressAlreadySetSingle(address_type),
@@ -327,9 +330,9 @@ pub async fn set_btc_address_impl(
         BtcAddressType::P2TR => get_p2tr_key_path_only_address().await?,
     };
 
-    // Store in the map
+    // Store in the map (personal depositor addresses)
     state
-        .btc_liquidity_addresses
+        .btc_depositor_addresses
         .insert(principal.clone(), address.clone());
 
     Ok(SetBtcAddressResponse {
@@ -346,7 +349,7 @@ pub async fn get_btc_balances_impl(
     let mut balances: HashMap<Principal, Option<u64>> = HashMap::new();
     let mut any_address_set = false;
 
-    for (address_type, address) in &state.btc_liquidity_addresses {
+    for (address_type, address) in &state.btc_depositor_addresses {
         any_address_set = true;
 
         // Construct GetBtcBalanceArgs with actual address string, not address_type
@@ -398,23 +401,23 @@ pub async fn get_ln_address_impl() -> Result<String, BtcError> {
 pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<String, BtcError> {
     let depositor = msg_caller();
 
-    // 1. Fast path: return existing address if present
+    // 1. Fast path: return existing personal address if present
     {
         let state = STATE.read().expect("STATE lock: get_btc_liquidity_address_for_caller read");
-        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+        if let Some(addr) = state.btc_depositor_addresses.get(&depositor) {
             return Ok(addr.clone());
         }
     }
 
-    // 2. Derive new SegWit address for this depositor
+    // 2. Derive new SegWit address for this depositor (personal address)
     let purpose = BtcPurpose::LiquidityDepositor(depositor);
     let address = get_segwit_address(purpose).await?;
 
-    // 3. Store in state and return
+    // 3. Store in state and return (personal depositor addresses)
     {
         let mut state = STATE.write().expect("STATE lock: get_btc_liquidity_address_for_caller write");
         state
-            .btc_liquidity_addresses
+            .btc_depositor_addresses
             .insert(depositor, address.clone());
     }
 
@@ -501,6 +504,7 @@ where
         Self {
             principal: dummy_principal,
             btc_liquidity_addresses: HashMap::new(),
+            btc_depositor_addresses: HashMap::new(),
             btc_invoice_address: None,
             lp_btc_address: None,
             pending_btc_deposits: HashMap::new(),
@@ -548,7 +552,8 @@ where
 
         Self {
             principal: canister_self(),
-            btc_liquidity_addresses: HashMap::new(), // multiple per depositor
+            btc_liquidity_addresses: HashMap::new(), // per-user LP deposit addresses
+            btc_depositor_addresses: HashMap::new(), // personal depositor addresses
             btc_invoice_address: None,               // single global invoice address
             lp_btc_address: None,                    // single shared LP BTC address
             pending_btc_deposits: HashMap::new(),    // pending BTC deposits
@@ -907,6 +912,10 @@ where
             .map(|(k, v)| (*k, v.clone())).collect();
         btc_liquidity_addresses.sort_by_key(|(k, _)| *k);
 
+        let mut btc_depositor_addresses: Vec<_> = self.btc_depositor_addresses.iter()
+            .map(|(k, v)| (*k, v.clone())).collect();
+        btc_depositor_addresses.sort_by_key(|(k, _)| *k);
+
         let mut pending_btc_deposits: Vec<_> = self.pending_btc_deposits.iter()
             .map(|(k, v)| (*k, v.clone())).collect();
         pending_btc_deposits.sort_by_key(|(k, _)| *k);
@@ -978,6 +987,7 @@ where
             version: 1,
             principal: self.principal,
             btc_liquidity_addresses,
+            btc_depositor_addresses: Some(btc_depositor_addresses),
             btc_invoice_address: self.btc_invoice_address.clone(),
             lp_btc_address: self.lp_btc_address.clone(),
             pending_btc_deposits,
@@ -1022,6 +1032,7 @@ where
         }
         self.principal = snap.principal;
         self.btc_liquidity_addresses = snap.btc_liquidity_addresses.into_iter().collect();
+        self.btc_depositor_addresses = snap.btc_depositor_addresses.unwrap_or_default().into_iter().collect();
         self.btc_invoice_address = snap.btc_invoice_address;
         self.lp_btc_address = snap.lp_btc_address;
         self.pending_btc_deposits = snap.pending_btc_deposits.into_iter().collect();
@@ -1071,6 +1082,7 @@ pub struct CanisterStateSnapshot {
     pub version: u8,
     pub principal: Principal,
     pub btc_liquidity_addresses: Vec<(Principal, String)>,
+    pub btc_depositor_addresses: Option<Vec<(Principal, String)>>,
     pub btc_invoice_address: Option<String>,
     pub lp_btc_address: Option<String>,
     pub pending_btc_deposits: Vec<([u8; 32], PendingBtcDeposit)>,

@@ -173,9 +173,10 @@ pub struct QueryBtcAddressResponse {
 
 #[derive(CandidType, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum BtcPurpose {
-    LiquidityDepositor(Principal), // multiple: ["btc", "liq_deposit", principal]
+    LiquidityDepositor(Principal), // User's personal BTC address: ["btc", "liq_deposit", principal]
+    LiquidityPoolUser(Principal),  // Per-user LP deposit address: ["btc", "lp_user", principal]
     LnInvoiceDeposit,              // SINGLE: ["btc", "ln_invoice"]
-    LiquidityPoolShared,           // SINGLE: ["btc", "lp_shared"] - shared LP BTC address
+    LiquidityPoolShared,           // SINGLE: ["btc", "lp_shared"] - internal change address
 }
 
 #[derive(CandidType, Deserialize, Clone)]
@@ -192,6 +193,13 @@ impl BtcPurpose {
                 vec![
                     b"btc".to_vec(),
                     b"liq_deposit".to_vec(),
+                    principal.as_slice().to_vec(),
+                ]
+            }
+            BtcPurpose::LiquidityPoolUser(principal) => {
+                vec![
+                    b"btc".to_vec(),
+                    b"lp_user".to_vec(),
                     principal.as_slice().to_vec(),
                 ]
             }

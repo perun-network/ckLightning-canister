@@ -1,5 +1,5 @@
 // =============================================================================
-// BTC Liquidity Pool Implementation (Shared LP Address - Option C)
+// BTC Liquidity Pool Implementation (Per-User LP Addresses + Internal Treasury)
 // + User BTC Operations (from depositor address)
 // + Channel Funding from LP BTC
 // =============================================================================
@@ -9,9 +9,8 @@ use crate::BtcPurpose;
 use crate::btc::address::get_segwit_address;
 use crate::btc::common::get_fee_per_byte;
 use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
-use crate::btc::p2wpkh;
+use crate::btc::p2wpkh::{self, SourcedUtxo};
 use crate::error::BtcError;
-use crate::helpers::send_btc_from_lp_address;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
     LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
@@ -31,152 +30,6 @@ use std::str::FromStr;
 
 const REQUIRED_BTC_CONFIRMATIONS: u32 = 6;
 
-/// Get the shared LP BTC address
-///
-/// Returns a single shared SegWit (P2WPKH) address for all LP BTC deposits.
-/// This is derived using chainkey ECDSA with a fixed derivation path.
-pub async fn get_lp_btc_address_impl() -> Result<LpBtcAddressResponse, BtcError> {
-    // Check cache first
-    {
-        let state = STATE.read().expect("STATE lock: get_lp_btc_address read");
-        if let Some(addr) = state.lp_btc_address.as_ref() {
-            return Ok(LpBtcAddressResponse {
-                address: addr.clone(),
-            });
-        }
-    }
-
-    // Derive the shared LP BTC address
-    let purpose = BtcPurpose::LiquidityPoolShared;
-    let address = get_segwit_address(purpose).await?;
-
-    // Cache it
-    {
-        let mut state = STATE.write().expect("STATE lock: get_lp_btc_address write");
-        state.lp_btc_address = Some(address.clone());
-    }
-
-    Ok(LpBtcAddressResponse { address })
-}
-
-/// Deposit BTC to the liquidity pool
-///
-/// This function scans the shared LP address for UTXOs that haven't been credited yet.
-/// When called by a user, it will credit any new deposits with 6+ confirmations.
-pub async fn deposit_btc_impl(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
-    let caller = msg_caller();
-
-    // Get the shared LP BTC address
-    let lp_address = {
-        let state = STATE.read().expect("STATE lock: deposit_btc read");
-        match state.lp_btc_address.as_ref() {
-            Some(addr) => addr.clone(),
-            None => {
-                // Address not initialized, derive it
-                drop(state);
-                match get_lp_btc_address_impl().await {
-                    Ok(resp) => resp.address,
-                    Err(e) => {
-                        return LpBtcDepositResponse {
-                            success: false,
-                            credited_amount: Nat::from(0u64),
-                            new_btc_balance: Nat::from(0u64),
-                            error: Some(format!("Failed to get LP address: {:?}", e)),
-                        };
-                    }
-                }
-            }
-        }
-    };
-
-    // Get Bitcoin context and query UTXOs
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    let utxos_result = bitcoin_get_utxos(&GetUtxosRequest {
-        address: lp_address.clone(),
-        network: ctx.network,
-        filter: None,
-    })
-    .await;
-
-    let utxos_response = match utxos_result {
-        Ok(response) => response,
-        Err(e) => {
-            return LpBtcDepositResponse {
-                success: false,
-                credited_amount: Nat::from(0u64),
-                new_btc_balance: Nat::from(0u64),
-                error: Some(format!("Failed to query UTXOs: {:?}", e)),
-            };
-        }
-    };
-
-    let tip_height = utxos_response.tip_height;
-    let mut total_credited: u64 = 0;
-
-    // Process each UTXO
-    // Use a single write lock for the check-and-insert to prevent TOCTOU double-credit
-    for utxo in &utxos_response.utxos {
-        // Calculate confirmations
-        let confirmations = if utxo.height > 0 {
-            tip_height.saturating_sub(utxo.height) + 1
-        } else {
-            0
-        };
-
-        // Skip if not enough confirmations
-        if confirmations < REQUIRED_BTC_CONFIRMATIONS as u32 {
-            continue;
-        }
-
-        // If a specific txid was provided, only process matching UTXOs
-        if let Some(ref expected_txid) = request.txid {
-            if utxo.outpoint.txid.as_slice() != expected_txid.as_slice() {
-                continue;
-            }
-        }
-
-        // Atomically check+insert processed_utxos and credit in one write lock
-        let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
-        let amount = utxo.value;
-        {
-            let mut state = STATE.write().expect("STATE lock: deposit_btc write");
-            if state.processed_utxos.contains_key(&utxo_key) {
-                continue;
-            }
-            state.processed_utxos.insert(utxo_key, caller);
-            state.liq_pool.deposit(caller, PoolAsset::BTC, Nat::from(amount));
-        }
-
-        total_credited += amount;
-    }
-
-    // Get updated balance
-    let new_btc_balance = {
-        let state = STATE.read().expect("STATE lock: deposit_btc read 2");
-        state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
-    };
-
-    if total_credited > 0 {
-        LpBtcDepositResponse {
-            success: true,
-            credited_amount: Nat::from(total_credited),
-            new_btc_balance,
-            error: None,
-        }
-    } else {
-        LpBtcDepositResponse {
-            success: false,
-            credited_amount: Nat::from(0u64),
-            new_btc_balance,
-            error: Some(format!(
-                "No new deposits found with {} confirmations. Send BTC to {} first.",
-                REQUIRED_BTC_CONFIRMATIONS, lp_address
-            )),
-        }
-    }
-}
-
 /// Get the caller's per-user LP BTC deposit address
 ///
 /// Each LP depositor gets a unique address derived from their principal.
@@ -194,8 +47,8 @@ pub async fn get_lp_btc_user_address_impl() -> Result<LpBtcAddressResponse, BtcE
         }
     }
 
-    // Derive per-user LP BTC address
-    let purpose = BtcPurpose::LiquidityDepositor(caller);
+    // Derive per-user LP deposit address (distinct from user's personal BTC address)
+    let purpose = BtcPurpose::LiquidityPoolUser(caller);
     let address = get_segwit_address(purpose).await?;
 
     // Cache it
@@ -312,12 +165,11 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
 
 /// Withdraw BTC from the liquidity pool
 ///
-/// Sends BTC from the shared LP address to the user's destination address.
-/// The caller's LP BTC balance must be sufficient for the withdrawal.
-/// Additionally, the requested amount must not exceed available on-chain BTC
-/// (total LP BTC minus BTC locked in Lightning channels).
+/// Collects UTXOs from all LP addresses (per-user + shared) and sends BTC
+/// to the user's destination address. Change goes to the shared LP address.
 pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawResponse {
     let caller = msg_caller();
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
     if request.destination_address.len() > 200 {
         return LpBtcWithdrawResponse {
@@ -342,8 +194,6 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
     let amount_nat = Nat::from(request.amount_sat);
 
     // Deduct from LP balance
-    // LP balances already reflect channel deductions (deduct_proportional on fund),
-    // so we just check the individual LP balance via liq_pool.withdraw().
     {
         let mut state = STATE.write().expect("STATE lock: withdraw_btc write");
 
@@ -359,41 +209,89 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
         }
     }
 
-    // Send BTC to the destination address
-    // We use P2WPKH for the shared LP address
-    let send_result = send_btc_from_lp_address(
-        request.destination_address.clone(),
-        request.amount_sat,
-    )
-    .await;
+    // Parse destination address
+    let dst_address = match Address::from_str(&request.destination_address) {
+        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
+            Ok(a) => a,
+            Err(e) => {
+                // Restore LP balance
+                let mut state = STATE.write().expect("STATE lock: withdraw_btc restore");
+                state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
+                let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
+                return LpBtcWithdrawResponse {
+                    success: false, amount_withdrawn: Nat::from(0u64),
+                    new_btc_balance: bal, txid: None,
+                    error: Some(format!("Address network mismatch: {:?}", e)),
+                };
+            }
+        },
+        Err(e) => {
+            let mut state = STATE.write().expect("STATE lock: withdraw_btc restore 2");
+            state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
+            let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
+            return LpBtcWithdrawResponse {
+                success: false, amount_withdrawn: Nat::from(0u64),
+                new_btc_balance: bal, txid: None,
+                error: Some(format!("Invalid destination address: {}", e)),
+            };
+        }
+    };
 
-    match send_result {
-        Ok(txid) => {
+    // Collect UTXOs from all LP addresses
+    let (all_sourced_utxos, change_address) = match collect_all_lp_sourced_utxos(&ctx).await {
+        Ok(result) => result,
+        Err(e) => {
+            let mut state = STATE.write().expect("STATE lock: withdraw_btc restore 3");
+            state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
+            let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
+            return LpBtcWithdrawResponse {
+                success: false, amount_withdrawn: Nat::from(0u64),
+                new_btc_balance: bal, txid: None,
+                error: Some(format!("Failed to collect LP UTXOs: {:?}", e)),
+            };
+        }
+    };
+
+    let fee_per_byte = get_fee_per_byte(&ctx).await;
+
+    let (transaction, prevouts, selected_indices) =
+        p2wpkh::build_multi_address_transaction(
+            &ctx, &all_sourced_utxos, &change_address,
+            &dst_address, request.amount_sat, fee_per_byte,
+        ).await;
+
+    let signed_tx = p2wpkh::sign_multi_address_transaction(
+        &ctx, &all_sourced_utxos, &selected_indices,
+        transaction, &prevouts, sign_with_ecdsa,
+    ).await;
+
+    match bitcoin_send_transaction(&SendTransactionRequest {
+        network: ctx.network,
+        transaction: serialize(&signed_tx),
+    }).await {
+        Ok(_) => {
             let new_btc_balance = {
                 let state = STATE.read().expect("STATE lock: withdraw_btc read");
                 state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
             };
-
             LpBtcWithdrawResponse {
                 success: true,
                 amount_withdrawn: amount_nat,
                 new_btc_balance,
-                txid: Some(txid),
+                txid: Some(signed_tx.compute_txid().to_string()),
                 error: None,
             }
         }
         Err(e) => {
-            // Restore the LP balance on failure
+            // Restore LP balance on broadcast failure
             {
                 let mut state = STATE.write().expect("STATE lock: withdraw_btc write 2");
                 state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
             }
-
             let new_btc_balance = {
                 let state = STATE.read().expect("STATE lock: withdraw_btc read 2");
                 state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
             };
-
             LpBtcWithdrawResponse {
                 success: false,
                 amount_withdrawn: Nat::from(0u64),
@@ -413,22 +311,22 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
 pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
     let caller = msg_caller();
 
-    // Get or derive the caller's depositor address
+    // Get or derive the caller's personal depositor address (NOT the LP address)
     let address = {
         let state = STATE.read().expect("STATE lock: get_depositor_btc_balance read");
-        state.btc_liquidity_addresses.get(&caller).cloned()
+        state.btc_depositor_addresses.get(&caller).cloned()
     };
 
     let address = match address {
         Some(addr) => addr,
         None => {
-            // Derive the address if not yet stored
+            // Derive the personal address if not yet stored
             let purpose = BtcPurpose::LiquidityDepositor(caller);
             match get_segwit_address(purpose).await {
                 Ok(addr) => {
-                    // Store it for future use
+                    // Store in personal depositor cache (separate from LP addresses)
                     let mut state = STATE.write().expect("STATE lock: get_depositor_btc_balance write");
-                    state.btc_liquidity_addresses.insert(caller, addr.clone());
+                    state.btc_depositor_addresses.insert(caller, addr.clone());
                     addr
                 }
                 Err(e) => {
@@ -620,9 +518,88 @@ pub async fn send_btc_from_depositor_address_impl(
     }
 }
 
+// =============================================================================
+// Multi-address UTXO collection for LP spending
+// =============================================================================
+
+/// Collect UTXOs from all LP-related addresses (shared treasury + all per-user depositor addresses).
+/// The canister controls the keys for all of these via threshold ECDSA.
+async fn collect_all_lp_sourced_utxos(
+    ctx: &crate::BitcoinContext,
+) -> Result<(Vec<SourcedUtxo>, Address), BtcError> {
+    let mut sourced = Vec::new();
+
+    // 1. Shared LP address (receives change from multi-address spends)
+    let shared_purpose = BtcPurpose::LiquidityPoolShared;
+    let shared_deriv = shared_purpose.derivation_path();
+    let shared_pk_bytes = get_ecdsa_public_key(ctx, shared_deriv.clone()).await;
+    let shared_compressed = CompressedPublicKey::from_slice(&shared_pk_bytes)
+        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {}", e)))?;
+    let shared_pk = PublicKey::from_slice(&shared_pk_bytes)
+        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {}", e)))?;
+    let shared_addr = Address::p2wpkh(&shared_compressed, ctx.bitcoin_network);
+
+    let shared_utxos = bitcoin_get_utxos(&GetUtxosRequest {
+        address: shared_addr.to_string(),
+        network: ctx.network,
+        filter: None,
+    })
+    .await
+    .map_err(|e| BtcError::Other(format!("Failed to fetch shared LP UTXOs: {:?}", e)))?
+    .utxos;
+
+    for utxo in shared_utxos {
+        sourced.push(SourcedUtxo {
+            utxo,
+            address: shared_addr.clone(),
+            public_key: shared_pk,
+            derivation_path: shared_deriv.clone(),
+        });
+    }
+
+    // 2. All per-user depositor addresses
+    let depositor_principals: Vec<candid::Principal> = {
+        let state = STATE.read().expect("STATE lock: collect_lp_utxos");
+        state.btc_liquidity_addresses.keys().cloned().collect()
+    };
+
+    for principal in depositor_principals {
+        let purpose = BtcPurpose::LiquidityPoolUser(principal);
+        let deriv = purpose.derivation_path();
+        let pk_bytes = get_ecdsa_public_key(ctx, deriv.clone()).await;
+        let compressed = CompressedPublicKey::from_slice(&pk_bytes)
+            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {}", e)))?;
+        let pk = PublicKey::from_slice(&pk_bytes)
+            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {}", e)))?;
+        let addr = Address::p2wpkh(&compressed, ctx.bitcoin_network);
+
+        let utxos = bitcoin_get_utxos(&GetUtxosRequest {
+            address: addr.to_string(),
+            network: ctx.network,
+            filter: None,
+        })
+        .await
+        .map_err(|e| BtcError::Other(format!("Failed to fetch depositor UTXOs: {:?}", e)))?
+        .utxos;
+
+        for utxo in utxos {
+            sourced.push(SourcedUtxo {
+                utxo,
+                address: addr.clone(),
+                public_key: pk,
+                derivation_path: deriv.clone(),
+            });
+        }
+    }
+
+    // Return all sourced UTXOs + the shared address (used as change address)
+    Ok((sourced, shared_addr))
+}
+
 /// Fund a Lightning channel from LP BTC
-/// Builds and signs a transaction but does NOT broadcast it
-/// The relay passes this to LDK which handles the broadcast timing
+/// Collects UTXOs from all LP addresses (per-user + shared) and builds a
+/// multi-input transaction. Change goes to the shared LP address.
+/// The relay passes the signed tx to LDK which handles broadcast timing.
 pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelResponse {
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
@@ -671,100 +648,58 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
         }
     };
 
-    // Get the derivation path for the shared LP address
-    let purpose = BtcPurpose::LiquidityPoolShared;
-    let derivation_path = purpose.derivation_path();
-
-    // Get our public key
-    let public_key_bytes = get_ecdsa_public_key(&ctx, derivation_path.clone()).await;
-    let compressed_key = match CompressedPublicKey::from_slice(&public_key_bytes) {
-        Ok(k) => k,
+    // Collect UTXOs from all LP addresses (shared + all per-user depositor addresses)
+    let (all_sourced_utxos, change_address) = match collect_all_lp_sourced_utxos(&ctx).await {
+        Ok(result) => result,
         Err(e) => {
             return FundChannelResponse {
                 success: false,
                 signed_tx: None,
                 txid: None,
-                error: Some(format!("Failed to parse public key: {}", e)),
-            };
-        }
-    };
-    let public_key = match PublicKey::from_slice(&public_key_bytes) {
-        Ok(k) => k,
-        Err(e) => {
-            return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Failed to parse public key: {}", e)),
+                error: Some(format!("Failed to collect LP UTXOs: {:?}", e)),
             };
         }
     };
 
-    // Generate our address (P2WPKH)
-    let own_address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
-
-    // Fetch UTXOs
-    let own_utxos = match bitcoin_get_utxos(&GetUtxosRequest {
-        address: own_address.to_string(),
-        network: ctx.network,
-        filter: None,
-    })
-    .await
-    {
-        Ok(response) => response.utxos,
-        Err(e) => {
-            return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Failed to fetch UTXOs: {:?}", e)),
-            };
-        }
-    };
-
-    // Check we have enough funds (with some margin for fees)
-    let total_available: u64 = own_utxos.iter().map(|u| u.value).sum();
-    let fee_margin = 5000u64; // 5000 sats buffer for fees
+    let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
+    let fee_margin = 5000u64;
     if total_available < request.amount_sat.saturating_add(fee_margin) {
         return FundChannelResponse {
             success: false,
             signed_tx: None,
             txid: None,
             error: Some(format!(
-                "Insufficient BTC in LP: available {} sats, requested {} sats (+ ~{} fees)",
+                "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
                 total_available, request.amount_sat, fee_margin
             )),
         };
     }
 
-    // Get fee rate
     let fee_per_byte = get_fee_per_byte(&ctx).await;
 
-    // Build transaction with prevouts (for P2WPKH)
-    let (transaction, prevouts) = p2wpkh::build_transaction(
-        &ctx,
-        &public_key,
-        &own_address,
-        &own_utxos,
-        &funding_address,
-        request.amount_sat,
-        fee_per_byte,
-    )
-    .await;
+    // Build multi-address transaction (inputs from different depositor addresses)
+    let (transaction, prevouts, selected_indices) =
+        p2wpkh::build_multi_address_transaction(
+            &ctx,
+            &all_sourced_utxos,
+            &change_address,
+            &funding_address,
+            request.amount_sat,
+            fee_per_byte,
+        )
+        .await;
 
-    // Sign transaction
-    let signed_tx = p2wpkh::sign_transaction(
+    // Sign with real ECDSA — each input signed with its own derivation path
+    let signed_tx = p2wpkh::sign_multi_address_transaction(
         &ctx,
-        &public_key,
-        &own_address,
+        &all_sourced_utxos,
+        &selected_indices,
         transaction,
         &prevouts,
-        derivation_path,
         sign_with_ecdsa,
     )
     .await;
 
-    // Serialize the transaction for return
     let tx_bytes = serialize(&signed_tx);
     let txid = signed_tx.compute_txid().to_string();
 
@@ -773,7 +708,6 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     {
         let mut state = STATE.write().expect("STATE lock: fund_channel write");
         if !state.funded_channels.insert(request.funding_address.clone()) {
-            // Race: another call funded this address between our read check and here
             return FundChannelResponse {
                 success: false,
                 signed_tx: None,
@@ -781,8 +715,6 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
                 error: Some("Channel already funded for this address".to_string()),
             };
         }
-        // Reserve the amount — LP balances and total_btc_in_channels are NOT modified yet.
-        // They will be updated when channel_funded is called after TX confirmation.
         state.channel_funding_reservations.insert(
             request.funding_address.clone(),
             super::ChannelFundingReservation {

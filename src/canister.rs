@@ -23,7 +23,7 @@ use crate::canister_state::{
     // Simplified LP functions
     deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
     // BTC LP functions
-    get_lp_btc_address_impl, deposit_btc_impl, withdraw_btc_impl,
+    withdraw_btc_impl,
     get_lp_btc_user_address_impl, deposit_btc_user_impl,
     // User BTC operations (from depositor address)
     get_depositor_btc_balance_impl, send_btc_from_depositor_address_impl,
@@ -570,26 +570,6 @@ fn get_total_lp_balance() -> TotalLpBalanceResponse {
 // BTC Liquidity Pool Endpoints (Shared LP Address)
 // =============================================================================
 
-/// Get the shared LP BTC address
-///
-/// Returns the single shared Bitcoin address for LP BTC deposits.
-/// All users deposit to this address, then call deposit_btc() to claim.
-#[update]
-#[candid_method(update)]
-async fn get_lp_btc_address() -> Result<LpBtcAddressResponse, BtcError> {
-    get_lp_btc_address_impl().await
-}
-
-/// Deposit BTC to the liquidity pool (shared address — DEPRECATED)
-///
-/// Use deposit_btc_user() instead for per-user deposit addresses.
-#[update]
-#[candid_method(update)]
-async fn deposit_btc(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
-    ic_cdk::println!("WARNING: deposit_btc (shared address) called — use deposit_btc_user instead");
-    deposit_btc_impl(request).await
-}
-
 /// Get the caller's per-user LP BTC deposit address
 ///
 /// Each LP depositor gets a unique address derived from their principal.
@@ -959,8 +939,8 @@ fn inspect_message() {
         | "set_btc_liquidity_address" | "get_btc_balance" | "set_btc_address"
         | "transaction_notification" | "deposit_channel" | "withdraw_lp" | "deposit_lp"
         | "trigger_withdraw" | "request_onramp_invoice" | "request_offramp"
-        | "deposit_ckbtc" | "withdraw_ckbtc" | "get_lp_btc_address"
-        | "deposit_btc" | "withdraw_btc" | "get_depositor_btc_balance"
+        | "deposit_ckbtc" | "withdraw_ckbtc"
+        | "withdraw_btc" | "get_depositor_btc_balance"
         | "send_btc_from_depositor_address"
         | "get_lp_btc_user_address" | "deposit_btc_user" => true,
 
