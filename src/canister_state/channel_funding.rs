@@ -286,9 +286,13 @@ pub fn cancel_channel_funding_impl(funding_address: String) -> Result<(), String
         ic_cdk::println!("Cancelled channel funding reservation for {}", funding_address);
     }
 
-    // Release any reserved UTXOs associated with this funding
-    // (UTXOs are keyed by outpoint, not funding address, so we can't easily map them here.
-    //  The relay should call release_reserved_utxos separately if needed.)
+    // Release reserved UTXOs for this funding address.
+    // fund_channel_impl uses sha256(funding_address) as the reservation ID.
+    use bitcoin::hashes::{Hash, sha256};
+    let reservation_id: [u8; 32] = sha256::Hash::hash(
+        funding_address.as_bytes()
+    ).to_byte_array();
+    state.reserved_utxos.retain(|_, v| *v != reservation_id);
 
     Ok(())
 }
@@ -312,6 +316,12 @@ pub fn expire_channel_funding_reservations() {
     for addr in &expired {
         state.channel_funding_reservations.remove(addr);
         state.funded_channels.remove(addr);
+        // Release reserved UTXOs for this funding address
+        use bitcoin::hashes::{Hash, sha256};
+        let reservation_id: [u8; 32] = sha256::Hash::hash(
+            addr.as_bytes()
+        ).to_byte_array();
+        state.reserved_utxos.retain(|_, v| *v != reservation_id);
         ic_cdk::println!("Expired channel funding reservation for {}", addr);
     }
 }

@@ -548,7 +548,26 @@ async fn collect_all_lp_sourced_utxos(
     .map_err(|e| BtcError::Other(format!("Failed to fetch shared LP UTXOs: {:?}", e)))?
     .utxos;
 
+    // Snapshot credited + reserved UTXO keys for filtering.
+    // - Credited: only per-user depositor UTXOs that have been claimed via
+    //   deposit_btc_user_impl are spendable. Unclaimed UTXOs must be excluded
+    //   so they aren't swept into the shared change address without LP credit.
+    // - Reserved: UTXOs selected for a pending channel funding TX must be
+    //   excluded to prevent overlapping inputs between concurrent spends.
+    let (depositor_principals, credited_utxo_keys, reserved_utxo_keys) = {
+        let state = STATE.read().expect("STATE lock: collect_lp_utxos");
+        let principals: Vec<candid::Principal> = state.btc_liquidity_addresses.keys().cloned().collect();
+        let credited: std::collections::HashSet<(Vec<u8>, u32)> = state.processed_utxos.keys().cloned().collect();
+        let reserved: std::collections::HashSet<(Vec<u8>, u32)> = state.reserved_utxos.keys().cloned().collect();
+        (principals, credited, reserved)
+    };
+
     for utxo in shared_utxos {
+        // Exclude UTXOs reserved for pending channel funding
+        let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
+        if reserved_utxo_keys.contains(&utxo_key) {
+            continue;
+        }
         sourced.push(SourcedUtxo {
             utxo,
             address: shared_addr.clone(),
@@ -558,10 +577,6 @@ async fn collect_all_lp_sourced_utxos(
     }
 
     // 2. All per-user depositor addresses
-    let depositor_principals: Vec<candid::Principal> = {
-        let state = STATE.read().expect("STATE lock: collect_lp_utxos");
-        state.btc_liquidity_addresses.keys().cloned().collect()
-    };
 
     for principal in depositor_principals {
         let purpose = BtcPurpose::LiquidityPoolUser(principal);
@@ -583,6 +598,12 @@ async fn collect_all_lp_sourced_utxos(
         .utxos;
 
         for utxo in utxos {
+            // Only include UTXOs already credited via deposit_btc_user_impl
+            // and not reserved for pending channel funding
+            let utxo_key = (utxo.outpoint.txid.clone(), utxo.outpoint.vout);
+            if !credited_utxo_keys.contains(&utxo_key) || reserved_utxo_keys.contains(&utxo_key) {
+                continue;
+            }
             sourced.push(SourcedUtxo {
                 utxo,
                 address: addr.clone(),
@@ -705,6 +726,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
 
     // Track the funding in canister state (atomically with idempotency guard)
     // Two-phase model: create reservation only. LP deduction happens in channel_funded.
+    // Also reserve the selected UTXOs to prevent concurrent spends from overlapping.
     {
         let mut state = STATE.write().expect("STATE lock: fund_channel write");
         if !state.funded_channels.insert(request.funding_address.clone()) {
@@ -723,6 +745,19 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
                 funding_address: request.funding_address.clone(),
             },
         );
+
+        // Reserve the exact outpoints selected for this funding TX.
+        // Derive a synthetic channel ID from the funding address so
+        // release_reserved_utxos_impl / channel_funded_impl can clear them.
+        use bitcoin::hashes::{Hash, sha256};
+        let reservation_id: [u8; 32] = sha256::Hash::hash(
+            request.funding_address.as_bytes()
+        ).to_byte_array();
+        for &idx in &selected_indices {
+            let utxo = &all_sourced_utxos[idx];
+            let key = (utxo.utxo.outpoint.txid.clone(), utxo.utxo.outpoint.vout);
+            state.reserved_utxos.insert(key, reservation_id);
+        }
     }
 
     FundChannelResponse {
