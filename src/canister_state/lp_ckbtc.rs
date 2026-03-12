@@ -5,9 +5,8 @@
 use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, DEFAULT_CKBTC_FEE,
+    CKBTC_LEDGER_PRINCIPAL, DEFAULT_CKBTC_FEE,
     LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse,
-    OnrampRequestState,
 };
 
 use candid::{Nat, Principal};
@@ -33,7 +32,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
     }
 
     // Pull ckBTC from caller using ICRC-2 transfer_from
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_from_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
         spender_subaccount: None,
@@ -47,7 +46,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
         },
         amount: amount.clone(),
         fee: None, // Use default fee
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_deposit".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
@@ -106,14 +105,8 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     {
         let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write");
 
-        // Calculate ckBTC reserved for pending onramp requests
-        // These are requests where invoice is created but payment not yet completed
-        let reserved_for_onramps: u64 = state.onramp_requests
-            .values()
-            .filter(|req| matches!(req.state,
-                OnrampRequestState::Pending | OnrampRequestState::Ready))
-            .map(|req| req.amount_sats)
-            .sum();
+        // Use running counter for reserved ckBTC (maintained on request create/complete/expire)
+        let reserved_for_onramps = state.reserved_ckbtc_sats;
 
         // Calculate available ckBTC = total LP ckBTC - reserved for pending swaps
         let total_lp_ckbtc: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC)
@@ -148,7 +141,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     }
 
     // Transfer ckBTC to caller
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_arg = TransferArg {
         from_subaccount: None,
@@ -158,7 +151,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         },
         amount: amount.clone(),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_withdraw".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 

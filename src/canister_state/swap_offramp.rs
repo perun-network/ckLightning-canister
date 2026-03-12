@@ -8,7 +8,7 @@ use super::http_outcall::notify_relay_webhook;
 use super::swaps::refund_icp_fee;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
+    CKBTC_LEDGER_PRINCIPAL, ICP_LEDGER_PRINCIPAL,
     OfframpRequest, OfframpResponse, OfframpRequestInfo, OfframpRequestState,
     PendingOfframpRequest, CompleteOfframpRequest, CompleteOfframpResponse,
     FailOfframpRequest, FailOfframpResponse, GetOfframpStatusResponse,
@@ -151,7 +151,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     };
 
     // STEP 1: Collect ICP anti-DDoS fee first
-    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let icp_ledger = *ICP_LEDGER_PRINCIPAL;
     let icp_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
         spender_subaccount: None,
         from: icrc_ledger_types::icrc1::account::Account {
@@ -164,7 +164,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         },
         amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_icp_fee".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
@@ -198,7 +198,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     // STEP 2: Take custody of user's ckBTC via ICRC-2 transfer_from
     // User must have called icrc2_approve(ckLightning canister, ckbtc_required + fee) first
     // ckbtc_required includes the StableSwap premium over 1:1
-    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+    let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
     // Transfer ckBTC from user to canister (StableSwap-computed amount)
     let ckbtc_transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
@@ -213,7 +213,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         },
         amount: candid::Nat::from(ckbtc_required),
         fee: None,
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_ckbtc".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
@@ -248,6 +248,7 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
                     let mut state = STATE.write().expect("STATE lock: request_offramp write");
                     // Track protocol fees only AFTER both ICP and ckBTC collection succeeded
                     state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(protocol_fee);
+                    state.active_offramp_ids.insert(request_id.clone());
                     state.offramp_requests.insert(request_id.clone(), request_info);
                 }
 
@@ -341,41 +342,45 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
     let user = {
         let mut state = STATE.write().expect("STATE lock: complete_offramp write");
 
-        let request_info = match state.offramp_requests.get_mut(&request.request_id) {
-            Some(info) => info,
-            None => {
+        // Extract data we need before mutating (avoids borrow conflicts)
+        let (user, ckbtc_collected, amount_sats) = {
+            let request_info = match state.offramp_requests.get(&request.request_id) {
+                Some(info) => info,
+                None => {
+                    return CompleteOfframpResponse {
+                        success: false,
+                        error: Some("Request not found".to_string()),
+                    };
+                }
+            };
+
+            // Verify payment_hash matches
+            if request_info.payment_hash.as_slice() != computed_hash_bytes {
                 return CompleteOfframpResponse {
                     success: false,
-                    error: Some("Request not found".to_string()),
+                    error: Some("Preimage does not match payment_hash".to_string()),
                 };
             }
+
+            // Check state
+            if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
+                return CompleteOfframpResponse {
+                    success: false,
+                    error: Some(format!("Invalid state for completion: {:?}", request_info.state)),
+                };
+            }
+
+            (request_info.user, request_info.ckbtc_collected, request_info.amount_sats)
         };
 
-        // Verify payment_hash matches
-        if request_info.payment_hash.as_slice() != computed_hash_bytes {
-            return CompleteOfframpResponse {
-                success: false,
-                error: Some("Preimage does not match payment_hash".to_string()),
+        // Now mutate
+        if let Some(request_info) = state.offramp_requests.get_mut(&request.request_id) {
+            request_info.state = OfframpRequestState::Completed {
+                preimage: request.preimage.clone(),
             };
+            request_info.preimage = Some(request.preimage);
         }
-
-        // Check state
-        if !matches!(request_info.state, OfframpRequestState::Pending | OfframpRequestState::PaymentInProgress) {
-            return CompleteOfframpResponse {
-                success: false,
-                error: Some(format!("Invalid state for completion: {:?}", request_info.state)),
-            };
-        }
-
-        // Mark as completed and record volume
-        request_info.state = OfframpRequestState::Completed {
-            preimage: request.preimage.clone(),
-        };
-        request_info.preimage = Some(request.preimage);
-
-        let user = request_info.user;
-        let ckbtc_collected = request_info.ckbtc_collected;
-        let amount_sats = request_info.amount_sats;
+        state.active_offramp_ids.remove(&request.request_id);
 
         super::record_swap_volume(&mut state, amount_sats);
 
@@ -459,7 +464,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
     };
 
     // Refund ckBTC to user
-    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+    let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
@@ -469,7 +474,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
         },
         amount: candid::Nat::from(ckbtc_collected),
         fee: None,
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_fail_refund".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
@@ -487,6 +492,7 @@ pub async fn fail_offramp_impl(request: FailOfframpRequest) -> FailOfframpRespon
                         block_index: block_index.clone(),
                     };
                 }
+                state.active_offramp_ids.remove(&request.request_id);
 
                 FailOfframpResponse {
                     success: true,
@@ -544,7 +550,7 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
     };
 
     // Retry ckBTC refund
-    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+    let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
@@ -554,7 +560,7 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
         },
         amount: candid::Nat::from(ckbtc_collected),
         fee: None,
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_retry_refund".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
@@ -571,6 +577,7 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
                         block_index: block_index.clone(),
                     };
                 }
+                state.active_offramp_ids.remove(&request_id);
                 FailOfframpResponse {
                     success: true,
                     refund_block_index: Some(block_index),

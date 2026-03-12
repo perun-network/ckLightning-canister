@@ -24,7 +24,7 @@ use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
 use crate::btc::{p2pkh, p2wpkh};
 use crate::error::{BtcError, CklError};
 use crate::ic_types::{
-    BtcAddressType, BtcPurpose, DEFAULT_CKBTC_FEE, DEVNET_CKBTC_LEDGER, LnFundingPubkeyResponse,
+    BtcAddressType, BtcPurpose, CKBTC_LEDGER_PRINCIPAL, DEFAULT_CKBTC_FEE, LnFundingPubkeyResponse,
     LnInvoiceRequest, LnSignRequest, LnSignResponse, SendBtcTxMsg, SignedCandidInvoice,
     WithdrawalReq,
 };
@@ -71,11 +71,11 @@ pub async fn execute_ledger_transfer(
         },
         amount: Nat(amount_u64.into()),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_withdraw".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let call_result: CallResult<(
         std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,

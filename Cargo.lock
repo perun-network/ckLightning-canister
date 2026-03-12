@@ -392,7 +392,7 @@ dependencies = [
  "async-trait",
  "bitcoin 0.32.7",
  "candid",
- "digest 0.9.0",
+ "digest 0.10.7",
  "getrandom 0.2.16",
  "hex",
  "ic-agent",
@@ -408,7 +408,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_bytes",
- "sha2 0.9.9",
+ "sha2 0.10.9",
  "tokio",
 ]
 

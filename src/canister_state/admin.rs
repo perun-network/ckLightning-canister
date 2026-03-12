@@ -5,7 +5,7 @@
 use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER, ICP_TRANSFER_FEE_E8S,
+    CKBTC_LEDGER_PRINCIPAL, ICP_LEDGER_PRINCIPAL, ICP_TRANSFER_FEE_E8S,
     ONRAMP_TIMEOUT_NS, OFFRAMP_TIMEOUT_NS, DEFAULT_CKBTC_FEE,
     OnrampRequestState, OfframpRequestState, SwapState,
     RegisterRelayRequest, RegisterRelayResponse, GetRelayInfoResponse,
@@ -50,16 +50,17 @@ pub async fn check_expired_swaps_impl() {
         )
     };
 
-    // First, collect expired onramp request IDs
+    // First, collect expired onramp request IDs (only check active ones)
     let expired_onramp_ids: Vec<String> = {
         let state = STATE.read().expect("STATE lock: check_expired_swaps read onramps");
-        state.onramp_requests
-            .iter()
-            .filter(|(_, req)| {
-                matches!(req.state, OnrampRequestState::Pending | OnrampRequestState::Ready)
-                    && now > req.created_at + onramp_timeout
+        state.active_onramp_ids.iter()
+            .filter(|id| {
+                state.onramp_requests.get(*id).map_or(false, |req| {
+                    matches!(req.state, OnrampRequestState::Pending | OnrampRequestState::Ready)
+                        && now > req.created_at + onramp_timeout
+                })
             })
-            .map(|(id, _)| id.clone())
+            .cloned()
             .collect()
     };
 
@@ -67,10 +68,11 @@ pub async fn check_expired_swaps_impl() {
     if !expired_onramp_ids.is_empty() {
         let mut state = STATE.write().expect("STATE lock: check_expired_swaps write onramps");
 
-        // Collect payment hashes to expire from swaps map
+        // First pass: collect payment hashes and amounts (read-only)
         let mut swap_hashes_to_expire: Vec<[u8; 32]> = Vec::new();
+        let mut total_reserved_to_release: u64 = 0;
         for id in &expired_onramp_ids {
-            if let Some(req) = state.onramp_requests.get_mut(id) {
+            if let Some(req) = state.onramp_requests.get(id) {
                 if let Some(ref ph) = req.payment_hash {
                     if ph.len() == 32 {
                         let mut hash_arr = [0u8; 32];
@@ -78,9 +80,18 @@ pub async fn check_expired_swaps_impl() {
                         swap_hashes_to_expire.push(hash_arr);
                     }
                 }
+                total_reserved_to_release += req.amount_sats;
+            }
+        }
+
+        // Second pass: mutate state
+        state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_sub(total_reserved_to_release);
+        for id in &expired_onramp_ids {
+            if let Some(req) = state.onramp_requests.get_mut(id) {
                 req.state = OnrampRequestState::Expired;
                 ic_cdk::println!("Onramp request {} expired (ICP fee not refunded)", id);
             }
+            state.active_onramp_ids.remove(id);
         }
 
         // Now expire the corresponding SwapInfo entries
@@ -93,19 +104,24 @@ pub async fn check_expired_swaps_impl() {
         }
     }
 
-    // Collect expired offramp requests that need refunds
+    // Collect expired offramp requests that need refunds (only check active ones)
     let expired_offramp_requests: Vec<(String, Principal, u64)> = {
         let state = STATE.read().expect("STATE lock: check_expired_swaps read offramps");
-        state.offramp_requests
-            .iter()
-            .filter(|(_, req)| {
-                // Only expire Pending requests — NEVER expire PaymentInProgress.
-                // If the relay is actively paying an invoice, expiring it would cause
-                // the user to get both a ckBTC refund AND the BTC Lightning payment.
-                matches!(req.state, OfframpRequestState::Pending)
-                    && now > req.created_at + offramp_timeout
+        state.active_offramp_ids.iter()
+            .filter_map(|id| {
+                state.offramp_requests.get(id).and_then(|req| {
+                    // Only expire Pending requests — NEVER expire PaymentInProgress.
+                    // If the relay is actively paying an invoice, expiring it would cause
+                    // the user to get both a ckBTC refund AND the BTC Lightning payment.
+                    if matches!(req.state, OfframpRequestState::Pending)
+                        && now > req.created_at + offramp_timeout
+                    {
+                        Some((id.clone(), req.user, req.ckbtc_collected))
+                    } else {
+                        None
+                    }
+                })
             })
-            .map(|(id, req)| (id.clone(), req.user, req.ckbtc_collected))
             .collect()
     };
 
@@ -120,12 +136,13 @@ pub async fn check_expired_swaps_impl() {
                     continue;
                 }
                 req.state = OfframpRequestState::Expired { refund_block_index: None };
+                state.active_offramp_ids.remove(&request_id);
                 ic_cdk::println!("Offramp request {} expired, initiating ckBTC refund to user", request_id);
             }
         }
 
         // Refund ckBTC to user (not to LP!)
-        let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap();
+        let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
         let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
             from_subaccount: None,
@@ -135,7 +152,7 @@ pub async fn check_expired_swaps_impl() {
             },
             amount: candid::Nat::from(ckbtc_collected),
             fee: None,
-            memo: None,
+            memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_expire_refund".to_vec())),
             created_at_time: Some(ic_cdk::api::time()),
         };
 
@@ -685,11 +702,11 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
         },
         amount: Nat(amount.into()),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:protocol_fee".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let ckbtc_ledger = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
     let call_result: CallResult<(
         Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
@@ -803,7 +820,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
     }
 
     // Query the canister's ICP balance first
-    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let icp_ledger = *ICP_LEDGER_PRINCIPAL;
     let canister_principal = ic_cdk::api::canister_self();
 
     let balance_result: CallResult<(Nat,)> = ic_cdk::call(
@@ -843,7 +860,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
         },
         amount: Nat(withdraw_amount.into()),
         fee: Some(Nat(ICP_TRANSFER_FEE_E8S.into())),
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:icp_fee_withdraw".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 

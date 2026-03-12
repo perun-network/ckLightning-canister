@@ -5,7 +5,7 @@
 use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    CompleteSwapRequest, CompleteSwapResponse, DEVNET_CKBTC_LEDGER, DEVNET_ICP_LEDGER,
+    CKBTC_LEDGER_PRINCIPAL, CompleteSwapRequest, CompleteSwapResponse, ICP_LEDGER_PRINCIPAL,
     ICP_TRANSFER_FEE_E8S,
     RegisterSwapRequest, RegisterSwapResponse,
     SwapInfo, SwapState, OnrampRequestState,
@@ -254,7 +254,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let call_result: CallResult<(
         std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
@@ -272,17 +272,22 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                         };
                     }
                     super::record_swap_volume(&mut state, ckbtc_out);
-                    // Find the onramp request by payment_hash and get ICP fee payer
-                    let mut fee_payer = None;
-                    for request in state.onramp_requests.values_mut() {
-                        if let Some(ref ph) = request.payment_hash {
-                            if ph.as_slice() == payment_hash_arr.as_slice() {
-                                request.state = OnrampRequestState::Completed { block_index: block_index.clone() };
-                                fee_payer = request.icp_fee_payer;
-                                break;
-                            }
+                    // Find the onramp request by payment_hash (read-only first to avoid borrow conflict)
+                    let found = state.onramp_requests.values()
+                        .find(|req| req.payment_hash.as_deref() == Some(payment_hash_arr.as_slice()))
+                        .map(|req| (req.request_id.clone(), req.amount_sats, req.icp_fee_payer));
+
+                    let fee_payer = if let Some((request_id, amount_sats, icp_fee_payer)) = found {
+                        // Now mutate
+                        if let Some(request) = state.onramp_requests.get_mut(&request_id) {
+                            request.state = OnrampRequestState::Completed { block_index: block_index.clone() };
                         }
-                    }
+                        state.active_onramp_ids.remove(&request_id);
+                        state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_sub(amount_sats);
+                        icp_fee_payer
+                    } else {
+                        None
+                    };
                     fee_payer
                 };
 
@@ -365,7 +370,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
 
 /// Helper function to refund ICP anti-DDoS fee to a recipient
 pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> {
-    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let icp_ledger = *ICP_LEDGER_PRINCIPAL;
 
     // Read configured fee from state and refund minus the transfer fee
     let icp_ddos_fee = {
@@ -382,7 +387,7 @@ pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> 
         },
         amount: candid::Nat::from(refund_amount),
         fee: Some(candid::Nat::from(ICP_TRANSFER_FEE_E8S)),
-        memo: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:icp_fee_refund".to_vec())),
         created_at_time: Some(ic_cdk::api::time()),
     };
 

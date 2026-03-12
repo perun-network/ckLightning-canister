@@ -971,7 +971,11 @@ service : (Network) -> {
   // Controls how much ICP is collected as a security deposit for swap requests.
   // The fee is refunded on successful swap completion.
   __candid_method_set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
-  __candid_method_set_swap_caps : (nat64, nat64) -> (variant { Ok; Err : text });
+  // Set withdrawal / swap amount caps (admin-only).
+  // 
+  // max_single_swap_sats: max satoshis per individual swap (0 = disabled).
+  // max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
+  __candid_method_set_swap_caps : (nat64, nat64) -> (Result);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.
@@ -1408,9 +1412,10 @@ service : (Network) -> {
   // The fee is refunded on successful swap completion.
   set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
   // Set withdrawal / swap amount caps (admin-only).
+  // 
   // max_single_swap_sats: max satoshis per individual swap (0 = disabled).
   // max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
-  set_swap_caps : (nat64, nat64) -> (variant { Ok; Err : text });
+  set_swap_caps : (nat64, nat64) -> (Result);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.

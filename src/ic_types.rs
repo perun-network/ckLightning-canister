@@ -12,7 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 use crate::require;
-use digest::{FixedOutputDirty, Update};
+use digest::{FixedOutputReset, Update};
 use sha2::Sha512 as Hasher;
 use icrc_ledger_types::icrc1::account::Subaccount;
 use icrc_ledger_types::icrc1::transfer::Memo;
@@ -27,6 +27,16 @@ pub const DEVNET_CKBTC_LEDGER: &str = "u6s2n-gx777-77774-qaaba-cai";
 pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
 pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
+
+use candid::Principal;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref CKBTC_LEDGER_PRINCIPAL: Principal =
+        Principal::from_text(DEVNET_CKBTC_LEDGER).expect("DEVNET_CKBTC_LEDGER is not a valid principal");
+    pub static ref ICP_LEDGER_PRINCIPAL: Principal =
+        Principal::from_text(DEVNET_ICP_LEDGER).expect("DEVNET_ICP_LEDGER is not a valid principal");
+}
 
 // Anti-DDoS ICP fee constants
 pub const ICP_DDOS_FEE_E8S: u64 = 100_000_000; // 1 ICP in e8s (default; configurable via admin endpoint)
@@ -135,7 +145,7 @@ pub struct RateLimitStatus {
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 pub struct L2Account(pub SecpPublicKey);
-use candid::{CandidType, Principal};
+use candid::CandidType;
 pub use candid::{
     Deserialize, Int, Nat,
     types::{Serializer, Type},
@@ -1580,7 +1590,7 @@ impl Hash {
         let mut h = Hasher::default();
         h.update(msg);
         let mut out: Hash = Hash::default();
-        h.finalize_into_dirty(&mut out.0);
+        h.finalize_into_reset(&mut out.0);
         out
     }
 }

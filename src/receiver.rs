@@ -11,7 +11,7 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::ic_types::{Amount, DEVNET_CKBTC_LEDGER, Funding, MAINNET_ICP_LEDGER};
+use crate::ic_types::{Amount, CKBTC_LEDGER_PRINCIPAL, Funding, ICP_LEDGER_PRINCIPAL};
 use async_trait::async_trait;
 pub use candid::{
     CandidType, Deserialize, Int, Nat, Principal,
@@ -174,12 +174,12 @@ impl CanisterTXQuerier {
     /// Constructs a new canister TX querier targeting the mainnet ICP ledger canister.
     pub fn for_mainnet() -> Self {
         Self {
-            ledger: Principal::from_text(MAINNET_ICP_LEDGER).unwrap(),
+            ledger: *ICP_LEDGER_PRINCIPAL,
         }
     }
     pub fn for_ckbtc_devnet() -> Self {
         Self {
-            ledger: Principal::from_text(DEVNET_CKBTC_LEDGER).unwrap(),
+            ledger: *CKBTC_LEDGER_PRINCIPAL,
         }
     }
 
@@ -192,7 +192,7 @@ impl CanisterTXQuerier {
             length: Nat::from(2000u64),
         }];
 
-        let ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+        let ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
         let call_result: CallResult<(GetBlocksResult,)> =
             ic_cdk::call(ledger_id, "icrc3_get_blocks", (args.clone(),)).await;
@@ -248,6 +248,16 @@ where
             known_txs: Default::default(),
             unspent: Default::default(),
         }
+    }
+
+    /// Returns a clone of known transaction block heights (for snapshot persistence).
+    pub fn get_known_txs(&self) -> BTreeSet<BlockHeight> {
+        self.known_txs.clone()
+    }
+
+    /// Restores known transaction block heights from a snapshot.
+    pub fn set_known_txs(&mut self, txs: BTreeSet<BlockHeight>) {
+        self.known_txs = txs;
     }
 
     /// Verifies a transaction, and if it's valid and new, tracks its funds and

@@ -52,7 +52,7 @@ use crate::htlc::HtlcManager;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
-    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER,
+    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER,
     Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
     HoldingsResponse, NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs,
     SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
@@ -285,6 +285,18 @@ where
     // Two-phase channel funding: reservations pending confirmation
     // Keyed by funding address. Tracks amount reserved until channel_funded or cancel.
     pub(crate) channel_funding_reservations: HashMap<String, ChannelFundingReservation>,
+
+    // ==========================================================================
+    // WS6 Optimizations: Active request tracking
+    // ==========================================================================
+
+    // Active (non-terminal) onramp/offramp request IDs for O(1) heartbeat filtering
+    pub(crate) active_onramp_ids: HashSet<String>,
+    pub(crate) active_offramp_ids: HashSet<String>,
+
+    // Running counter of ckBTC sats reserved for pending onramp requests
+    // (avoids full iteration in withdraw_ckbtc_impl)
+    pub(crate) reserved_ckbtc_sats: u64,
 }
 
 /// Tracks a pending channel funding between fund_channel (TX signed) and
@@ -597,6 +609,9 @@ where
             hourly_swap_window_start: 0,
             funded_channels: HashSet::new(),
             channel_funding_reservations: HashMap::new(),
+            active_onramp_ids: HashSet::new(),
+            active_offramp_ids: HashSet::new(),
+            reserved_ckbtc_sats: 0,
         }
     }
 
@@ -657,6 +672,9 @@ where
             hourly_swap_window_start: 0,
             funded_channels: HashSet::new(),
             channel_funding_reservations: HashMap::new(),
+            active_onramp_ids: HashSet::new(),
+            active_offramp_ids: HashSet::new(),
+            reserved_ckbtc_sats: 0,
         }
     }
 
@@ -726,11 +744,11 @@ where
             },
             amount: Nat(amount.clone().0),
             fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-            memo: None,
+            memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:l1_transfer".to_vec())),
             created_at_time: Some(ic_cdk::api::time()),
         };
 
-        let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+        let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
         let call_result: CallResult<(
             std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
@@ -1040,6 +1058,9 @@ where
             .map(|(k, v)| (k.clone(), v.clone())).collect();
         channel_funding_reservations.sort_by_key(|(k, _)| k.clone());
 
+        // known_txs from Receiver (already sorted since BTreeSet)
+        let known_txs: Vec<u64> = self.icrc_receiver.get_known_txs().into_iter().collect();
+
         CanisterStateSnapshot {
             version: 1,
             principal: self.principal,
@@ -1075,6 +1096,18 @@ where
             max_hourly_swap_sats: self.max_hourly_swap_sats,
             funded_channels,
             channel_funding_reservations,
+            known_txs,
+            active_onramp_ids: {
+                let mut ids: Vec<String> = self.active_onramp_ids.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+            active_offramp_ids: {
+                let mut ids: Vec<String> = self.active_offramp_ids.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+            reserved_ckbtc_sats: self.reserved_ckbtc_sats,
         }
     }
 
@@ -1124,6 +1157,11 @@ where
         self.max_hourly_swap_sats = snap.max_hourly_swap_sats;
         self.funded_channels = snap.funded_channels.into_iter().collect();
         self.channel_funding_reservations = snap.channel_funding_reservations.into_iter().collect();
+        // Restore known_txs into icrc_receiver to prevent double-crediting after upgrade
+        self.icrc_receiver.set_known_txs(snap.known_txs.into_iter().collect());
+        self.active_onramp_ids = snap.active_onramp_ids.into_iter().collect();
+        self.active_offramp_ids = snap.active_offramp_ids.into_iter().collect();
+        self.reserved_ckbtc_sats = snap.reserved_ckbtc_sats;
     }
 }
 
@@ -1179,6 +1217,18 @@ pub struct CanisterStateSnapshot {
     pub funded_channels: Vec<String>,
     #[serde(default)]
     pub channel_funding_reservations: Vec<(String, ChannelFundingReservation)>,
+    /// Known ICRC block heights already processed (prevents double-crediting after upgrade)
+    #[serde(default)]
+    pub known_txs: Vec<u64>,
+    /// Active (non-terminal) onramp request IDs
+    #[serde(default)]
+    pub active_onramp_ids: Vec<String>,
+    /// Active (non-terminal) offramp request IDs
+    #[serde(default)]
+    pub active_offramp_ids: Vec<String>,
+    /// Running counter of ckBTC sats reserved for pending onramp requests
+    #[serde(default)]
+    pub reserved_ckbtc_sats: u64,
 }
 
 #[cfg(test)]
