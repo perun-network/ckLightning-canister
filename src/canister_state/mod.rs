@@ -85,6 +85,46 @@ use std::sync::RwLock;
 
 use crate::ic_types::RelayRegistration;
 
+/// Check swap amount against withdrawal caps.
+/// Must be called while holding STATE write lock. Returns Ok(()) or Err with reason.
+pub fn check_swap_caps(state: &mut CanisterState<impl receiver::TXQuerier>, amount_sats: u64) -> Result<(), String> {
+    // Per-swap cap
+    if state.max_single_swap_sats > 0 && amount_sats > state.max_single_swap_sats {
+        return Err(format!(
+            "Swap amount {} exceeds max single swap cap of {} sats",
+            amount_sats, state.max_single_swap_sats
+        ));
+    }
+
+    // Hourly aggregate cap
+    if state.max_hourly_swap_sats > 0 {
+        let now = ic_cdk::api::time();
+        const HOUR_NS: u64 = 60 * 60 * 1_000_000_000;
+
+        // Reset window if expired
+        if now.saturating_sub(state.hourly_swap_window_start) > HOUR_NS {
+            state.hourly_swap_volume_sats = 0;
+            state.hourly_swap_window_start = now;
+        }
+
+        if state.hourly_swap_volume_sats.saturating_add(amount_sats) > state.max_hourly_swap_sats {
+            return Err(format!(
+                "Hourly swap volume would exceed cap of {} sats (current: {} + requested: {})",
+                state.max_hourly_swap_sats, state.hourly_swap_volume_sats, amount_sats
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Record a completed swap's volume against the hourly cap.
+pub fn record_swap_volume(state: &mut CanisterState<impl receiver::TXQuerier>, amount_sats: u64) {
+    if state.max_hourly_swap_sats > 0 {
+        state.hourly_swap_volume_sats = state.hourly_swap_volume_sats.saturating_add(amount_sats);
+    }
+}
+
 /// Check that the caller is the registered relay.
 /// Returns Ok(()) if authorized, Err(String) with descriptive error otherwise.
 pub fn assert_relay_caller() -> Result<(), String> {
@@ -229,6 +269,15 @@ where
 
     // Configurable ICP anti-DDoS fee (in e8s). Default: 100_000_000 (1 ICP)
     pub(crate) icp_ddos_fee_e8s: u64,
+
+    // Withdrawal / swap amount caps (admin-configurable)
+    // max_single_swap_sats: 0 = disabled (default)
+    pub(crate) max_single_swap_sats: u64,
+    // max_hourly_swap_sats: 0 = disabled (default)
+    pub(crate) max_hourly_swap_sats: u64,
+    // Rolling hourly swap volume tracker
+    pub(crate) hourly_swap_volume_sats: u64,
+    pub(crate) hourly_swap_window_start: u64,
 
     // Funded channel addresses (idempotency guard for fund_channel)
     pub(crate) funded_channels: HashSet<String>,
@@ -542,6 +591,10 @@ where
             protocol_fees_ckbtc: 0,
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            max_single_swap_sats: 0,
+            max_hourly_swap_sats: 0,
+            hourly_swap_volume_sats: 0,
+            hourly_swap_window_start: 0,
             funded_channels: HashSet::new(),
             channel_funding_reservations: HashMap::new(),
         }
@@ -598,6 +651,10 @@ where
             protocol_fees_ckbtc: 0,
             admin: None,
             icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            max_single_swap_sats: 0,
+            max_hourly_swap_sats: 0,
+            hourly_swap_volume_sats: 0,
+            hourly_swap_window_start: 0,
             funded_channels: HashSet::new(),
             channel_funding_reservations: HashMap::new(),
         }
@@ -1014,6 +1071,8 @@ where
             protocol_fees_ckbtc: self.protocol_fees_ckbtc,
             admin: self.admin,
             icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
+            max_single_swap_sats: self.max_single_swap_sats,
+            max_hourly_swap_sats: self.max_hourly_swap_sats,
             funded_channels,
             channel_funding_reservations,
         }
@@ -1061,6 +1120,8 @@ where
         self.protocol_fees_ckbtc = snap.protocol_fees_ckbtc;
         self.admin = snap.admin;
         self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
+        self.max_single_swap_sats = snap.max_single_swap_sats;
+        self.max_hourly_swap_sats = snap.max_hourly_swap_sats;
         self.funded_channels = snap.funded_channels.into_iter().collect();
         self.channel_funding_reservations = snap.channel_funding_reservations.into_iter().collect();
     }
@@ -1111,6 +1172,10 @@ pub struct CanisterStateSnapshot {
     pub protocol_fees_ckbtc: u64,
     pub admin: Option<Principal>,
     pub icp_ddos_fee_e8s: u64,
+    #[serde(default)]
+    pub max_single_swap_sats: u64,
+    #[serde(default)]
+    pub max_hourly_swap_sats: u64,
     pub funded_channels: Vec<String>,
     #[serde(default)]
     pub channel_funding_reservations: Vec<(String, ChannelFundingReservation)>,

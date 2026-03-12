@@ -97,6 +97,19 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
         }
     }
 
+    // Check withdrawal caps before proceeding (early rejection)
+    {
+        let mut state = STATE.write().expect("STATE lock: request_offramp cap check");
+        if let Err(cap_err) = super::check_swap_caps(&mut state, btc_out as u64) {
+            return OfframpResponse {
+                request_id: String::new(),
+                success: false,
+                amount_sats: Some(btc_out as u64),
+                error: Some(cap_err),
+            };
+        }
+    }
+
     // Use StableSwap to compute how much ckBTC the user must pay for the desired BTC output
     let (ckbtc_required, amount_sats, protocol_fee) = {
         let state = STATE.read().expect("STATE lock: request_offramp read 2");
@@ -354,7 +367,7 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
             };
         }
 
-        // Mark as completed
+        // Mark as completed and record volume
         request_info.state = OfframpRequestState::Completed {
             preimage: request.preimage.clone(),
         };
@@ -363,6 +376,8 @@ pub async fn complete_offramp_impl(request: CompleteOfframpRequest) -> CompleteO
         let user = request_info.user;
         let ckbtc_collected = request_info.ckbtc_collected;
         let amount_sats = request_info.amount_sats;
+
+        super::record_swap_volume(&mut state, amount_sats);
 
         // Credit LPs proportionally with the ckBTC collected from the user.
         // LPs are "selling" BTC (via Lightning channel) in exchange for ckBTC.
@@ -583,14 +598,29 @@ pub async fn retry_offramp_refund_impl(request_id: String) -> FailOfframpRespons
 /// Get the status of an offramp request
 ///
 /// Called by users to check the status of their offramp.
+/// Only the requesting user or the registered relay can query a given request.
 pub fn get_offramp_status_impl(request_id: String) -> GetOfframpStatusResponse {
+    let caller = ic_cdk::api::msg_caller();
     let state = STATE.read().expect("STATE lock: get_offramp_status");
 
     match state.offramp_requests.get(&request_id) {
-        Some(info) => GetOfframpStatusResponse {
-            state: info.state.clone(),
-            amount_sats: info.amount_sats,
-            error: None,
+        Some(info) => {
+            let is_owner = info.user == caller;
+            let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+            if !is_owner && !is_relay {
+                return GetOfframpStatusResponse {
+                    state: OfframpRequestState::Failed {
+                        reason: "Request not found".to_string(),
+                    },
+                    amount_sats: 0,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+            GetOfframpStatusResponse {
+                state: info.state.clone(),
+                amount_sats: info.amount_sats,
+                error: None,
+            }
         },
         None => GetOfframpStatusResponse {
             state: OfframpRequestState::Failed {

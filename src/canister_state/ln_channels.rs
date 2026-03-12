@@ -272,9 +272,17 @@ pub fn query_ln_channel_impl(request: QueryLnChannelRequest) -> Option<LnChannel
     state.ln_channels.get(&channel_id_arr).cloned()
 }
 
-/// Query all registered Lightning channels
+/// Query all registered Lightning channels (relay or admin only)
 pub fn query_ln_channels_impl() -> QueryLnChannelsResponse {
+    let caller = ic_cdk::api::msg_caller();
     let state = STATE.read().expect("STATE lock: query_ln_channels");
+
+    let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+    let is_admin = state.admin == Some(caller);
+    if !is_relay && !is_admin {
+        return QueryLnChannelsResponse { channels: vec![] };
+    }
+
     let channels: Vec<LnChannelInfo> = state.ln_channels.values().cloned().collect();
     QueryLnChannelsResponse { channels }
 }

@@ -13,7 +13,7 @@
 //  limitations under the License.
 use crate::require;
 use digest::{FixedOutputDirty, Update};
-use ed25519_dalek::Sha512 as Hasher;
+use sha2::Sha512 as Hasher;
 use icrc_ledger_types::icrc1::account::Subaccount;
 use icrc_ledger_types::icrc1::transfer::Memo;
 use k256::EncodedPoint;

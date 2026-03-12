@@ -29,7 +29,7 @@ use cklightning::ic_types::{LnInvoiceRequest, SignedCandidInvoice};
 use cklightning::receiver::ICPReceiverError;
 use cklightning::receiver::TransactionICRCNotification;
 use digest::{FixedOutput, Update};
-use ed25519_dalek::Sha512 as Hasher;
+use sha2::Sha512 as Hasher;
 use icrc_ledger_types::icrc1::{
     account::Account,
     transfer::{Memo, TransferArg},

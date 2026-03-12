@@ -279,14 +279,30 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
 /// Get the invoice for a request (client polling)
 ///
 /// Called by clients to check if their invoice is ready.
+/// Only the requesting user or the registered relay can query a given request.
 pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
+    let caller = ic_cdk::api::msg_caller();
     let state = STATE.read().expect("STATE lock: get_invoice_by_request");
 
     match state.onramp_requests.get(&request_id) {
-        Some(info) => GetInvoiceResponse {
-            state: info.state.clone(),
-            invoice: info.invoice.clone(),
-            error: None,
+        Some(info) => {
+            let is_owner = info.icp_fee_payer.map_or(false, |p| p == caller)
+                || info.recipient == caller;
+            let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+            if !is_owner && !is_relay {
+                return GetInvoiceResponse {
+                    state: OnrampRequestState::Failed {
+                        reason: "Request not found".to_string(),
+                    },
+                    invoice: None,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+            GetInvoiceResponse {
+                state: info.state.clone(),
+                invoice: info.invoice.clone(),
+                error: None,
+            }
         },
         None => GetInvoiceResponse {
             state: OnrampRequestState::Failed {

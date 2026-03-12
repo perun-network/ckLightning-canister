@@ -194,10 +194,24 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             }
         };
 
+        let ckbtc_out = swap_result.output_amount;
+
+        // Check withdrawal caps before proceeding
+        if let Err(cap_err) = super::check_swap_caps(&mut state, ckbtc_out) {
+            if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
+                s.state = SwapState::Failed {
+                    reason: cap_err.clone(),
+                };
+            }
+            return CompleteSwapResponse {
+                success: false,
+                block_index: None,
+                error: Some(cap_err),
+            };
+        }
+
         // Track protocol fees
         state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(swap_result.protocol_fee);
-
-        let ckbtc_out = swap_result.output_amount;
 
         // Update BTC side: Lightning payment arrived, so channel BTC increased
         state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(input_sat as u64);
@@ -249,7 +263,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
     match call_result {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                // Mark swap as completed and get ICP fee payer
+                // Mark swap as completed, record volume, and get ICP fee payer
                 let icp_fee_payer = {
                     let mut state = STATE.write().expect("STATE lock: complete_swap write 2");
                     if let Some(swap) = state.swaps.get_mut(&payment_hash_arr) {
@@ -257,6 +271,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
                             block_index: block_index.clone(),
                         };
                     }
+                    super::record_swap_volume(&mut state, ckbtc_out);
                     // Find the onramp request by payment_hash and get ICP fee payer
                     let mut fee_payer = None;
                     for request in state.onramp_requests.values_mut() {

@@ -63,7 +63,7 @@ use crate::canister_state::{
     get_swap_quote_impl, get_stableswap_config_impl,
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
     set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl, redistribute_fees_impl,
-    set_admin_impl,
+    set_admin_impl, set_swap_caps_impl,
     // State pruning & monitoring
     prune_state_impl, get_state_stats_impl,
     // HTTPS outcall helpers
@@ -887,7 +887,7 @@ fn inspect_message() {
         // Admin-only
         "update_stableswap_config" | "withdraw_protocol_fees" | "set_icp_ddos_fee"
         | "withdraw_icp_fees" | "redistribute_fees" | "prune_state"
-        | "set_test_timeouts" => {
+        | "set_test_timeouts" | "set_swap_caps" => {
             let state = STATE.read().expect("STATE lock: inspect_message");
             state.admin == Some(caller)
         }
@@ -1152,6 +1152,16 @@ fn set_icp_ddos_fee(fee_e8s: u64) -> SetIcpDdosFeeResponse {
 #[candid_method(query)]
 fn get_icp_ddos_fee() -> u64 {
     get_icp_ddos_fee_impl()
+}
+
+/// Set withdrawal / swap amount caps (admin-only).
+///
+/// max_single_swap_sats: max satoshis per individual swap (0 = disabled).
+/// max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
+#[update]
+#[candid_method(update)]
+fn set_swap_caps(max_single_swap_sats: u64, max_hourly_swap_sats: u64) -> Result<(), String> {
+    set_swap_caps_impl(max_single_swap_sats, max_hourly_swap_sats)
 }
 
 /// Withdraw accumulated ICP fees from the canister (admin-only).

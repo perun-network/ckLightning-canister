@@ -1028,3 +1028,25 @@ pub fn get_state_stats_impl() -> StateStats {
         htlc_tx_details_count: state.htlc_tx_details.len() as u64,
     }
 }
+
+/// Set withdrawal / swap amount caps (admin only).
+/// Pass 0 to disable a cap.
+pub fn set_swap_caps_impl(max_single_swap_sats: u64, max_hourly_swap_sats: u64) -> Result<(), String> {
+    let caller = msg_caller();
+    let mut state = STATE.write().expect("STATE lock: set_swap_caps");
+
+    match state.admin {
+        Some(admin) if admin == caller => {}
+        _ => return Err("Unauthorized: caller is not admin".to_string()),
+    }
+
+    state.max_single_swap_sats = max_single_swap_sats;
+    state.max_hourly_swap_sats = max_hourly_swap_sats;
+
+    ic_cdk::println!(
+        "Swap caps updated: max_single={} sats, max_hourly={} sats (0=disabled)",
+        max_single_swap_sats, max_hourly_swap_sats
+    );
+
+    Ok(())
+}
