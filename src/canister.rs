@@ -14,12 +14,12 @@
 use crate::canister_state::assert_relay_caller;
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
-    complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
+    complete_swap_impl, deposit_lp_impl, get_btc_balances_impl,
     get_btc_liquidity_address_for_caller_impl, get_ln_address_impl,
-    query_ln_channel_impl, query_ln_channels_impl, query_state_impl,
+    query_ln_channel_impl, query_ln_channels_impl,
     query_user_lp_holdings_impl, register_ln_channel_impl, register_swap_impl,
     set_btc_address_impl, transaction_notification_impl,
-    trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
+    verify_ln_channel_impl, withdraw_lp_impl,
     // Simplified LP functions
     deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
     // BTC LP functions
@@ -105,13 +105,13 @@ use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
+    CompleteSwapRequest, CompleteSwapResponse,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
     HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
     NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
     RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
-    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
-    VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
+    VerifyLnChannelResponse, WithdrawalLPArgs,
     // Onramp invoice request types
     OnrampInvoiceRequest, OnrampInvoiceResponse, PendingInvoiceRequest,
     SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
@@ -213,12 +213,6 @@ fn query_user_lp_holdings(
 
 #[update]
 #[candid_method(update)]
-fn deposit_channel(funding: ChannelFunding, signature_bytes: Vec<u8>) -> Result<(), CklError> {
-    deposit_channel_impl(funding, &signature_bytes)
-}
-
-#[update]
-#[candid_method(update)]
 async fn withdraw_lp(withdrawal: WithdrawalLPArgs) -> Result<(), CklError> {
     let sig_withdrawal = withdrawal.signature.clone();
 
@@ -231,19 +225,6 @@ fn deposit_lp(funding: FundingLPArgs) -> Result<(), CklError> {
     let signature_bytes = funding.signature.clone();
 
     deposit_lp_impl(funding, &signature_bytes)
-}
-
-#[query]
-#[candid_method(query)]
-fn query_state(id: ChannelId) -> Option<RegisteredState> {
-    query_state_impl(id)
-}
-
-#[update]
-#[candid::candid_method]
-async fn trigger_withdraw(req: WithdrawalReq) -> Result<Nat, CklError> {
-    assert_relay_caller().map_err(|_| CklError::UnauthorizedCaller)?;
-    trigger_withdraw_impl(req).await
 }
 
 // =============================================================================
@@ -464,7 +445,7 @@ async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelRes
 #[update]
 #[candid_method(update)]
 async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canister::GetUtxosResponse, String> {
-    assert_relay_caller().map_err(|e| e)?;
+    assert_relay_caller()?;
     use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
     use crate::BTC_CONTEXT;
 
@@ -476,7 +457,7 @@ async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canist
         filter: None,
     })
     .await
-    .map_err(|e| format!("Failed to get UTXOs: {:?}", e))
+    .map_err(|e| format!("Failed to get UTXOs: {e:?}"))
 }
 
 /// Query a specific Lightning channel by ID
@@ -865,10 +846,10 @@ fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
 ///
 /// - Onramp: Marks expired requests, ICP fee NOT refunded (anti-DDoS)
 /// - Offramp: Marks expired requests, refunds ckBTC to user (not LP)
+///
 // =============================================================================
 // Ingress Message Filtering
 // =============================================================================
-
 /// Pre-execution filter for update calls.
 ///
 /// Rejects unauthorized callers BEFORE decoding arguments, saving cycles.
@@ -937,8 +918,8 @@ fn inspect_message() {
         // User methods — anyone can call (they are self-scoped by msg_caller)
         "get_ln_address" | "query_ln_invoice" | "get_btc_liquidity_address_for_caller"
         | "set_btc_liquidity_address" | "get_btc_balance" | "set_btc_address"
-        | "transaction_notification" | "deposit_channel" | "withdraw_lp" | "deposit_lp"
-        | "trigger_withdraw" | "request_onramp_invoice" | "request_offramp"
+        | "transaction_notification" | "withdraw_lp" | "deposit_lp"
+        | "request_onramp_invoice" | "request_offramp"
         | "deposit_ckbtc" | "withdraw_ckbtc"
         | "withdraw_btc" | "get_depositor_btc_balance"
         | "send_btc_from_depositor_address"
@@ -979,6 +960,7 @@ fn get_expired_swap_counts_query() -> (u64, u64) {
 /// In production, the heartbeat handles this automatically.
 #[update]
 #[candid_method(update)]
+#[allow(clippy::await_holding_lock)] // lock is dropped before await
 async fn check_expired_swaps() {
     // Admin or relay only for manual trigger
     let caller = ic_cdk::api::msg_caller();

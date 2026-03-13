@@ -40,9 +40,9 @@ fn parse_btc_address(
     network: bitcoin::Network,
 ) -> Result<Address<bitcoin::address::NetworkChecked>, String> {
     Address::from_str(address_str)
-        .map_err(|e| format!("Invalid address: {}", e))?
+        .map_err(|e| format!("Invalid address: {e}"))?
         .require_network(network)
-        .map_err(|e| format!("Address network mismatch: {:?}", e))
+        .map_err(|e| format!("Address network mismatch: {e:?}"))
 }
 
 /// Collect UTXOs, build, sign, and broadcast a multi-address BTC transaction.
@@ -56,13 +56,12 @@ async fn build_sign_broadcast_multi_addr_tx(
 ) -> Result<(String, Vec<u8>), String> {
     let (all_sourced_utxos, change_address) = collect_all_lp_sourced_utxos(ctx)
         .await
-        .map_err(|e| format!("Failed to collect LP UTXOs: {:?}", e))?;
+        .map_err(|e| format!("Failed to collect LP UTXOs: {e:?}"))?;
 
     let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
     if total_available < amount_sat.saturating_add(fee_margin) {
         return Err(format!(
-            "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
-            total_available, amount_sat, fee_margin
+            "Insufficient BTC across all LP addresses: available {total_available} sats, requested {amount_sat} sats (+ ~{fee_margin} fees)"
         ));
     }
 
@@ -95,13 +94,12 @@ async fn build_sign_multi_addr_tx_no_broadcast(
 ) -> Result<(String, Vec<u8>, Vec<SourcedUtxo>, Vec<usize>), String> {
     let (all_sourced_utxos, change_address) = collect_all_lp_sourced_utxos(ctx)
         .await
-        .map_err(|e| format!("Failed to collect LP UTXOs: {:?}", e))?;
+        .map_err(|e| format!("Failed to collect LP UTXOs: {e:?}"))?;
 
     let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
     if total_available < amount_sat.saturating_add(fee_margin) {
         return Err(format!(
-            "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
-            total_available, amount_sat, fee_margin
+            "Insufficient BTC across all LP addresses: available {total_available} sats, requested {amount_sat} sats (+ ~{fee_margin} fees)"
         ));
     }
 
@@ -169,7 +167,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
                 success: false,
                 credited_amount: Nat::from(0u64),
                 new_btc_balance: Nat::from(0u64),
-                error: Some(format!("Failed to get user LP address: {:?}", e)),
+                error: Some(format!("Failed to get user LP address: {e:?}")),
             };
         }
     };
@@ -191,7 +189,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
                 success: false,
                 credited_amount: Nat::from(0u64),
                 new_btc_balance: Nat::from(0u64),
-                error: Some(format!("Failed to query UTXOs: {:?}", e)),
+                error: Some(format!("Failed to query UTXOs: {e:?}")),
             };
         }
     };
@@ -207,7 +205,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
             0
         };
 
-        if confirmations < REQUIRED_BTC_CONFIRMATIONS as u32 {
+        if confirmations < REQUIRED_BTC_CONFIRMATIONS {
             continue;
         }
 
@@ -250,8 +248,7 @@ pub async fn deposit_btc_user_impl(request: LpBtcDepositRequest) -> LpBtcDeposit
             credited_amount: Nat::from(0u64),
             new_btc_balance,
             error: Some(format!(
-                "No new deposits found with {} confirmations. Send BTC to {} first.",
-                REQUIRED_BTC_CONFIRMATIONS, user_address
+                "No new deposits found with {REQUIRED_BTC_CONFIRMATIONS} confirmations. Send BTC to {user_address} first."
             )),
         }
     }
@@ -302,7 +299,7 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
             return LpBtcWithdrawResponse {
                 success: false, amount_withdrawn: Nat::from(0u64),
                 new_btc_balance: current_balance, txid: None,
-                error: Some(format!("Insufficient BTC balance: {:?}", e)),
+                error: Some(format!("Insufficient BTC balance: {e:?}")),
             };
         }
     }
@@ -340,7 +337,7 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
                 new_btc_balance, txid: Some(txid), error: None,
             }
         }
-        Err(e) => restore_and_fail(format!("BTC send failed: {:?}", e)),
+        Err(e) => restore_and_fail(format!("BTC send failed: {e:?}")),
     }
 }
 
@@ -374,7 +371,7 @@ pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
                     return DepositorBtcBalanceResponse {
                         address: String::new(),
                         balance_sat: 0,
-                        error: Some(format!("Failed to derive address: {:?}", e)),
+                        error: Some(format!("Failed to derive address: {e:?}")),
                     };
                 }
             }
@@ -395,7 +392,7 @@ pub async fn get_depositor_btc_balance_impl() -> DepositorBtcBalanceResponse {
             return DepositorBtcBalanceResponse {
                 address,
                 balance_sat: 0,
-                error: Some(format!("Failed to get balance: {:?}", e)),
+                error: Some(format!("Failed to get balance: {e:?}")),
             };
         }
     };
@@ -452,7 +449,7 @@ pub async fn send_btc_from_depositor_address_impl(
             return SendFromDepositorResponse {
                 success: false,
                 txid: None,
-                error: Some(format!("Failed to parse public key: {}", e)),
+                error: Some(format!("Failed to parse public key: {e}")),
             };
         }
     };
@@ -462,7 +459,7 @@ pub async fn send_btc_from_depositor_address_impl(
             return SendFromDepositorResponse {
                 success: false,
                 txid: None,
-                error: Some(format!("Failed to parse public key: {}", e)),
+                error: Some(format!("Failed to parse public key: {e}")),
             };
         }
     };
@@ -483,7 +480,7 @@ pub async fn send_btc_from_depositor_address_impl(
             return SendFromDepositorResponse {
                 success: false,
                 txid: None,
-                error: Some(format!("Failed to fetch UTXOs: {:?}", e)),
+                error: Some(format!("Failed to fetch UTXOs: {e:?}")),
             };
         }
     };
@@ -543,7 +540,7 @@ pub async fn send_btc_from_depositor_address_impl(
         Err(e) => SendFromDepositorResponse {
             success: false,
             txid: None,
-            error: Some(format!("Failed to send transaction: {:?}", e)),
+            error: Some(format!("Failed to send transaction: {e:?}")),
         },
     }
 }
@@ -564,9 +561,9 @@ async fn collect_all_lp_sourced_utxos(
     let shared_deriv = shared_purpose.derivation_path();
     let shared_pk_bytes = get_ecdsa_public_key(ctx, shared_deriv.clone()).await;
     let shared_compressed = CompressedPublicKey::from_slice(&shared_pk_bytes)
-        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {e}")))?;
     let shared_pk = PublicKey::from_slice(&shared_pk_bytes)
-        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Failed to parse shared LP public key: {e}")))?;
     let shared_addr = Address::p2wpkh(&shared_compressed, ctx.bitcoin_network);
 
     let shared_utxos = bitcoin_get_utxos(&GetUtxosRequest {
@@ -575,7 +572,7 @@ async fn collect_all_lp_sourced_utxos(
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to fetch shared LP UTXOs: {:?}", e)))?
+    .map_err(|e| BtcError::Other(format!("Failed to fetch shared LP UTXOs: {e:?}")))?
     .utxos;
 
     // Snapshot credited + reserved UTXO keys for filtering.
@@ -613,9 +610,9 @@ async fn collect_all_lp_sourced_utxos(
         let deriv = purpose.derivation_path();
         let pk_bytes = get_ecdsa_public_key(ctx, deriv.clone()).await;
         let compressed = CompressedPublicKey::from_slice(&pk_bytes)
-            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {}", e)))?;
+            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {e}")))?;
         let pk = PublicKey::from_slice(&pk_bytes)
-            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {}", e)))?;
+            .map_err(|e| BtcError::Other(format!("Failed to parse depositor key: {e}")))?;
         let addr = Address::p2wpkh(&compressed, ctx.bitcoin_network);
 
         let utxos = bitcoin_get_utxos(&GetUtxosRequest {
@@ -624,7 +621,7 @@ async fn collect_all_lp_sourced_utxos(
             filter: None,
         })
         .await
-        .map_err(|e| BtcError::Other(format!("Failed to fetch depositor UTXOs: {:?}", e)))?
+        .map_err(|e| BtcError::Other(format!("Failed to fetch depositor UTXOs: {e:?}")))?
         .utxos;
 
         for utxo in utxos {

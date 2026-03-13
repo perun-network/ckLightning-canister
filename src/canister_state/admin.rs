@@ -39,7 +39,7 @@ fn expire_onramp_requests(now: u64, timeout: u64) {
         let state = STATE.read().expect("STATE lock: expire_onramp read");
         state.active_onramp_ids.iter()
             .filter(|id| {
-                state.onramp_requests.get(*id).map_or(false, |req| {
+                state.onramp_requests.get(*id).is_some_and(|req| {
                     matches!(req.state, OnrampRequestState::Pending | OnrampRequestState::Ready)
                         && now > req.created_at + timeout
                 })
@@ -317,7 +317,7 @@ pub fn get_relay_info_impl() -> GetRelayInfoResponse {
 /// Helper function to extract the payee (destination) node pubkey from a BOLT11 invoice.
 fn extract_node_pubkey_from_invoice(invoice_str: &str) -> Result<Vec<u8>, String> {
     let invoice = lightning_invoice::Bolt11Invoice::from_str(invoice_str)
-        .map_err(|e| format!("Invalid BOLT11 invoice: {}", e))?;
+        .map_err(|e| format!("Invalid BOLT11 invoice: {e}"))?;
 
     // Get the payee public key
     let payee_pubkey = invoice.recover_payee_pub_key();
@@ -381,8 +381,7 @@ fn check_rate_limit(
         } else if info.request_count >= max_requests {
             let reset_in_secs = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now) / 1_000_000_000;
             Err(format!(
-                "Rate limited: {} {} requests per hour exceeded. Try again in {} seconds.",
-                max_requests, label, reset_in_secs
+                "Rate limited: {max_requests} {label} requests per hour exceeded. Try again in {reset_in_secs} seconds."
             ))
         } else {
             info.request_count += 1;
@@ -495,7 +494,7 @@ pub fn get_swap_quote_impl(request: SwapQuoteRequest) -> SwapQuoteResponse {
             effective_fee_bps,
             btc_pool_balance: btc_balance,
             ckbtc_pool_balance: ckbtc_balance,
-            error: Some(format!("{}", e)),
+            error: Some(format!("{e}")),
         },
     }
 }
@@ -663,7 +662,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
                     btc_amount: 0,
                     ckbtc_amount: amount,
                     ckbtc_block_index: None,
-                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                    error: Some(format!("ckBTC transfer failed: {e:?}")),
                 }
             }
         },
@@ -677,7 +676,7 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
                 btc_amount: 0,
                 ckbtc_amount: amount,
                 ckbtc_block_index: None,
-                error: Some(format!("Ledger call failed: {}", e)),
+                error: Some(format!("Ledger call failed: {e}")),
             }
         }
     }
@@ -764,7 +763,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
                 success: false,
                 amount_e8s: 0,
                 block_index: None,
-                error: Some(format!("Failed to query ICP balance: {}", e)),
+                error: Some(format!("Failed to query ICP balance: {e}")),
             };
         }
     };
@@ -811,7 +810,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
                     success: false,
                     amount_e8s: withdraw_amount,
                     block_index: None,
-                    error: Some(format!("ICP transfer failed: {:?}", e)),
+                    error: Some(format!("ICP transfer failed: {e:?}")),
                 }
             }
         },
@@ -821,7 +820,7 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
                 success: false,
                 amount_e8s: withdraw_amount,
                 block_index: None,
-                error: Some(format!("Ledger call failed: {}", e)),
+                error: Some(format!("Ledger call failed: {e}")),
             }
         }
     }

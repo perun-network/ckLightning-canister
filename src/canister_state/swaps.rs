@@ -218,11 +218,11 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             Ok(r) => r,
             Err(e) => {
                 if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
-                    s.state = SwapState::Failed { reason: format!("StableSwap error: {}", e) };
+                    s.state = SwapState::Failed { reason: format!("StableSwap error: {e}") };
                 }
                 return CompleteSwapResponse {
                     success: false, block_index: None,
-                    error: Some(format!("StableSwap pricing error: {}", e)),
+                    error: Some(format!("StableSwap pricing error: {e}")),
                 };
             }
         };
@@ -239,7 +239,7 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(swap_result.protocol_fee);
         state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(input_sat as u64);
 
-        if let Err(_) = state.liq_pool.deduct_proportional(PoolAsset::CkBTC, Nat::from(ckbtc_out)) {
+        if state.liq_pool.deduct_proportional(PoolAsset::CkBTC, Nat::from(ckbtc_out)).is_err() {
             if let Some(s) = state.swaps.get_mut(&payment_hash_arr) {
                 s.state = SwapState::Failed { reason: "Insufficient LP liquidity".to_string() };
             }
@@ -278,16 +278,16 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             CompleteSwapResponse { success: true, block_index: Some(block_index), error: None }
         }
         Ok((Err(e),)) => {
-            let reason = format!("Transfer error: {:?}", e);
+            let reason = format!("Transfer error: {e:?}");
             restore_lp_and_fail_swap(&payment_hash_arr, ckbtc_out, reason.clone());
-            CompleteSwapResponse { success: false, block_index: None, error: Some(format!("ckBTC transfer failed: {:?}", e)) }
+            CompleteSwapResponse { success: false, block_index: None, error: Some(format!("ckBTC transfer failed: {e:?}")) }
         }
         Err(e) => {
-            let reason = format!("Call error: {}", e);
+            let reason = format!("Call error: {e}");
             restore_lp_and_fail_swap(&payment_hash_arr, ckbtc_out, reason);
             CompleteSwapResponse {
                 success: false, block_index: None,
-                error: Some(format!("Canister call failed: {}", e)),
+                error: Some(format!("Canister call failed: {e}")),
             }
         }
     }
@@ -300,7 +300,7 @@ fn check_swap_state_pending(state: &SwapState) -> Result<(), String> {
         SwapState::InFlight => Err("Swap already in progress".to_string()),
         SwapState::Completed { .. } => Err("Swap already completed".to_string()),
         SwapState::Expired => Err("Swap has expired".to_string()),
-        SwapState::Failed { reason } => Err(format!("Swap failed: {}", reason)),
+        SwapState::Failed { reason } => Err(format!("Swap failed: {reason}")),
     }
 }
 
@@ -335,8 +335,8 @@ pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> 
     {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => Ok(block_index),
-            Err(e) => Err(format!("ICP transfer failed: {:?}", e)),
+            Err(e) => Err(format!("ICP transfer failed: {e:?}")),
         },
-        Err(e) => Err(format!("ICP ledger call failed: {}", e)),
+        Err(e) => Err(format!("ICP ledger call failed: {e}")),
     }
 }

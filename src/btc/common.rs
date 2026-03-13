@@ -38,8 +38,7 @@ pub fn select_utxos_greedy(
     // Abort if we can't cover the payment + fee.
     if total_spent < amount + fee {
         return Err(format!(
-            "Insufficient balance: {}, trying to transfer {} satoshi with fee {}",
-            total_spent, amount, fee
+            "Insufficient balance: {total_spent}, trying to transfer {amount} satoshi with fee {fee}"
         ));
     }
 
@@ -61,8 +60,7 @@ pub fn select_one_utxo(own_utxos: &[Utxo], amount: u64, fee: u64) -> Result<Vec<
     }
 
     Err(format!(
-        "No sufficiently large utxo found: amount {} satoshi, fee {}",
-        amount, fee
+        "No sufficiently large utxo found: amount {amount} satoshi, fee {fee}"
     ))
 }
 

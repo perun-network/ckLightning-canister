@@ -235,7 +235,7 @@ fn load_htlc_signing_context(payment_hash: &[u8; 32]) -> Result<HtlcSigningConte
 /// Parse an address string as unchecked and assume_checked.
 fn parse_address_unchecked(addr: &str, label: &str) -> Result<bitcoin::Address, SignHtlcResponse> {
     let parsed: bitcoin::Address<bitcoin::address::NetworkUnchecked> = addr.parse()
-        .map_err(|_| htlc_err(format!("Invalid {} address", label)))?;
+        .map_err(|_| htlc_err(format!("Invalid {label} address")))?;
     Ok(parsed.assume_checked())
 }
 
@@ -293,7 +293,7 @@ pub fn sign_htlc_success_impl(request: SignHtlcSuccessRequest) -> SignHtlcRespon
         &tx, 0, &witness_script, ctx.tx_details.htlc_amount_sat, &htlc_secret_key,
     ) {
         Ok(sig) => sig,
-        Err(e) => return htlc_err(format!("Failed to sign: {}", e)),
+        Err(e) => return htlc_err(format!("Failed to sign: {e}")),
     };
 
     apply_htlc_success_witness(&mut tx, 0, signature, request.preimage, &witness_script);
@@ -344,7 +344,7 @@ pub fn sign_htlc_timeout_impl(request: SignHtlcTimeoutRequest) -> SignHtlcRespon
         &tx, 0, &witness_script, ctx.tx_details.htlc_amount_sat, &htlc_secret_key,
     ) {
         Ok(sig) => sig,
-        Err(e) => return htlc_err(format!("Failed to sign: {}", e)),
+        Err(e) => return htlc_err(format!("Failed to sign: {e}")),
     };
 
     apply_htlc_timeout_witness(&mut tx, 0, signature, &witness_script);
@@ -429,7 +429,7 @@ pub async fn generate_channel_secrets_impl(
                 revocation_basepoint: None,
                 delayed_payment_basepoint: None,
                 payment_point: None,
-                error: Some(format!("raw_rand() failed: {:?}", e)),
+                error: Some(format!("raw_rand() failed: {e:?}")),
             };
         }
     };
@@ -458,7 +458,7 @@ pub async fn generate_channel_secrets_impl(
                 success: false,
                 htlc_basepoint: None, revocation_basepoint: None,
                 delayed_payment_basepoint: None, payment_point: None,
-                error: Some(format!("Derived invalid {}", label)),
+                error: Some(format!("Derived invalid {label}")),
             })
     };
 
@@ -548,7 +548,7 @@ pub fn get_per_commitment_point_impl(
             return GetPerCommitmentPointResponse {
                 success: false,
                 point: None,
-                error: Some(format!("Invalid per-commitment secret: {:?}", e)),
+                error: Some(format!("Invalid per-commitment secret: {e:?}")),
             };
         }
     };

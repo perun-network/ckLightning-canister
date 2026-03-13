@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@ use num_traits::cast::ToPrimitive;
 use icrc_ledger_types;
 use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
 use std::collections::{BTreeMap, BTreeSet};
-pub type PerunMemo = u64;
 pub type BlockHeight = u64;
 /// ICP token handling errors.
 #[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
@@ -74,7 +73,7 @@ fn extract_nat_u64(map: &BTreeMap<String, ICRC3Value>, key: &str) -> Option<u64>
 
 fn extract_array_blob_first(map: &BTreeMap<String, ICRC3Value>, key: &str) -> Option<Vec<u8>> {
     map.get(key).and_then(|v| match v {
-        ICRC3Value::Array(arr) => arr.get(0).and_then(|icv| match icv {
+        ICRC3Value::Array(arr) => arr.first().and_then(|icv| match icv {
             ICRC3Value::Blob(blob) => Some(blob.clone().into_vec()),
             _ => None,
         }),
@@ -104,8 +103,7 @@ pub fn icrc3value_map_to_transaction(
     let amount = extract_nat_u64(tx_map, "amt").ok_or(ICPReceiverError::TxAmountNotFound)?;
 
     // Extract memo blob or fallback to empty
-    let memo =
-        extract_blob_bytes(tx_map, "memo").map_or_else(|| Memo::from(vec![]), |b| Memo::from(b));
+    let memo = extract_blob_bytes(tx_map, "memo").map_or_else(|| Memo::from(vec![]), Memo::from);
 
     Ok(TransactionICRCNotification {
         to: to_acct_id,
@@ -129,8 +127,8 @@ pub trait TXQuerier {
 // }
 
 /// Real ICP transaction querier using inter-canister calls to the ICP ledger.
-#[allow(dead_code)]
 pub struct CanisterTXQuerier {
+    #[allow(dead_code)] // read in TXQuerier trait impl; clippy can't trace it
     ledger: Principal,
 }
 
@@ -168,7 +166,7 @@ impl TXQuerier for CanisterTXQuerier {
 
 impl CanisterTXQuerier {
     pub fn new(ledger: Principal) -> Self {
-        Self { ledger: ledger }
+        Self { ledger }
     }
 
     /// Constructs a new canister TX querier targeting the mainnet ICP ledger canister.
@@ -194,11 +192,12 @@ impl CanisterTXQuerier {
 
         let ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
-        let call_result: Result<(GetBlocksResult,), _> = Call::unbounded_wait(ledger_id, "icrc3_get_blocks")
-            .with_args(&(args.clone(),))
-            .await
-            .map_err(ic_cdk::call::Error::from)
-            .and_then(|r| r.candid_tuple().map_err(Into::into));
+        let call_result: Result<(GetBlocksResult,), _> =
+            Call::unbounded_wait(ledger_id, "icrc3_get_blocks")
+                .with_args(&(args.clone(),))
+                .await
+                .map_err(ic_cdk::call::Error::from)
+                .and_then(|r| r.candid_tuple().map_err(Into::into));
 
         if let Ok((result,)) = call_result {
             if !result.blocks.is_empty() {
@@ -295,7 +294,7 @@ where
 
     /// Withdraws all funds from the requested memo.
     pub fn drain(&mut self, memo: Memo) -> Amount {
-        return self.unspent.remove(&memo).unwrap_or(0u64.into()).into();
+        self.unspent.remove(&memo).unwrap_or(0u64.into())
     }
 
     /// Withdraws all funds from the requested memo if it is above a threshold.
@@ -328,7 +327,6 @@ pub struct TransactionNotification {
 
 impl TransactionICRCNotification {
     /// Creates a transaction notification from an ICP ledger transaction. If the transaction is neither a transfer nor a mint, returns nothing.
-
     pub fn from_icrc_tx(tx: ICRCTransaction) -> Option<Self> {
         // Get the inner Transfer struct, if it exists
         let transfer = tx.transfer.as_ref()?;

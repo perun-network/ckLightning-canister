@@ -89,7 +89,7 @@ fn compute_funding_sighash(
             bitcoin::Amount::from_sat(funding_amount_sat),
             bitcoin::sighash::EcdsaSighashType::All,
         )
-        .map_err(|e| format!("Failed to compute sighash: {:?}", e))?;
+        .map_err(|e| format!("Failed to compute sighash: {e:?}"))?;
     Ok(sighash.to_byte_array())
 }
 
@@ -108,7 +108,7 @@ fn compute_witness_sighash(
             bitcoin::Amount::from_sat(amount_sat),
             bitcoin::sighash::EcdsaSighashType::All,
         )
-        .map_err(|e| format!("Failed to compute sighash: {:?}", e))?;
+        .map_err(|e| format!("Failed to compute sighash: {e:?}"))?;
     Ok(sighash.to_byte_array())
 }
 
@@ -139,11 +139,11 @@ async fn sign_funding_output_tx(
     funding_amount_sat: u64,
 ) -> Result<Vec<u8>, String> {
     let tx: Transaction = deserialize(tx_bytes)
-        .map_err(|e| format!("Failed to deserialize tx: {:?}", e))?;
+        .map_err(|e| format!("Failed to deserialize tx: {e:?}"))?;
     let funding_redeemscript = get_funding_redeemscript(channel_keys_id)?;
     let sighash = compute_funding_sighash(&tx, &funding_redeemscript, funding_amount_sat)?;
     sign_funding_sighash(&sighash).await
-        .map_err(|e| format!("Chainkey signing failed: {}", e))
+        .map_err(|e| format!("Chainkey signing failed: {e}"))
 }
 
 /// Derive the HTLC signing key for a given channel and per-commitment point.
@@ -160,7 +160,7 @@ fn derive_htlc_key(
         .map_err(|_| "Invalid htlc_base_secret".to_string())?;
 
     bolt3_keys::derive_private_key(&secp, &per_commitment_point, &htlc_base_secret)
-        .map_err(|e| format!("HTLC key derivation failed: {}", e))
+        .map_err(|e| format!("HTLC key derivation failed: {e}"))
 }
 
 /// Sign a witness sighash with a local secret key, returning the compact signature.
@@ -172,7 +172,7 @@ fn sign_witness_with_key(
     signing_key: &SecretKey,
 ) -> Result<Vec<u8>, String> {
     let tx: Transaction = deserialize(tx_bytes)
-        .map_err(|e| format!("Failed to deserialize tx: {:?}", e))?;
+        .map_err(|e| format!("Failed to deserialize tx: {e:?}"))?;
     let witness_script = bitcoin::ScriptBuf::from_bytes(witness_script_bytes.to_vec());
     let sighash = compute_witness_sighash(&tx, input_index, &witness_script, amount_sat)?;
     let secp = Secp256k1::new();
@@ -239,7 +239,7 @@ pub async fn sign_counterparty_commitment_impl(
             Ok(s) => s,
             Err(e) => return SignCounterpartyCommitmentResponse {
                 success: false, commitment_sig: None, htlc_sigs: None,
-                error: Some(format!("HTLC {}: {}", i, e)),
+                error: Some(format!("HTLC {i}: {e}")),
             },
         };
         htlc_sigs.push(sig);
@@ -322,7 +322,7 @@ pub fn sign_justice_tx_impl(request: SignJusticeTxRequest) -> LnSignResponse {
         &secp, &per_commitment_secret, &revocation_base_secret,
     ) {
         Ok(k) => k,
-        Err(e) => return ln_sign_err(format!("Revocation key derivation failed: {}", e)),
+        Err(e) => return ln_sign_err(format!("Revocation key derivation failed: {e}")),
     };
 
     match sign_witness_with_key(
@@ -409,7 +409,7 @@ mod tests {
         use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1};
         bitcoin::script::Builder::new()
             .push_opcode(OP_PUSHNUM_1)
-            .push_slice(&pubkey.serialize())
+            .push_slice(pubkey.serialize())
             .push_opcode(OP_PUSHNUM_1)
             .push_opcode(OP_CHECKMULTISIG)
             .into_script()

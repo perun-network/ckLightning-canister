@@ -33,7 +33,7 @@ mod tests {
     ) -> impl Fn(String, Vec<Vec<u8>>, Vec<u8>) -> future::Ready<SecpSignature> + Copy {
         move |_, _, msg| {
             let secp = Secp256k1::signing_only();
-            let message = bitcoin::secp256k1::Message::from_slice(&msg).unwrap();
+            let message = bitcoin::secp256k1::Message::from_digest_slice(&msg).unwrap();
             let sig = secp.sign_ecdsa(&message, &sk);
             future::ready(sig)
         }
@@ -49,7 +49,7 @@ mod tests {
         let privkey1 = PrivateKey {
             compressed: true,
             network: Network::Regtest.into(), // or Mainnet
-            inner: sk1.clone(),
+            inner: sk1,
         };
 
         let pk1 = PublicKey::from_private_key(&secp, &privkey1);
@@ -61,7 +61,7 @@ mod tests {
         let privkey2 = PrivateKey {
             compressed: true,
             network: Network::Regtest.into(), // or Mainnet
-            inner: sk2.clone(),
+            inner: sk2,
         };
 
         let pk2 = PublicKey::from_private_key(&secp, &privkey2);
@@ -88,7 +88,7 @@ mod tests {
         let script_pubkey = address.script_pubkey();
         let unsigned_tx = Transaction {
             version: bitcoin::transaction::Version(2),
-            lock_time: lock_time,
+            lock_time,
             input: vec![
                 TxIn {
                     previous_output: Default::default(),

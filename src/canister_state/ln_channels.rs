@@ -22,7 +22,7 @@ fn parse_channel_id(bytes: &[u8]) -> Result<[u8; 32], String> {
 /// Validate a byte field has the expected length, returning descriptive error.
 fn validate_len(field: &str, bytes: &[u8], expected: usize) -> Result<(), String> {
     if bytes.len() != expected {
-        Err(format!("Invalid {} length (must be {} bytes)", field, expected))
+        Err(format!("Invalid {field} length (must be {expected} bytes)"))
     } else {
         Ok(())
     }
@@ -117,7 +117,7 @@ pub async fn verify_ln_channel_impl(
         filter: None,
     }).await {
         Ok(response) => response,
-        Err(e) => return verify_err(format!("Failed to query UTXOs: {:?}", e)),
+        Err(e) => return verify_err(format!("Failed to query UTXOs: {e:?}")),
     };
 
     // Find the specific funding UTXO by txid and vout
@@ -175,7 +175,7 @@ fn update_channel_verification(
             let value_matches = value == channel_info.capacity_sats;
 
             channel.status = if value_matches && confirmations >= 3 {
-                LnChannelStatus::Verified { confirmations: confirmations as u32 }
+                LnChannelStatus::Verified { confirmations }
             } else if !value_matches {
                 LnChannelStatus::Failed {
                     reason: format!("Value mismatch: expected {} sats, found {} sats",
@@ -189,14 +189,14 @@ fn update_channel_verification(
                 Some(format!("Value mismatch: expected {} sats, found {} sats",
                     channel_info.capacity_sats, value))
             } else if confirmations < 3 {
-                Some(format!("Insufficient confirmations: {} (need at least 3)", confirmations))
+                Some(format!("Insufficient confirmations: {confirmations} (need at least 3)"))
             } else {
                 None
             };
 
             VerifyLnChannelResponse {
                 verified: value_matches && confirmations >= 3,
-                confirmations: Some(confirmations as u32),
+                confirmations: Some(confirmations),
                 utxo_value_sats: Some(value),
                 error,
             }

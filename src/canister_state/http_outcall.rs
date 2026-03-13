@@ -28,7 +28,7 @@ pub fn notify_relay_webhook(path: &str) {
         }
     };
 
-    let full_url = format!("{}{}", url, path);
+    let full_url = format!("{url}{path}");
 
     // Fire-and-forget: spawn the outcall, don't block the update call
     ic_cdk::futures::spawn(async move {
@@ -42,7 +42,7 @@ pub fn notify_relay_webhook(path: &str) {
                 },
                 HttpHeader {
                     name: "Authorization".to_string(),
-                    value: format!("Bearer {}", token),
+                    value: format!("Bearer {token}"),
                 },
             ],
             body: Some(br#"{"request_id":null}"#.to_vec()),

@@ -40,9 +40,9 @@ pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingU
 
     // Parse address
     let _address = Address::from_str(&lp_address)
-        .map_err(|e| BtcError::Other(format!("Invalid LP address: {}", e)))?
+        .map_err(|e| BtcError::Other(format!("Invalid LP address: {e}")))?
         .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("LP address network mismatch: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("LP address network mismatch: {e:?}")))?;
 
     // Fetch UTXOs from Bitcoin canister
     let utxo_response = bitcoin_get_utxos(&GetUtxosRequest {
@@ -51,7 +51,7 @@ pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingU
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {e:?}")))?;
 
     // Get reserved UTXOs to exclude
     let reserved = {
@@ -156,7 +156,7 @@ pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcErro
             filter: None,
         })
         .await
-        .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {e:?}")))?;
 
         let total: u64 = utxo_response.utxos.iter().map(|u| u.value).sum();
         (total, utxo_response.utxos.len() as u32)
@@ -288,7 +288,7 @@ pub fn cancel_channel_funding_impl(funding_address: String) -> Result<(), String
 
     // Remove idempotency guard
     if !state.funded_channels.remove(&funding_address) {
-        return Err(format!("No funded_channels entry for address {}", funding_address));
+        return Err(format!("No funded_channels entry for address {funding_address}"));
     }
 
     // Remove reservation (may not exist if already timed out)

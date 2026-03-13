@@ -47,12 +47,12 @@ pub fn derive_private_key(
     let tweak_bytes = sha256::Hash::from_engine(engine).to_byte_array();
 
     let tweak = Scalar::from_be_bytes(tweak_bytes)
-        .map_err(|e| format!("Invalid scalar from SHA256: {:?}", e))?;
+        .map_err(|e| format!("Invalid scalar from SHA256: {e:?}"))?;
 
     // derived_key = base_secret + tweak
     base_secret
         .add_tweak(&tweak)
-        .map_err(|e| format!("Failed to add tweak: {:?}", e))
+        .map_err(|e| format!("Failed to add tweak: {e:?}"))
 }
 
 /// Derive a private revocation key from the per-commitment secret and
@@ -84,28 +84,28 @@ pub fn derive_private_revocation_key(
     let factor_b_bytes = sha256::Hash::from_engine(engine2).to_byte_array();
 
     let factor_a = Scalar::from_be_bytes(factor_a_bytes)
-        .map_err(|e| format!("Invalid scalar A: {:?}", e))?;
+        .map_err(|e| format!("Invalid scalar A: {e:?}"))?;
     let factor_b = Scalar::from_be_bytes(factor_b_bytes)
-        .map_err(|e| format!("Invalid scalar B: {:?}", e))?;
+        .map_err(|e| format!("Invalid scalar B: {e:?}"))?;
 
     // part_a = per_commitment_secret * factor_a
     let part_a = per_commitment_secret
         .mul_tweak(&factor_a)
-        .map_err(|e| format!("Failed mul_tweak A: {:?}", e))?;
+        .map_err(|e| format!("Failed mul_tweak A: {e:?}"))?;
 
     // part_b = revocation_base_secret * factor_b
     let part_b = revocation_base_secret
         .mul_tweak(&factor_b)
-        .map_err(|e| format!("Failed mul_tweak B: {:?}", e))?;
+        .map_err(|e| format!("Failed mul_tweak B: {e:?}"))?;
 
     // revocation_key = part_a + part_b
     // SecretKey doesn't have direct add, so we use add_tweak with part_b's bytes
     let part_b_scalar = Scalar::from_be_bytes(part_b.secret_bytes())
-        .map_err(|e| format!("Invalid scalar from part_b: {:?}", e))?;
+        .map_err(|e| format!("Invalid scalar from part_b: {e:?}"))?;
 
     part_a
         .add_tweak(&part_b_scalar)
-        .map_err(|e| format!("Failed to combine revocation key parts: {:?}", e))
+        .map_err(|e| format!("Failed to combine revocation key parts: {e:?}"))
 }
 
 #[cfg(test)]
@@ -180,7 +180,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for idx in 0..100u64 {
             let secret = derive_per_commitment_secret(&seed, idx);
-            assert!(seen.insert(secret), "Index {} produced a duplicate secret", idx);
+            assert!(seen.insert(secret), "Index {idx} produced a duplicate secret");
         }
     }
 

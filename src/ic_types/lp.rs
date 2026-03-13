@@ -150,6 +150,7 @@ pub struct FundingLPArgs {
 // =============================================================================
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
+#[derive(Default)]
 pub struct DepositorInfo {
     pub pubkey: Vec<u8>,
     pub ckbtc_amount: Amount,
@@ -186,15 +187,6 @@ impl DepositorInfo {
     }
 }
 
-impl Default for DepositorInfo {
-    fn default() -> Self {
-        Self {
-            pubkey: Vec::new(),
-            ckbtc_amount: Amount::default(),
-            btc_amount: Amount::default(),
-        }
-    }
-}
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
 pub struct HoldingsResponse {

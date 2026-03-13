@@ -158,8 +158,7 @@ fn select_sourced_utxos_greedy(
         }
     }
     Err(format!(
-        "Insufficient balance across all LP addresses: {} sats available, need {} + {} fee",
-        total, amount, fee
+        "Insufficient balance across all LP addresses: {total} sats available, need {amount} + {fee} fee"
     ))
 }
 

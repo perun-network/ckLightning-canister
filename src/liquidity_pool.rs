@@ -38,6 +38,12 @@ pub struct Holdings {
     pub total: Amount,
 }
 
+impl Default for LiquidityPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LiquidityPool {
     pub fn new() -> Self {
         let mut holdings_total = HashMap::new();
@@ -195,20 +201,6 @@ impl LiquidityPool {
         }
 
         recipients
-    }
-
-    /// Deduct from total pool only (legacy - doesn't affect individual balances)
-    #[allow(dead_code)]
-    pub fn deduct_from_pool(&mut self, asset: PoolAsset, amount: Amount) -> ResultCkl<()> {
-        let total = self.holdings_total.get_mut(&asset)
-            .ok_or(CklError::InsufficientLiquidity)?;
-
-        if *total < amount {
-            return Err(CklError::InsufficientLiquidity);
-        }
-
-        *total -= amount;
-        Ok(())
     }
 
     /// Get depositor's balance for an asset

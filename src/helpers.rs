@@ -22,11 +22,10 @@ use crate::btc::address::get_segwit_address;
 use crate::btc::common::{get_fee_per_byte, PrimaryOutput};
 use crate::btc::ecdsa::{get_ecdsa_public_key, sign_with_ecdsa};
 use crate::btc::{p2pkh, p2wpkh};
-use crate::error::{BtcError, CklError};
+use crate::error::BtcError;
 use crate::ic_types::{
-    BtcAddressType, BtcPurpose, CKBTC_LEDGER_PRINCIPAL, DEFAULT_CKBTC_FEE, LnFundingPubkeyResponse,
+    BtcAddressType, BtcPurpose, LnFundingPubkeyResponse,
     LnInvoiceRequest, LnSignRequest, LnSignResponse, SendBtcTxMsg, SignedCandidInvoice,
-    WithdrawalReq,
 };
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_2};
@@ -34,14 +33,11 @@ use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::{consensus::serialize, Address, CompressedPublicKey, PublicKey, ScriptBuf};
 use candid::Nat;
-use ic_cdk::call::Call;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use ic_cdk::bitcoin_canister::{
     bitcoin_get_utxos, bitcoin_send_transaction, GetUtxosRequest, SendTransactionRequest,
 };
-use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::TransferArg;
 use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder, PaymentSecret};
 use std::str::FromStr;
 
@@ -52,48 +48,6 @@ pub const LN_FUNDING_DERIVATION_PATH: &[&[u8]] = &[b"lightning", b"funding"];
 /// Convert the static derivation path to the Vec<Vec<u8>> format required by ECDSA APIs.
 fn ln_funding_derivation_path() -> Vec<Vec<u8>> {
     LN_FUNDING_DERIVATION_PATH.iter().map(|s| s.to_vec()).collect()
-}
-
-// =============================================================================
-// Ledger Transfer Helpers
-// =============================================================================
-
-/// Execute an ICRC-1 transfer on the ckBTC ledger.
-///
-/// This is a stateless helper that performs the actual ledger call.
-/// Used by withdrawal and swap completion functions.
-pub async fn execute_ledger_transfer(
-    req: &WithdrawalReq,
-    amount_u64: u64,
-) -> std::result::Result<Nat, CklError> {
-    let receiver = req.receiver;
-
-    let transfer_arg = TransferArg {
-        from_subaccount: None,
-        to: Account {
-            owner: receiver,
-            subaccount: None,
-        },
-        amount: Nat(amount_u64.into()),
-        fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_withdraw".to_vec())),
-        created_at_time: Some(ic_cdk::api::time()),
-    };
-
-    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
-
-    match Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
-        .with_args(&(transfer_arg,))
-        .await
-        .map_err(ic_cdk::call::Error::from)
-        .and_then(|r| r.candid_tuple::<(std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
-    {
-        Ok((inner_result,)) => match inner_result {
-            Ok(block_height) => Ok(block_height),
-            Err(_e) => Err(CklError::LedgerError),
-        },
-        Err(_e) => Err(CklError::LedgerError),
-    }
 }
 
 // =============================================================================
@@ -168,9 +122,9 @@ pub async fn send_btc_tx_impl(
 
     // Parse destination address and check network
     let dst_address = Address::from_str(&destination_address_str)
-        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
+        .map_err(|e| BtcError::Other(format!("Invalid destination address: {e}")))?
         .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("Destination address network mismatch: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Destination address network mismatch: {e:?}")))?;
 
     // Derive own address and public key according to address type
     let derivation_path = match from_address_type {
@@ -186,17 +140,17 @@ pub async fn send_btc_tx_impl(
     let (own_address, own_public_key) = match from_address_type {
         BtcAddressType::P2PKH => {
             let pubkey = PublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {e}")))?;
             let address = Address::p2pkh(pubkey, ctx.bitcoin_network);
             (address, pubkey)
         }
         BtcAddressType::P2WPKH => {
             let compressed_key =
                 CompressedPublicKey::from_slice(&public_key_bytes).map_err(|e| {
-                    BtcError::Other(format!("Failed to parse compressed public key: {}", e))
+                    BtcError::Other(format!("Failed to parse compressed public key: {e}"))
                 })?;
             let pubkey = PublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {}", e)))?;
+                .map_err(|e| BtcError::Other(format!("Failed to parse public key: {e}")))?;
             let address = Address::p2wpkh(&compressed_key, ctx.bitcoin_network);
             (address, pubkey)
         }
@@ -212,7 +166,7 @@ pub async fn send_btc_tx_impl(
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to fetch UTXOs: {}", e)))?
+    .map_err(|e| BtcError::Other(format!("Failed to fetch UTXOs: {e}")))?
     .utxos;
 
     // Get fee rate for transaction
@@ -251,7 +205,7 @@ pub async fn send_btc_tx_impl(
         transaction: serialize(&signed_tx),
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {e}")))?;
 
     Ok(SendBtcTxMsg::Success(signed_tx.compute_txid().to_string()))
 }
@@ -296,7 +250,7 @@ pub async fn get_ln_invoice_impl(
 
     // 5. Timestamp from blocktime
     let now_nanos = blocktime();
-    let now_secs = (now_nanos / 1_000_000_000) as u64;
+    let now_secs = now_nanos / 1_000_000_000;
     let timestamp_duration = std::time::Duration::from_secs(now_secs);
 
     // 6. Build and SIGN real invoice
@@ -307,21 +261,21 @@ pub async fn get_ln_invoice_impl(
     let privkey = SecretKey::from_slice(&[41; 32]).expect("deterministic signing key for legacy invoice endpoint");
 
     let raw_invoice = InvoiceBuilder::new(Currency::Bitcoin)
-        .description(format!("ckBTC_SWAP:{}", caller).into())
+        .description(format!("ckBTC_SWAP:{caller}"))
         .payment_hash(payment_hash)
         .payment_secret(payment_secret)
         .duration_since_epoch(timestamp_duration)
         .amount_milli_satoshis(request.amount_msat)
         .expiry_time(timestamp_duration + std::time::Duration::from_secs(3600))
         .build_raw()
-        .map_err(|e| BtcError::Other(format!("Invoice build failed: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invoice build failed: {e:?}")))?;
 
     let signed_invoice = raw_invoice
         .sign::<_, ()>(|msg_hash| Ok(secp_ctx.sign_ecdsa_recoverable(msg_hash, &privkey)))
-        .map_err(|e| BtcError::Other(format!("Invoice signing failed: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invoice signing failed: {e:?}")))?;
 
     let invoice = Bolt11Invoice::from_signed(signed_invoice.clone())
-        .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invoice parsing failed: {e:?}")))?;
 
     // 7. Extract signature from signed invoice
     let (recovery_id, signature_bytes) = signed_invoice.signature().serialize_compact();

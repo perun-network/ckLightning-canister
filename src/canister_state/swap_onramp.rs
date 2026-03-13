@@ -85,7 +85,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
                 return OnrampInvoiceResponse {
                     request_id: String::new(),
                     success: false,
-                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve {} ICP?", err, fee_icp)),
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?")),
                 };
             }
         },
@@ -93,7 +93,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
             return OnrampInvoiceResponse {
                 request_id: String::new(),
                 success: false,
-                error: Some(format!("ICP ledger call failed: {}", e)),
+                error: Some(format!("ICP ledger call failed: {e}")),
             };
         }
     };
@@ -107,7 +107,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
     // Convert first 16 bytes to hex string
     let request_id = request_id_hash.as_byte_array()[..16]
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
     // Create the request info with ICP fee tracking
@@ -185,7 +185,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
         ic_cdk::println!("Invoice verification FAILED: {}", e);
         return SubmitInvoiceResponse {
             success: false,
-            error: Some(format!("Invoice verification failed: {}", e)),
+            error: Some(format!("Invoice verification failed: {e}")),
         };
     }
 
@@ -196,7 +196,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
         Err(e) => {
             return SubmitInvoiceResponse {
                 success: false,
-                error: Some(format!("Invalid BOLT11 invoice: {}", e)),
+                error: Some(format!("Invalid BOLT11 invoice: {e}")),
             };
         }
     };
@@ -223,8 +223,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
                 return SubmitInvoiceResponse {
                     success: false,
                     error: Some(format!(
-                        "Invoice amount {}msat does not match request amount {}msat",
-                        invoice_msat, expected
+                        "Invoice amount {invoice_msat}msat does not match request amount {expected}msat"
                     )),
                 };
             }
@@ -289,7 +288,7 @@ pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
 
     match state.onramp_requests.get(&request_id) {
         Some(info) => {
-            let is_owner = info.icp_fee_payer.map_or(false, |p| p == caller)
+            let is_owner = (info.icp_fee_payer == Some(caller))
                 || info.recipient == caller;
             let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
             if !is_owner && !is_relay {

@@ -20,21 +20,20 @@ use super::id::{
 pub use candid::{Deserialize, Nat, types::Serializer};
 use cklightning::error::{BtcError, CklError, ResultBtc};
 use cklightning::ic_types::{
-    BtcAddressType, Funding, FundingLPArgs, FundingLPQuery, FundingLPQueryArgs,
-    GetBtcAddressArgs, GetBtcBalancesResponse, HoldingsResponse,
-    PoolWithdrawal, SendFromP2pkhAddressArgs, SetBtcAddressArgs,
-    SetBtcAddressResponse, WithdrawalLPArgs,
+    BtcAddressType, Funding, FundingLPArgs, FundingLPQuery, FundingLPQueryArgs, GetBtcAddressArgs,
+    GetBtcBalancesResponse, HoldingsResponse, PoolWithdrawal, SendFromP2pkhAddressArgs,
+    SetBtcAddressArgs, SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use cklightning::ic_types::{LnInvoiceRequest, SignedCandidInvoice};
 use cklightning::receiver::ICPReceiverError;
 use cklightning::receiver::TransactionICRCNotification;
 use digest::{FixedOutput, Update};
-use sha2::Sha512 as Hasher;
 use icrc_ledger_types::icrc1::{
     account::Account,
     transfer::{Memo, TransferArg},
 };
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
+use sha2::Sha512 as Hasher;
 
 use candid::{CandidType, Decode, Encode, Principal};
 use ic_agent::identity::Secp256k1Identity;
@@ -48,9 +47,6 @@ pub struct ICAgent {
     pub agent: Agent,
     pub signer: Secp256k1Identity,
 }
-
-#[cfg(test)]
-use super::id::{PEM_NODE_ACC_PATH, PEM_USER_ACC_PATH};
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ApproveError {
@@ -85,7 +81,7 @@ impl Hash {
 
 impl ICAgent {
     pub fn new_from_pem_file(pem_path: Option<String>) -> Result<Self, AgentError> {
-        let pem_path_static: Option<&'static str> = pem_path.map(|s| string_to_static_str(s));
+        let pem_path_static: Option<&'static str> = pem_path.map(string_to_static_str);
         let secp_id = id::create_secp_identity(pem_path_static);
         let agent = Agent::builder()
             .with_url("http://127.0.0.1:4943")
@@ -102,7 +98,7 @@ impl ICAgent {
     pub async fn tx_icrc1_transfer(
         &self,
         to: Principal,
-        from: Principal,
+        _from: Principal,
         amount: u64,
         memo: std::vec::Vec<u8>,
     ) -> Result<Nat, AgentError> {
@@ -132,7 +128,7 @@ impl ICAgent {
         let res = Decode!(&resp, Result<Nat, TransferError>).unwrap();
 
         let block_index = res.unwrap();
-        println!("Block index from transfer: {:?}", block_index);
+        println!("Block index from transfer: {block_index:?}");
 
         Ok(block_index)
     }
@@ -166,7 +162,7 @@ impl ICAgent {
         let res = Decode!(&resp, Result<Nat, ApproveError>)
             .map_err(|e| AgentError::CandidError(Box::new(e)))?;
         let block_index = res.unwrap();
-        println!("Block index from transfer: {:?}", block_index);
+        println!("Block index from transfer: {block_index:?}");
         Ok(block_index)
     }
 
@@ -176,9 +172,9 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
-        let acc_id = pr.clone();
+        let acc_id = pr;
 
         let resp = self
             .agent
@@ -213,9 +209,9 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
-        let arg = Encode!(&getblocks_args).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        let arg = Encode!(&getblocks_args).map_err(Box::<dyn std::error::Error>::from)?;
 
         let resp = self
             .agent
@@ -223,7 +219,7 @@ impl ICAgent {
             .with_arg(arg)
             .call()
             .await
-            .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+            .map_err(Box::<dyn std::error::Error>::from)?;
         let blocks_result: GetBlocksResult = Decode!(&resp, GetBlocksResult)?;
 
         if blocks_result.blocks.is_empty() {
@@ -240,12 +236,12 @@ impl ICAgent {
         signed_funding: Vec<u8>,
     ) -> Result<String, CklError> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| CklError::Other(format!("Invalid Principal: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Invalid Principal: {e}")))?;
 
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| CklError::Other(format!("Failed to fetch root key: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Failed to fetch root key: {e}")))?;
 
         let pool_funding = match &funding {
             Funding::Pool(pf) => pf.clone(),
@@ -263,11 +259,11 @@ impl ICAgent {
             .with_arg(Encode!(&funding_lp_args).unwrap())
             .call_and_wait()
             .await
-            .map_err(|e| CklError::Other(format!("Update call failed: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Update call failed: {e}")))?;
 
         // Decode as Result<(), CklError>
         let deposit_result = Decode!(&resp, Result<(), CklError>)
-            .map_err(|e| CklError::Other(format!("Decode failed: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Decode failed: {e}")))?;
 
         match deposit_result {
             Ok(()) => Ok("Deposit successful".to_string()),
@@ -280,12 +276,12 @@ impl ICAgent {
         sig_funding: Vec<u8>,
     ) -> Result<HoldingsResponse, CklError> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| CklError::Other(format!("Invalid principal: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Invalid principal: {e}")))?;
 
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| CklError::Other(format!("Failed to fetch root key: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Failed to fetch root key: {e}")))?;
 
         let fundingqueryargs = FundingLPQueryArgs {
             funding_query: funding_lp_query.clone(),
@@ -298,10 +294,10 @@ impl ICAgent {
             .with_arg(Encode!(&fundingqueryargs).unwrap())
             .call()
             .await
-            .map_err(|e| CklError::Other(format!("Query call failed: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Query call failed: {e}")))?;
 
         let balance_result = Decode!(&resp, std::result::Result<HoldingsResponse, CklError>)
-            .map_err(|e| CklError::Other(format!("Decode failed: {}", e)))?;
+            .map_err(|e| CklError::Other(format!("Decode failed: {e}")))?;
 
         match balance_result {
             Ok(holdings) => Ok(holdings),
@@ -314,30 +310,31 @@ impl ICAgent {
         confirmations: Option<u64>,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {e}")))?;
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
         let own_prince = self.agent.get_principal().map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Get principal failed: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Get principal failed: {e}"))
         })?;
 
-        let resp = self
-            .agent
-            .update(&can_ckl_id, "get_btc_balance")
-            .with_arg(Encode!(&confirmations).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("Encoding failed: {}", e))
-            })?)
-            .call_and_wait()
-            .await
-            .map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("get_btc_balance call failed: {}", e))
-            })?;
+        let resp =
+            self.agent
+                .update(&can_ckl_id, "get_btc_balance")
+                .with_arg(Encode!(&confirmations).map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("Encoding failed: {e}"))
+                })?)
+                .call_and_wait()
+                .await
+                .map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("get_btc_balance call failed: {e}"))
+                })?;
 
-        let decoded_response = Decode!(&resp, std::result::Result<GetBtcBalancesResponse, BtcError>)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
+        let decoded_response =
+            Decode!(&resp, std::result::Result<GetBtcBalancesResponse, BtcError>)
+                .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {e}")))?;
 
         let response = decoded_response?;
 
@@ -345,42 +342,41 @@ impl ICAgent {
             .balances
             .get(&own_prince)
             .unwrap_or(&None)
-            .unwrap_or(0)
-            .clone())
+            .unwrap_or(0))
     }
 
     pub async fn get_btc_balance_from_bitcoin_canister(
         &self,
-        balance_of: Principal,
+        _balance_of: Principal,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {e}")))?;
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
         let setbtcaddressargs = SetBtcAddressArgs {
-            principal: Some(can_ckl_id.clone()),
+            principal: Some(can_ckl_id),
             subaccount: None,
             address_type: cklightning::ic_types::BtcAddressType::P2WPKH,
         };
 
-        let resp = self
-            .agent
-            .update(&can_ckl_id, "get_balance")
-            .with_arg(Encode!(&setbtcaddressargs).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("Encoding failed: {}", e))
-            })?)
-            .call_and_wait()
-            .await
-            .map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("set_btc_address call failed: {}", e))
-            })?;
+        let resp =
+            self.agent
+                .update(&can_ckl_id, "get_balance")
+                .with_arg(Encode!(&setbtcaddressargs).map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("Encoding failed: {e}"))
+                })?)
+                .call_and_wait()
+                .await
+                .map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("set_btc_address call failed: {e}"))
+                })?;
 
         // Decode as SetBtcAddressResponse directly:
         let decoded_response = Decode!(&resp, std::result::Result<SetBtcAddressResponse, BtcError>) //std::result::Result<SetBtcAddressResponse, BtcError>
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {e}")))?;
 
         // Extract the String address field (adjust field name):
         // let msg_string = decoded_response.unwrap().msg;
@@ -389,10 +385,7 @@ impl ICAgent {
         let address_string = response.address;
         let msg = response.msg;
 
-        println!(
-            "Decoded Response: address = {}, msg = {:?}",
-            address_string, msg
-        );
+        println!("Decoded Response: address = {address_string}, msg = {msg:?}");
 
         Ok(address_string)
     }
@@ -402,14 +395,15 @@ impl ICAgent {
         address_type: BtcAddressType,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {e}")))?;
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
-        let caller_principal = self.agent.get_principal()
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Get principal failed: {}", e)))?;
+        let caller_principal = self.agent.get_principal().map_err(|e| {
+            Box::<dyn std::error::Error>::from(format!("Get principal failed: {e}"))
+        })?;
 
         let setbtcaddressargs = SetBtcAddressArgs {
             principal: Some(caller_principal),
@@ -417,21 +411,21 @@ impl ICAgent {
             address_type,
         };
 
-        let resp = self
-            .agent
-            .update(&can_ckl_id, "set_btc_address")
-            .with_arg(Encode!(&setbtcaddressargs).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("Encoding failed: {}", e))
-            })?)
-            .call_and_wait()
-            .await
-            .map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("set_btc_address call failed: {}", e))
-            })?;
+        let resp =
+            self.agent
+                .update(&can_ckl_id, "set_btc_address")
+                .with_arg(Encode!(&setbtcaddressargs).map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("Encoding failed: {e}"))
+                })?)
+                .call_and_wait()
+                .await
+                .map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("set_btc_address call failed: {e}"))
+                })?;
 
         // Decode as SetBtcAddressResponse directly:
         let decoded_response = Decode!(&resp, std::result::Result<SetBtcAddressResponse, BtcError>) //std::result::Result<SetBtcAddressResponse, BtcError>
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {e}")))?;
 
         // Extract the String address field (adjust field name):
         // let msg_string = decoded_response.unwrap().msg;
@@ -440,10 +434,7 @@ impl ICAgent {
         let address_string = response.address;
         let msg = response.msg;
 
-        println!(
-            "Decoded Response: address = {}, msg = {:?}",
-            address_string, msg
-        );
+        println!("Decoded Response: address = {address_string}, msg = {msg:?}");
 
         Ok(address_string)
     }
@@ -460,7 +451,7 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
         let args_notify = NotifyArgs {
             block_height: block,
@@ -486,14 +477,14 @@ impl ICAgent {
         // amount: u64,
         withdraw: PoolWithdrawal,
         signed_witdrawal: Vec<u8>,
-        receiver: Principal,
+        _receiver: Principal,
     ) -> Result<Result<(), CklError>, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)?;
 
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
         let withdraw_args = WithdrawalLPArgs {
             pool_withdrawal: withdraw,
@@ -520,7 +511,7 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
         // let send_from_p2pkh_address_args = SendFromP2pkhAddressArgs {
         //     destination_address: receiver, //send_btc_args.to_address.clone(),
@@ -534,7 +525,7 @@ impl ICAgent {
             .call_and_wait()
             .await?;
 
-        let tx_id = Decode!(&resp, u64).map_err(|e| format!("Decoding failed: {}", e))?;
+        let tx_id = Decode!(&resp, u64).map_err(|e| format!("Decoding failed: {e}"))?;
 
         Ok(tx_id)
     }
@@ -550,12 +541,7 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
-
-        // let send_btc_args = SendBtcArgs {
-        //     to_address: receiver,
-        //     amount_sat,
-        // };
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
         let send_from_p2pkh_address_args = SendFromP2pkhAddressArgs {
             destination_address: receiver, //send_btc_args.to_address.clone(),
@@ -569,7 +555,7 @@ impl ICAgent {
             .call_and_wait()
             .await?;
 
-        let tx_id = Decode!(&resp, String).map_err(|e| format!("Decoding failed: {}", e))?;
+        let tx_id = Decode!(&resp, String).map_err(|e| format!("Decoding failed: {e}"))?;
 
         Ok(tx_id)
     }
@@ -583,7 +569,7 @@ impl ICAgent {
         self.agent
             .fetch_root_key()
             .await
-            .map_err(|e| format!("Failed to fetch root key: {}", e))?;
+            .map_err(|e| format!("Failed to fetch root key: {e}"))?;
 
         let resp = self
             .agent
@@ -622,21 +608,21 @@ impl ICAgent {
         };
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
-        let resp = self
-            .agent
-            .update(&can_basic_btc_id, method_name)
-            .with_arg(Encode!(&args).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("Encoding failed: {}", e))
-            })?)
-            .call_and_wait()
-            .await?;
+        let resp =
+            self.agent
+                .update(&can_basic_btc_id, method_name)
+                .with_arg(Encode!(&args).map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("Encoding failed: {e}"))
+                })?)
+                .call_and_wait()
+                .await?;
 
         let btc_address = Decode!(&resp, ResultBtc<String>)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decoding failed: {}", e)))
-            .and_then(|v| v.map_err(|e| Box::<dyn std::error::Error>::from(e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decoding failed: {e}")))
+            .and_then(|v| v.map_err(Box::<dyn std::error::Error>::from))?;
         Ok(btc_address)
         // btc_address
     }
@@ -652,32 +638,30 @@ impl ICAgent {
         };
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
-        let resp = self
-            .agent
-            .update(&btc_minter_id, "get_btc_address")
-            .with_arg(Encode!(&args).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("Encoding failed: {}", e))
-            })?)
-            .call_and_wait()
-            .await?;
+        let resp =
+            self.agent
+                .update(&btc_minter_id, "get_btc_address")
+                .with_arg(Encode!(&args).map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!("Encoding failed: {e}"))
+                })?)
+                .call_and_wait()
+                .await?;
 
         let btc_address = Decode!(&resp, String)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decoding failed: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decoding failed: {e}")))?;
 
         Ok(btc_address)
     }
 
-    pub async fn get_btc_liquidity_address(
-        &self,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn get_btc_liquidity_address(&self) -> Result<String, Box<dyn std::error::Error>> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
-            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {}", e)))?;
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Invalid principal: {e}")))?;
 
         self.agent.fetch_root_key().await.map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {}", e))
+            Box::<dyn std::error::Error>::from(format!("Failed to fetch root key: {e}"))
         })?;
 
         let resp = self
@@ -688,17 +672,15 @@ impl ICAgent {
             .await
             .map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!(
-                    "get_btc_liquidity_address_for_caller call failed: {}",
-                    e
+                    "get_btc_liquidity_address_for_caller call failed: {e}"
                 ))
             })?;
 
-        let decoded_response =
-            Decode!(&resp, std::result::Result<String, BtcError>)
-                .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {}", e)))?;
+        let decoded_response = Decode!(&resp, std::result::Result<String, BtcError>)
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("Decode failed: {e}")))?;
 
         let address = decoded_response?;
-        println!("BTC liquidity address: {}", address);
+        println!("BTC liquidity address: {address}");
         Ok(address)
     }
 }

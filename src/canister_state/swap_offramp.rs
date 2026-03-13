@@ -33,7 +33,7 @@ struct ParsedInvoice {
 /// Parse a BOLT11 invoice and extract the fields needed for offramp.
 fn parse_offramp_invoice(invoice_str: &str) -> Result<ParsedInvoice, OfframpResponse> {
     let invoice = lightning_invoice::Bolt11Invoice::from_str(invoice_str)
-        .map_err(|e| offramp_err(format!("Invalid invoice: {}", e)))?;
+        .map_err(|e| offramp_err(format!("Invalid invoice: {e}")))?;
 
     let amount_msat = invoice.amount_milli_satoshis()
         .ok_or_else(|| offramp_err("Invoice has no amount specified".to_string()))?;
@@ -69,7 +69,7 @@ fn compute_offramp_pricing(btc_out: u64) -> Result<(u64, u64), OfframpResponse> 
         btc_out,
         &crate::stableswap::SwapDirection::CkbtcToBtc,
     ).map_err(|e| offramp_err_with_amount(
-        format!("StableSwap pricing error: {}", e), btc_out,
+        format!("StableSwap pricing error: {e}"), btc_out,
     ))?;
 
     // output_amount in get_swap_input is the required ckBTC input
@@ -106,12 +106,12 @@ async fn collect_icp_fee(
         Ok((Err(err),)) => {
             let fee_icp = icp_ddos_fee as f64 / 1e8;
             Err(offramp_err_with_amount(
-                format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve {} ICP?", err, fee_icp),
+                format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?"),
                 amount_sats,
             ))
         }
         Err(e) => Err(offramp_err_with_amount(
-            format!("ICP ledger call failed: {}", e),
+            format!("ICP ledger call failed: {e}"),
             amount_sats,
         )),
     }
@@ -144,14 +144,14 @@ async fn collect_offramp_ckbtc(
         Ok((Err(err),)) => {
             ic_cdk::println!("ckBTC collection failed, ICP fee (block {}) not refunded", icp_fee_block_index);
             Err(offramp_err_with_amount(
-                format!("Failed to take custody of ckBTC: {:?}. ICP fee was collected and is NOT refunded.", err),
+                format!("Failed to take custody of ckBTC: {err:?}. ICP fee was collected and is NOT refunded."),
                 amount_sats,
             ))
         }
         Err(e) => {
             ic_cdk::println!("ckBTC ledger call failed, ICP fee (block {}) not refunded", icp_fee_block_index);
             Err(offramp_err_with_amount(
-                format!("ckBTC ICRC-2 transfer_from failed: {}. ICP fee was collected and is NOT refunded.", e),
+                format!("ckBTC ICRC-2 transfer_from failed: {e}. ICP fee was collected and is NOT refunded."),
                 amount_sats,
             ))
         }
@@ -425,11 +425,11 @@ async fn refund_ckbtc_to_user(
         }
         Ok((Err(err),)) => FailOfframpResponse {
             success: false, refund_block_index: None,
-            error: Some(format!("Refund transfer failed (retryable): {:?}", err)),
+            error: Some(format!("Refund transfer failed (retryable): {err:?}")),
         },
         Err(e) => FailOfframpResponse {
             success: false, refund_block_index: None,
-            error: Some(format!("Refund call failed (retryable): {}", e)),
+            error: Some(format!("Refund call failed (retryable): {e}")),
         },
     }
 }

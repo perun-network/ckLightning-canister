@@ -47,15 +47,14 @@ use crate::btc::address::get_balance;
 use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
 use crate::error::{BtcError, CklError};
-use crate::helpers::execute_ledger_transfer;
 use crate::htlc::HtlcManager;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
-    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER,
+    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, ChannelId, DEVNET_CKBTC_LEDGER,
     Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
-    HoldingsResponse, NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs,
-    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    HoldingsResponse, NotifyArgs, PoolWithdrawal, SetBtcAddressArgs,
+    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use crate::ic_types::{
     OnrampRequestInfo, OfframpRequestInfo,
@@ -75,7 +74,7 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::error::ResultCkl;
-use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, Timestamp};
+use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Timestamp};
 use crate::receiver;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use lazy_static::lazy_static;
@@ -182,8 +181,6 @@ where
     pub(crate) processed_utxos: HashMap<(Vec<u8>, u32), Principal>,
 
     pub(crate) icrc_receiver: receiver::Receiver<Q>,
-    pub(crate) user_holdings: HashMap<Funding, Amount>,
-    pub(crate) channels: HashMap<ChannelId, RegisteredState>,
     pub(crate) liq_pool: LiquidityPool,
 
     // Lightning → ckBTC swaps storage (payment_hash -> SwapInfo)
@@ -362,6 +359,7 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
     })
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn set_btc_address_impl(
     set_btc_address_args: SetBtcAddressArgs,
 ) -> Result<SetBtcAddressResponse, BtcError> {
@@ -393,7 +391,7 @@ pub async fn set_btc_address_impl(
     // Store in the map (personal depositor addresses)
     state
         .btc_depositor_addresses
-        .insert(principal.clone(), address.clone());
+        .insert(principal, address.clone());
 
     Ok(SetBtcAddressResponse {
         address,
@@ -401,6 +399,7 @@ pub async fn set_btc_address_impl(
     })
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn get_btc_balances_impl(
     confirmations: Option<u64>,
 ) -> Result<GetBtcBalancesResponse, BtcError> {
@@ -419,10 +418,7 @@ pub async fn get_btc_balances_impl(
         };
 
         // Query balance asynchronously, handle errors gracefully
-        let balance = match get_balance(args).await {
-            Ok(bal) => Some(bal),
-            Err(_) => None, // optionally log or process error
-        };
+        let balance = get_balance(args).await.ok();
 
         balances.insert(*address_type, balance);
     }
@@ -484,6 +480,7 @@ pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<
     Ok(address)
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn transaction_notification_impl(
     notify_args: NotifyArgs,
 ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
@@ -504,6 +501,7 @@ pub fn query_user_lp_holdings_impl(
     state.query_holdings(funding)
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn withdraw_lp_impl(
     withdrawal: WithdrawalLPArgs,
     sig_withdrawal: Vec<u8>,
@@ -524,19 +522,6 @@ pub async fn withdraw_lp_impl(
         .await
 }
 
-pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Nat, CklError> {
-    let mut state = STATE.write().expect("STATE lock: trigger_withdraw");
-    state.withdraw_from_liq_pool(req).await
-}
-
-pub fn deposit_channel_impl(
-    funding: ChannelFunding,
-    signature_bytes: &[u8],
-) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().expect("STATE lock: deposit_channel");
-    state.deposit_icrc(blocktime(), Funding::Channel(funding), signature_bytes)
-}
-
 pub fn deposit_lp_impl(
     funding: FundingLPArgs,
     signature_bytes: &[u8],
@@ -546,11 +531,6 @@ pub fn deposit_lp_impl(
     let pool_funding = funding.pool_funding;
 
     state.deposit_icrc(blocktime(), Funding::Pool(pool_funding), signature_bytes)
-}
-
-pub fn query_state_impl(id: ChannelId) -> Option<RegisteredState> {
-    let state = STATE.read().expect("STATE lock: query_state");
-    state.state(&id)
 }
 
 impl<Q> CanisterState<Q>
@@ -568,8 +548,6 @@ where
             pending_btc_deposits: HashMap::new(),
             processed_utxos: HashMap::new(),
             icrc_receiver: receiver::Receiver::new(q, principal),
-            user_holdings: Default::default(),
-            channels: Default::default(),
             liq_pool: LiquidityPool::new(),
             swaps: HashMap::new(),
             ln_channels: HashMap::new(),
@@ -623,14 +601,6 @@ where
         Self::init(q, canister_self())
     }
 
-    pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
-        *self
-            .user_holdings
-            .entry(funding)
-            .or_insert(Default::default()) += amount;
-        Ok(())
-    }
-
     pub async fn withdraw_icrc(
         &mut self,
         _time: Timestamp,
@@ -653,7 +623,7 @@ where
 
         // Send funds back to L1 address
         let _ = self
-            .send_funds_to_l1(receiver, &pubkey_l1, amount.clone(), &asset)
+            .send_funds_to_l1(receiver, pubkey_l1, amount.clone(), asset)
             .await;
 
         Ok(())
@@ -661,7 +631,7 @@ where
     async fn send_funds_to_l1(
         &self,
         receiver: Principal,
-        _pubkey: &Vec<u8>,
+        _pubkey: &[u8],
         amount: Amount,
         _asset: &PoolAsset,
     ) -> ResultCkl<()> {
@@ -697,7 +667,7 @@ where
     pub fn withdraw_channel(&mut self, _funding: Funding, _amount: Amount) -> ResultCkl<()> {
         // TODO: withdrawal logic as part of the L2 Lightning protocol
 
-        return Ok(());
+        Ok(())
     }
 
     pub fn deposit_liq_pool(
@@ -718,32 +688,24 @@ where
         &mut self,
         _time: Timestamp,
         funding: Funding,
-        signature_bytes: &[u8], // added signature argument
+        signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         let memo = funding.memo();
         // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
 
-        match &funding {
-            Funding::Channel(_) => {
-                self.deposit_channel(funding.clone(), amount)?;
-            }
-            Funding::Pool(_) => {
-                let depositor = funding.get_depositor().unwrap().clone();
-                let pool_asset = funding.get_asset().unwrap().clone();
-                let pubkey = funding.get_pubkey().unwrap().clone();
+        let depositor = funding.get_depositor().ok_or(CklError::InvalidInput)?.clone();
+        let pool_asset = funding.get_asset().ok_or(CklError::InvalidInput)?.clone();
+        let pubkey = funding.get_pubkey().ok_or(CklError::InvalidInput)?.clone();
 
-                // New call, now passing funding reference and signature bytes
-                self.deposit_liq_pool(
-                    amount,
-                    pool_asset,
-                    depositor,
-                    pubkey,
-                    &funding,        // pass reference for verification
-                    signature_bytes, // pass signature bytes for verification
-                )?;
-            }
-        }
+        self.deposit_liq_pool(
+            amount,
+            pool_asset,
+            depositor,
+            pubkey,
+            &funding,
+            signature_bytes,
+        )?;
         Ok(())
     }
 
@@ -787,96 +749,6 @@ where
         self.liq_pool.holdings_total.get(&asset).cloned()
     }
 
-    /// Queries a registered state.
-    pub fn state(&self, id: &ChannelId) -> Option<RegisteredState> {
-        self.channels.get(&id).cloned()
-    }
-
-    /// Calculates the total funds held in a channel. If the channel is unknown
-    /// and there are no deposited funds for the channel, returns 0.
-    pub fn holdings_total(&self, params: &Params) -> Amount {
-        let mut acc = Amount::default();
-        for pk in params.participants.iter() {
-            let funding = Funding::new_channel(params.id(), pk.clone());
-            acc += self
-                .user_holdings
-                .get(&funding)
-                .unwrap_or(&Amount::default())
-                .clone();
-        }
-        acc
-    }
-
-    pub async fn withdraw_from_liq_pool(
-        &mut self,
-        req: WithdrawalReq,
-    ) -> std::result::Result<Nat, CklError> {
-        let amount = req.amount.clone();
-
-        let (total_deducted, to_deduct) = match self.calculate_required_deductions(&amount) {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(CklError::InsufficientLiquidity);
-            }
-        };
-
-        let transfer_result = execute_ledger_transfer(&req, total_deducted).await;
-
-        match transfer_result {
-            Ok(block_height) => {
-                self.apply_deductions(to_deduct);
-                Ok(block_height)
-            }
-            Err(error_msg) => Err(error_msg),
-        }
-    }
-
-    fn calculate_required_deductions(
-        &self,
-        amount: &Nat,
-    ) -> std::result::Result<(u64, Vec<(Funding, Nat)>), CklError> {
-        let mut needed = amount.clone();
-        let mut to_deduct = Vec::new();
-        let zero = Nat::from(0u32);
-
-        for (acc, available) in &self.user_holdings {
-            if needed == zero {
-                break;
-            }
-
-            let take = available.min(&needed);
-            if *take > zero {
-                to_deduct.push((acc.clone(), take.clone()));
-                needed -= take.clone();
-            }
-        }
-
-        if needed > zero {
-            return Err(CklError::InsufficientLiquidity);
-        }
-
-        let total = amount.clone() - needed;
-        let total_u64 = total.0.to_u64_digits().first().copied().unwrap_or(0);
-        Ok((total_u64, to_deduct))
-    }
-
-    pub fn finalize_withdrawal(&mut self, to_deduct: Vec<(Funding, Nat)>) {
-        self.apply_deductions(to_deduct);
-    }
-
-    fn apply_deductions(&mut self, to_deduct: Vec<(Funding, Nat)>) {
-        let zero = Nat(0u64.into());
-
-        for (acc, take) in to_deduct {
-            if let Some(entry) = self.user_holdings.get_mut(&acc) {
-                *entry -= take;
-                if *entry == zero {
-                    self.user_holdings.remove(&acc);
-                }
-            }
-        }
-    }
-
     /// Serialize all persistable state into a snapshot for stable memory.
     pub fn to_snapshot(&self) -> CanisterStateSnapshot {
         // Collect HashMap entries into sorted Vecs for deterministic serialization.
@@ -892,13 +764,6 @@ where
         let btc_liquidity_addresses = sorted_map!(self.btc_liquidity_addresses);
         let btc_depositor_addresses = sorted_map!(self.btc_depositor_addresses);
         let pending_btc_deposits = sorted_map!(self.pending_btc_deposits);
-        let user_holdings = {
-            let mut v: Vec<_> = self.user_holdings.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect();
-            v.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
-            v
-        };
-        let channels = sorted_map!(self.channels);
         let swaps = sorted_map!(self.swaps);
         let ln_channels = sorted_map!(self.ln_channels);
         let onramp_requests = sorted_map!(self.onramp_requests);
@@ -934,8 +799,8 @@ where
             lp_btc_address: self.lp_btc_address.clone(),
             pending_btc_deposits,
             processed_utxos,
-            user_holdings,
-            channels,
+            user_holdings: Vec::new(),  // Legacy Perun field, kept for upgrade compatibility
+            channels: Vec::new(),       // Legacy Perun field, kept for upgrade compatibility
             liq_pool: self.liq_pool.clone(),
             swaps,
             ln_channels,
@@ -981,7 +846,7 @@ where
     /// Any in-flight ICRC deposits must be re-submitted after upgrade.
     pub fn restore_from_snapshot(&mut self, snap: CanisterStateSnapshot) {
         if snap.version != 1 {
-            ic_cdk::trap(&format!(
+            ic_cdk::trap(format!(
                 "Unsupported snapshot version: {} (expected 1)",
                 snap.version
             ));
@@ -994,8 +859,7 @@ where
         self.pending_btc_deposits = snap.pending_btc_deposits.into_iter().collect();
         self.processed_utxos = snap.processed_utxos.into_iter()
             .map(|(txid, vout, p)| ((txid, vout), p)).collect();
-        self.user_holdings = snap.user_holdings.into_iter().collect();
-        self.channels = snap.channels.into_iter().collect();
+        // snap.user_holdings and snap.channels are legacy Perun fields (ignored)
         self.liq_pool = snap.liq_pool;
         self.swaps = snap.swaps.into_iter().collect();
         self.ln_channels = snap.ln_channels.into_iter().collect();
@@ -1051,8 +915,11 @@ pub struct CanisterStateSnapshot {
     pub pending_btc_deposits: Vec<([u8; 32], PendingBtcDeposit)>,
     /// Flattened from HashMap<(Vec<u8>, u32), Principal>
     pub processed_utxos: Vec<(Vec<u8>, u32, Principal)>,
+    /// Legacy Perun fields — kept for upgrade deserialization compatibility, always empty.
+    #[serde(default)]
     pub user_holdings: Vec<(Funding, Amount)>,
-    pub channels: Vec<(ChannelId, RegisteredState)>,
+    #[serde(default)]
+    pub channels: Vec<(ChannelId, candid::Reserved)>,
     pub liq_pool: LiquidityPool,
     pub swaps: Vec<([u8; 32], SwapInfo)>,
     pub ln_channels: Vec<([u8; 32], LnChannelInfo)>,

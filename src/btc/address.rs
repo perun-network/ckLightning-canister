@@ -55,7 +55,7 @@ pub async fn get_p2pkh_address() -> ResultBtc<String> {
 
     // Convert the public key to the format used by the Bitcoin library
     let public_key = PublicKey::from_slice(&public_key)
-        .map_err(|e| BtcError::Other(format!("Invalid P2PKH public key: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invalid P2PKH public key: {e}")))?;
 
     // Generate a legacy P2PKH address from the public key.
     // The address encoding (Base58) depends on the network type.
@@ -86,7 +86,7 @@ pub async fn get_p2tr_key_path_only_address() -> ResultBtc<String> {
     // Convert the internal key to an x-only public key, as required by Taproot (BIP-341).
     let internal_key = XOnlyPublicKey::from(
         PublicKey::from_slice(&internal_key)
-            .map_err(|e| BtcError::Other(format!("Invalid P2TR internal key: {}", e)))?,
+            .map_err(|e| BtcError::Other(format!("Invalid P2TR internal key: {e}")))?,
     );
 
     // Create a Taproot address using the internal key only.
@@ -111,12 +111,12 @@ pub async fn get_p2wpkh_address() -> ResultBtc<String> {
 
     // Create a CompressedPublicKey from the raw public key bytes
     let public_key = CompressedPublicKey::from_slice(&public_key)
-        .map_err(|e| BtcError::Other(format!("Invalid P2WPKH compressed public key: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invalid P2WPKH compressed public key: {e}")))?;
 
     // Generate a P2WPKH Bech32 address.
     // The network (mainnet, testnet, regtest) determines the HRP (e.g., "bc1" or "tb1").
     let address = Address::p2wpkh(&public_key, ctx.bitcoin_network).to_string();
-    return Ok(address);
+    Ok(address)
 }
 
 #[derive(candid::CandidType, candid::Deserialize)]
@@ -140,9 +140,9 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> Result<String, Btc
     // Parse and validate the destination address. The address type needs to be
     // valid for the Bitcoin network we are on.
     let dst_address = Address::from_str(&request.destination_address)
-        .map_err(|e| BtcError::Other(format!("Invalid destination address: {}", e)))?
+        .map_err(|e| BtcError::Other(format!("Invalid destination address: {e}")))?
         .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("Address network mismatch: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Address network mismatch: {e}")))?;
 
     // Unique derivation paths are used for every address type generated, to ensure
     // each address has its own unique key pair. To generate a user-specific address,
@@ -154,7 +154,7 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> Result<String, Btc
 
     // Convert the public key to the format used by the Bitcoin library.
     let own_public_key = PublicKey::from_slice(&own_public_key)
-        .map_err(|e| BtcError::Other(format!("Invalid own public key: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invalid own public key: {e}")))?;
 
     // Generate a P2PKH address from the public key.
     let own_address = Address::p2pkh(own_public_key, ctx.bitcoin_network);
@@ -168,7 +168,7 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> Result<String, Btc
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {}", e)))?
+    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {e}")))?
     .utxos;
 
     // Build the transaction.
@@ -200,7 +200,7 @@ pub async fn send_from_p2pkh_address(request: SendRequest) -> Result<String, Btc
         transaction: serialize(&signed_transaction),
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {e}")))?;
 
     // Return the transaction ID.
     Ok(signed_transaction.compute_txid().to_string())
@@ -213,7 +213,7 @@ pub async fn get_balance(get_balance_args: GetBtcBalanceArgs) -> Result<u64, Btc
         .confirmations
         .unwrap_or(0)
         .try_into()
-        .map_err(|e| BtcError::Other(format!("Invalid confirmations value: {}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Invalid confirmations value: {e}")))?;
 
     let satoshi: u64 = bitcoin_get_balance(&GetBalanceRequest {
         address: get_balance_args.address,
@@ -221,7 +221,7 @@ pub async fn get_balance(get_balance_args: GetBtcBalanceArgs) -> Result<u64, Btc
         min_confirmations: Some(confs),
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to get BTC balance: {}", e)))?;
+    .map_err(|e| BtcError::Other(format!("Failed to get BTC balance: {e}")))?;
 
     // satoshi is already u64, return it directly
     Ok(satoshi)
@@ -242,7 +242,7 @@ pub async fn derive_btc_address(
 
     // Parse keys just once and reuse
     let public_key = PublicKey::from_slice(&public_key_bytes)
-        .map_err(|e| format!("Failed to parse public key: {}", e))?;
+        .map_err(|e| format!("Failed to parse public key: {e}"))?;
 
     let address = match address_type {
         BtcAddressType::P2PKH => {
@@ -252,7 +252,7 @@ pub async fn derive_btc_address(
         BtcAddressType::P2WPKH => {
             // Convert to compressed pubkey type required by p2wpkh
             let compressed_key = CompressedPublicKey::from_slice(&public_key_bytes)
-                .map_err(|e| format!("Failed to parse compressed public key: {}", e))?;
+                .map_err(|e| format!("Failed to parse compressed public key: {e}"))?;
             Address::p2wpkh(&compressed_key, ctx.bitcoin_network)
         }
         BtcAddressType::P2TR => {

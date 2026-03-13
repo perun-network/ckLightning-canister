@@ -16,10 +16,8 @@ pub use candid::{
     Deserialize, Int, Nat, Principal,
     types::{Serializer, Type, TypeInner, TypeInner::Nat8},
 };
-use tokio::time::{Duration, sleep};
 mod helpers;
 use helpers::agent::ICAgent;
-use helpers::btc_commands::generate_blocks_to_address;
 use helpers::id::{PEM_NODE_ACC_PATH, PEM_USER_ACC_PATH, str_home_from_path};
 
 #[tokio::test]
@@ -30,11 +28,11 @@ async fn test_agent_get_btc_liquidity_address() -> Result<(), Box<dyn std::error
 
     // get_own_btc_address uses the minter (no ECDSA derivation, avoids concurrent canister traps)
     let address = client.get_own_btc_address().await.map_err(|e| {
-        println!("Error getting BTC address: {:?}", e);
+        println!("Error getting BTC address: {e:?}");
         e
     })?;
 
-    println!("BTC address: {}", address);
+    println!("BTC address: {address}");
     assert!(!address.is_empty(), "BTC address should not be empty");
 
     Ok(())
@@ -50,33 +48,31 @@ async fn test_basic_bitcoin_get_balance() -> Result<(), Box<dyn std::error::Erro
     // Fetch balances before transfer
 
     let btc_address_user = user_client.get_own_btc_address().await.map_err(|e| {
-        println!("Error getting BTC address: {:?}", e);
+        println!("Error getting BTC address: {e:?}");
         e
     })?;
 
     let btc_address_node = node_client.get_own_btc_address().await.map_err(|e| {
-        println!("Error getting BTC address: {:?}", e);
+        println!("Error getting BTC address: {e:?}");
         e
     })?;
 
     println!(
-        "BTC user  address received from canister: {:?}",
-        btc_address_user
+        "BTC user  address received from canister: {btc_address_user:?}"
     );
     println!(
-        "BTC node address received from canister: {:?}",
-        btc_address_node
+        "BTC node address received from canister: {btc_address_node:?}"
     );
 
     let user_balance = user_client
         .get_btc_balance(Some(0))
         .await
         .map_err(|e| {
-            println!("Error getting user BTC balance: {:?}", e);
+            println!("Error getting user BTC balance: {e:?}");
             e
         })?;
 
-    println!("User BTC balance: {}", user_balance);
+    println!("User BTC balance: {user_balance}");
 
     Ok(())
 }
@@ -93,22 +89,20 @@ async fn test_agent_get_btc_address() -> Result<(), Box<dyn std::error::Error>> 
     // let btc_address_type = cklightning::ic_types::BtcAddressType::P2PKH; //P2WPKH;
 
     let btc_address_user = user_client.get_own_btc_address().await.map_err(|e| {
-        println!("Error getting BTC address: {:?}", e);
+        println!("Error getting BTC address: {e:?}");
         e
     })?;
 
     let btc_address_node = node_client.get_own_btc_address().await.map_err(|e| {
-        println!("Error getting BTC address: {:?}", e);
+        println!("Error getting BTC address: {e:?}");
         e
     })?;
 
     println!(
-        "BTC user  address received from canister: {:?}",
-        btc_address_user
+        "BTC user  address received from canister: {btc_address_user:?}"
     );
     println!(
-        "BTC node address received from canister: {:?}",
-        btc_address_node
+        "BTC node address received from canister: {btc_address_node:?}"
     );
 
     let confs = Some(1);
@@ -117,11 +111,11 @@ async fn test_agent_get_btc_address() -> Result<(), Box<dyn std::error::Error>> 
         .get_btc_balance(confs)
         .await
         .map_err(|e| {
-            println!("Error getting user BTC balance: {:?}", e);
+            println!("Error getting user BTC balance: {e:?}");
             e
         })?;
 
-    println!("User BTC balance: {}", user_balance);
+    println!("User BTC balance: {user_balance}");
 
     Ok(())
 }
@@ -138,10 +132,10 @@ async fn test_agent_set_btc_address() -> Result<(), Box<dyn std::error::Error>> 
         .set_btc_address(btc_address_type)
         .await
         .map_err(|e| {
-            println!("Error setting BTC address: {:?}", e);
+            println!("Error setting BTC address: {e:?}");
             e
         })?;
-    println!("BTC address set successfully: {}", btc_address);
+    println!("BTC address set successfully: {btc_address}");
     Ok(())
 }
 
@@ -161,7 +155,7 @@ async fn test_btc_mine_to_address() -> Result<(), Box<dyn std::error::Error>> {
     let mined_address = "bcrt1q9aqms5qqr8qk5tw0khkhfgss9kg978cwc8ehdj";
 
     let output = std::process::Command::new(bitcoin_cli_path)
-        .args(&[
+        .args([
             "-regtest",
             "-rpcwallet=testwallet",
             "-rpcuser=ic-btc-integration",
@@ -175,9 +169,9 @@ async fn test_btc_mine_to_address() -> Result<(), Box<dyn std::error::Error>> {
     let stdout_str = str::from_utf8(&output.stdout).unwrap_or("<Invalid UTF-8>");
     let stderr_str = str::from_utf8(&output.stderr).unwrap_or("<Invalid UTF-8>");
 
-    println!("Command stdout:\n{}", stdout_str);
+    println!("Command stdout:\n{stdout_str}");
     if !stderr_str.is_empty() {
-        eprintln!("Command stderr:\n{}", stderr_str);
+        eprintln!("Command stderr:\n{stderr_str}");
     }
 
     if !output.status.success() {
@@ -189,7 +183,7 @@ async fn test_btc_mine_to_address() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !output.status.success() {
-        return Err(format!("Failed to generate blocks: {:?}", output).into());
+        return Err(format!("Failed to generate blocks: {output:?}").into());
     }
 
     println!("Generated 101 blocks to confirm transactions");

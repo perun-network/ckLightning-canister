@@ -37,10 +37,12 @@ pub type Timestamp = u64;
 
 /// Unique channel identifier.
 #[derive(PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Default)]
 pub struct ChannelId(pub [u8; 32]);
 
 /// A channel's unique nonce.
 #[derive(PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Default)]
 pub struct Nonce(pub [u8; 32]);
 
 /// Channel state version identifier.
@@ -52,15 +54,10 @@ pub type Version = u64;
 
 impl Clone for ChannelId {
     fn clone(&self) -> Self {
-        ChannelId(self.0.clone())
+        ChannelId(self.0)
     }
 }
 
-impl Default for ChannelId {
-    fn default() -> Self {
-        ChannelId([0; 32])
-    }
-}
 
 impl<'de> Deserialize<'de> for ChannelId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -120,15 +117,10 @@ impl CandidType for Nonce {
     }
 }
 
-impl Default for Nonce {
-    fn default() -> Self {
-        Nonce([0; 32])
-    }
-}
 
 impl Clone for Nonce {
     fn clone(&self) -> Self {
-        Nonce(self.0.clone())
+        Nonce(self.0)
     }
 }
 
@@ -141,7 +133,7 @@ impl CandidType for Hash {
     where
         S: Serializer,
     {
-        serializer.serialize_blob(&*self.0)
+        serializer.serialize_blob(&self.0)
     }
 }
 

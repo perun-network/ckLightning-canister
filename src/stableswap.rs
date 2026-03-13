@@ -101,10 +101,10 @@ impl std::fmt::Display for StableSwapError {
             StableSwapError::Overflow => write!(f, "Arithmetic overflow"),
             StableSwapError::ZeroAmplification => write!(f, "Amplification must be > 0"),
             StableSwapError::SlippageExceeded { price_impact_bps, max_slippage_bps } => {
-                write!(f, "Slippage exceeded: price impact {} bps > max {} bps", price_impact_bps, max_slippage_bps)
+                write!(f, "Slippage exceeded: price impact {price_impact_bps} bps > max {max_slippage_bps} bps")
             }
             StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps } => {
-                write!(f, "Swap size exceeded: {} bps of output pool > max {} bps", swap_pct_bps, max_swap_pct_bps)
+                write!(f, "Swap size exceeded: {swap_pct_bps} bps of output pool > max {max_swap_pct_bps} bps")
             }
         }
     }
@@ -185,7 +185,7 @@ pub fn compute_d(x: u128, y: u128, amp: u128) -> Result<u128, StableSwapError> {
         d = numerator / denominator;
 
         // Check convergence
-        let diff = if d > d_prev { d - d_prev } else { d_prev - d };
+        let diff = d.abs_diff(d_prev);
         if diff <= CONVERGENCE_THRESHOLD {
             return Ok(d);
         }
@@ -261,7 +261,7 @@ pub fn compute_y(x_new: u128, d: u128, amp: u128) -> Result<u128, StableSwapErro
 
         y = numerator / denom;
 
-        let diff = if y > y_prev { y - y_prev } else { y_prev - y };
+        let diff = y.abs_diff(y_prev);
         if diff <= CONVERGENCE_THRESHOLD {
             return Ok(y);
         }
@@ -295,7 +295,7 @@ pub fn compute_effective_fee_bps(config: &StableSwapConfig, x: u128, y: u128) ->
         return config.fee_bps;
     }
 
-    let diff = if x > y { x - y } else { y - x };
+    let diff = x.abs_diff(y);
     let spread = max_fee - base; // guaranteed > 0
 
     // effective = base + spread * diff / sum
@@ -336,8 +336,8 @@ pub fn compute_effective_fee(
     }
 
     // Imbalance in bps (0..10000)
-    let diff_before = if x_before > y_before { x_before - y_before } else { y_before - x_before };
-    let diff_after = if x_after > y_after { x_after - y_after } else { y_after - x_after };
+    let diff_before = x_before.abs_diff(y_before);
+    let diff_after = x_after.abs_diff(y_after);
 
     let imb_before = (diff_before * 10_000 / sum_before) as i128;
     let imb_after = (diff_after * 10_000 / sum_after) as i128;
@@ -725,7 +725,7 @@ mod tests {
 
         // With balanced pool and small swap, output ≈ input minus fee
         // Fee = 0.1% = 100 sats, so output ≈ 99,900
-        let expected_fee = input as u64 * 10 / 10_000; // ~100
+        let expected_fee = input * 10 / 10_000; // ~100
         assert!(result.output_amount > input - expected_fee - 10); // within 10 sats
         assert!(result.output_amount < input);
         assert!(result.total_fee > 0);
@@ -834,8 +834,8 @@ mod tests {
         let d_after = compute_d(new_btc, new_ckbtc, amp).unwrap();
 
         // With no fees and integer rounding, D should be preserved within small tolerance
-        let diff = if d_after > d_before { d_after - d_before } else { d_before - d_after };
-        assert!(diff <= 2, "D changed by {}: before={}, after={}", diff, d_before, d_after);
+        let diff = d_after.abs_diff(d_before);
+        assert!(diff <= 2, "D changed by {diff}: before={d_before}, after={d_after}");
     }
 
     #[test]
@@ -982,7 +982,7 @@ mod tests {
                 assert!(price_impact_bps > 5);
                 assert_eq!(max_slippage_bps, 5);
             }
-            other => panic!("Expected SlippageExceeded, got {:?}", other),
+            other => panic!("Expected SlippageExceeded, got {other:?}"),
         }
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         let input = 10_000u64;
 
         let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc);
-        assert!(result.is_ok(), "Should succeed within slippage limit, got {:?}", result);
+        assert!(result.is_ok(), "Should succeed within slippage limit, got {result:?}");
         assert!(result.unwrap().price_impact_bps <= 50);
     }
 
@@ -1025,7 +1025,7 @@ mod tests {
         let input = 200_000u64;
 
         let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc);
-        assert!(result.is_ok(), "Should never reject when max_slippage_bps=0, got {:?}", result);
+        assert!(result.is_ok(), "Should never reject when max_slippage_bps=0, got {result:?}");
         assert!(result.unwrap().price_impact_bps > 0);
     }
 
@@ -1112,7 +1112,7 @@ mod tests {
         let result = get_swap_input(
             &config, btc_bal, ckbtc_bal, desired_output, &SwapDirection::CkbtcToBtc,
         );
-        assert!(result.is_ok(), "get_swap_input with dynamic fee should succeed, got {:?}", result);
+        assert!(result.is_ok(), "get_swap_input with dynamic fee should succeed, got {result:?}");
         let r = result.unwrap();
         // Required input should be more than desired output (fees + curve)
         assert!(r.output_amount > desired_output);
@@ -1265,7 +1265,7 @@ mod tests {
         assert!(result.total_fee > 0, "Imbalancing swap should have fee");
         assert_eq!(result.rebate_amount, 0, "No rebate for imbalancing swap");
         // Fee should be higher than base fee (30 bps on input)
-        let base_fee_approx = input as u64 * 30 / 10_000;
+        let base_fee_approx = input * 30 / 10_000;
         assert!(result.total_fee > base_fee_approx,
             "Fee {} should be > base fee {}", result.total_fee, base_fee_approx);
     }
@@ -1344,7 +1344,7 @@ mod tests {
 
         let result = get_swap_output(&config, btc_bal, ckbtc_bal, input, &SwapDirection::BtcToCkbtc);
         // Should succeed regardless (may or may not have rebate depending on net improvement)
-        assert!(result.is_ok(), "Overshoot swap should succeed, got {:?}", result);
+        assert!(result.is_ok(), "Overshoot swap should succeed, got {result:?}");
     }
 
     #[test]
@@ -1412,7 +1412,7 @@ mod tests {
         // Strong rebalancing: pool goes from very imbalanced to nearly balanced
         let fee_strong = compute_effective_fee(&config, 100, 1900, 1000, 1000);
         assert!(fee_strong < 0,
-            "Strong rebalancing should get negative fee (rebate), got {}", fee_strong);
+            "Strong rebalancing should get negative fee (rebate), got {fee_strong}");
         assert!(fee_strong >= -20,
             "Rebate should not exceed rebate_bps ({}), got {}", -20, fee_strong);
     }
@@ -1435,7 +1435,7 @@ mod tests {
         };
         // Balanced pool: 1M each. Swap 50k BTC → ckBTC ≈ 5% of output pool.
         let result = get_swap_output(&config, 1_000_000, 1_000_000, 50_000, &SwapDirection::BtcToCkbtc);
-        assert!(result.is_ok(), "Swap within 10% limit should succeed, got {:?}", result);
+        assert!(result.is_ok(), "Swap within 10% limit should succeed, got {result:?}");
     }
 
     #[test]
@@ -1454,10 +1454,10 @@ mod tests {
         let result = get_swap_output(&config, 1_000_000, 1_000_000, 200_000, &SwapDirection::BtcToCkbtc);
         match result {
             Err(StableSwapError::SwapSizeExceeded { swap_pct_bps, max_swap_pct_bps }) => {
-                assert!(swap_pct_bps > 1000, "swap_pct_bps {} should exceed 1000", swap_pct_bps);
+                assert!(swap_pct_bps > 1000, "swap_pct_bps {swap_pct_bps} should exceed 1000");
                 assert_eq!(max_swap_pct_bps, 1000);
             }
-            other => panic!("Expected SwapSizeExceeded, got {:?}", other),
+            other => panic!("Expected SwapSizeExceeded, got {other:?}"),
         }
     }
 
@@ -1475,6 +1475,6 @@ mod tests {
         };
         // Swap 500k out of 1M pool = 50%, should still succeed with check disabled
         let result = get_swap_output(&config, 1_000_000, 1_000_000, 500_000, &SwapDirection::BtcToCkbtc);
-        assert!(result.is_ok(), "Should never reject when max_swap_pct_bps=0, got {:?}", result);
+        assert!(result.is_ok(), "Should never reject when max_swap_pct_bps=0, got {result:?}");
     }
 }

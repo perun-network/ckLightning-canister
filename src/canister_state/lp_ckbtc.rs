@@ -23,7 +23,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
     let caller = msg_caller();
     let canister_id = ic_cdk::api::canister_self();
 
-    if amount == Nat::from(0u64) {
+    if amount == 0u64 {
         return LpDepositResponse {
             success: false,
             new_balance: Nat::from(0u64),
@@ -73,13 +73,13 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
             Err(e) => LpDepositResponse {
                 success: false,
                 new_balance: Nat::from(0u64),
-                error: Some(format!("ICRC-2 transfer_from failed: {:?}", e)),
+                error: Some(format!("ICRC-2 transfer_from failed: {e:?}")),
             },
         },
         Err(e) => LpDepositResponse {
             success: false,
             new_balance: Nat::from(0u64),
-            error: Some(format!("Canister call failed: {}", e)),
+            error: Some(format!("Canister call failed: {e}")),
         },
     }
 }
@@ -92,7 +92,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
 pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     let caller = msg_caller();
 
-    if amount == Nat::from(0u64) {
+    if amount == 0u64 {
         return LpWithdrawResponse {
             success: false,
             amount_withdrawn: Nat::from(0u64),
@@ -123,8 +123,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 new_balance: current_balance,
                 block_index: None,
                 error: Some(format!(
-                    "Insufficient available ckBTC: {} sats requested but only {} sats available (total {} sats, {} sats reserved for pending swaps)",
-                    amount_u64, available_ckbtc, total_lp_ckbtc, reserved_for_onramps
+                    "Insufficient available ckBTC: {amount_u64} sats requested but only {available_ckbtc} sats available (total {total_lp_ckbtc} sats, {reserved_for_onramps} sats reserved for pending swaps)"
                 )),
             };
         }
@@ -136,7 +135,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 amount_withdrawn: Nat::from(0u64),
                 new_balance: current_balance,
                 block_index: None,
-                error: Some(format!("Insufficient balance: {:?}", e)),
+                error: Some(format!("Insufficient balance: {e:?}")),
             };
         }
     }
@@ -186,7 +185,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                     amount_withdrawn: Nat::from(0u64),
                     new_balance,
                     block_index: None,
-                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                    error: Some(format!("ckBTC transfer failed: {e:?}")),
                 }
             }
         },
@@ -201,7 +200,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 amount_withdrawn: Nat::from(0u64),
                 new_balance,
                 block_index: None,
-                error: Some(format!("Canister call failed: {}", e)),
+                error: Some(format!("Canister call failed: {e}")),
             }
         }
     }
