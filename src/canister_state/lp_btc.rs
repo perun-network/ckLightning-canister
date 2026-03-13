@@ -30,6 +30,100 @@ use std::str::FromStr;
 
 const REQUIRED_BTC_CONFIRMATIONS: u32 = 6;
 
+// =============================================================================
+// Shared Helpers
+// =============================================================================
+
+/// Parse and validate a Bitcoin address string against the current network.
+fn parse_btc_address(
+    address_str: &str,
+    network: bitcoin::Network,
+) -> Result<Address<bitcoin::address::NetworkChecked>, String> {
+    Address::from_str(address_str)
+        .map_err(|e| format!("Invalid address: {}", e))?
+        .require_network(network)
+        .map_err(|e| format!("Address network mismatch: {:?}", e))
+}
+
+/// Collect UTXOs, build, sign, and broadcast a multi-address BTC transaction.
+///
+/// Returns `(txid, tx_bytes)` on success.
+async fn build_sign_broadcast_multi_addr_tx(
+    ctx: &crate::BitcoinContext,
+    destination: &Address,
+    amount_sat: u64,
+    fee_margin: u64,
+) -> Result<(String, Vec<u8>), String> {
+    let (all_sourced_utxos, change_address) = collect_all_lp_sourced_utxos(ctx)
+        .await
+        .map_err(|e| format!("Failed to collect LP UTXOs: {:?}", e))?;
+
+    let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
+    if total_available < amount_sat.saturating_add(fee_margin) {
+        return Err(format!(
+            "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
+            total_available, amount_sat, fee_margin
+        ));
+    }
+
+    let fee_per_byte = get_fee_per_byte(ctx).await;
+
+    let (transaction, prevouts, selected_indices) =
+        p2wpkh::build_multi_address_transaction(
+            ctx, &all_sourced_utxos, &change_address,
+            destination, amount_sat, fee_per_byte,
+        ).await;
+
+    let signed_tx = p2wpkh::sign_multi_address_transaction(
+        ctx, &all_sourced_utxos, &selected_indices,
+        transaction, &prevouts, sign_with_ecdsa,
+    ).await;
+
+    let tx_bytes = serialize(&signed_tx);
+    let txid = signed_tx.compute_txid().to_string();
+
+    Ok((txid, tx_bytes))
+}
+
+/// Variant of the multi-address tx pipeline that does NOT broadcast,
+/// and returns the selected UTXO indices (for channel funding reservation).
+async fn build_sign_multi_addr_tx_no_broadcast(
+    ctx: &crate::BitcoinContext,
+    destination: &Address,
+    amount_sat: u64,
+    fee_margin: u64,
+) -> Result<(String, Vec<u8>, Vec<SourcedUtxo>, Vec<usize>), String> {
+    let (all_sourced_utxos, change_address) = collect_all_lp_sourced_utxos(ctx)
+        .await
+        .map_err(|e| format!("Failed to collect LP UTXOs: {:?}", e))?;
+
+    let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
+    if total_available < amount_sat.saturating_add(fee_margin) {
+        return Err(format!(
+            "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
+            total_available, amount_sat, fee_margin
+        ));
+    }
+
+    let fee_per_byte = get_fee_per_byte(ctx).await;
+
+    let (transaction, prevouts, selected_indices) =
+        p2wpkh::build_multi_address_transaction(
+            ctx, &all_sourced_utxos, &change_address,
+            destination, amount_sat, fee_per_byte,
+        ).await;
+
+    let signed_tx = p2wpkh::sign_multi_address_transaction(
+        ctx, &all_sourced_utxos, &selected_indices,
+        transaction, &prevouts, sign_with_ecdsa,
+    ).await;
+
+    let tx_bytes = serialize(&signed_tx);
+    let txid = signed_tx.compute_txid().to_string();
+
+    Ok((txid, tx_bytes, all_sourced_utxos, selected_indices))
+}
+
 /// Get the caller's per-user LP BTC deposit address
 ///
 /// Each LP depositor gets a unique address derived from their principal.
@@ -173,101 +267,68 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
 
     if request.destination_address.len() > 200 {
         return LpBtcWithdrawResponse {
-            success: false,
-            amount_withdrawn: Nat::from(0u64),
-            new_btc_balance: Nat::from(0u64),
-            txid: None,
+            success: false, amount_withdrawn: Nat::from(0u64),
+            new_btc_balance: Nat::from(0u64), txid: None,
             error: Some("Destination address too long (max 200 chars)".to_string()),
         };
     }
 
     if request.amount_sat == 0 {
         return LpBtcWithdrawResponse {
-            success: false,
-            amount_withdrawn: Nat::from(0u64),
-            new_btc_balance: Nat::from(0u64),
-            txid: None,
+            success: false, amount_withdrawn: Nat::from(0u64),
+            new_btc_balance: Nat::from(0u64), txid: None,
             error: Some("Amount must be greater than 0".to_string()),
         };
     }
 
+    let dst_address = match parse_btc_address(&request.destination_address, ctx.bitcoin_network) {
+        Ok(a) => a,
+        Err(e) => {
+            return LpBtcWithdrawResponse {
+                success: false, amount_withdrawn: Nat::from(0u64),
+                new_btc_balance: Nat::from(0u64), txid: None,
+                error: Some(e),
+            };
+        }
+    };
+
     let amount_nat = Nat::from(request.amount_sat);
 
-    // Deduct from LP balance
+    // Deduct from LP balance (restored on failure below)
     {
         let mut state = STATE.write().expect("STATE lock: withdraw_btc write");
-
         if let Err(e) = state.liq_pool.withdraw(caller, PoolAsset::BTC, amount_nat.clone()) {
             let current_balance = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
             return LpBtcWithdrawResponse {
-                success: false,
-                amount_withdrawn: Nat::from(0u64),
-                new_btc_balance: current_balance,
-                txid: None,
+                success: false, amount_withdrawn: Nat::from(0u64),
+                new_btc_balance: current_balance, txid: None,
                 error: Some(format!("Insufficient BTC balance: {:?}", e)),
             };
         }
     }
 
-    // Parse destination address
-    let dst_address = match Address::from_str(&request.destination_address) {
-        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
-            Ok(a) => a,
-            Err(e) => {
-                // Restore LP balance
-                let mut state = STATE.write().expect("STATE lock: withdraw_btc restore");
-                state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
-                let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
-                return LpBtcWithdrawResponse {
-                    success: false, amount_withdrawn: Nat::from(0u64),
-                    new_btc_balance: bal, txid: None,
-                    error: Some(format!("Address network mismatch: {:?}", e)),
-                };
-            }
-        },
-        Err(e) => {
-            let mut state = STATE.write().expect("STATE lock: withdraw_btc restore 2");
-            state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
-            let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
-            return LpBtcWithdrawResponse {
-                success: false, amount_withdrawn: Nat::from(0u64),
-                new_btc_balance: bal, txid: None,
-                error: Some(format!("Invalid destination address: {}", e)),
-            };
+    // Helper closure to restore LP balance on failure
+    let restore_and_fail = |err: String| -> LpBtcWithdrawResponse {
+        let mut state = STATE.write().expect("STATE lock: withdraw_btc restore");
+        state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
+        let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
+        LpBtcWithdrawResponse {
+            success: false, amount_withdrawn: Nat::from(0u64),
+            new_btc_balance: bal, txid: None, error: Some(err),
         }
     };
 
-    // Collect UTXOs from all LP addresses
-    let (all_sourced_utxos, change_address) = match collect_all_lp_sourced_utxos(&ctx).await {
+    // Build, sign, and broadcast
+    let (txid, tx_bytes) = match build_sign_broadcast_multi_addr_tx(
+        &ctx, &dst_address, request.amount_sat, 0,
+    ).await {
         Ok(result) => result,
-        Err(e) => {
-            let mut state = STATE.write().expect("STATE lock: withdraw_btc restore 3");
-            state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
-            let bal = state.liq_pool.get_balance(&caller, &PoolAsset::BTC);
-            return LpBtcWithdrawResponse {
-                success: false, amount_withdrawn: Nat::from(0u64),
-                new_btc_balance: bal, txid: None,
-                error: Some(format!("Failed to collect LP UTXOs: {:?}", e)),
-            };
-        }
+        Err(e) => return restore_and_fail(e),
     };
-
-    let fee_per_byte = get_fee_per_byte(&ctx).await;
-
-    let (transaction, prevouts, selected_indices) =
-        p2wpkh::build_multi_address_transaction(
-            &ctx, &all_sourced_utxos, &change_address,
-            &dst_address, request.amount_sat, fee_per_byte,
-        ).await;
-
-    let signed_tx = p2wpkh::sign_multi_address_transaction(
-        &ctx, &all_sourced_utxos, &selected_indices,
-        transaction, &prevouts, sign_with_ecdsa,
-    ).await;
 
     match bitcoin_send_transaction(&SendTransactionRequest {
         network: ctx.network,
-        transaction: serialize(&signed_tx),
+        transaction: tx_bytes,
     }).await {
         Ok(_) => {
             let new_btc_balance = {
@@ -275,31 +336,11 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
                 state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
             };
             LpBtcWithdrawResponse {
-                success: true,
-                amount_withdrawn: amount_nat,
-                new_btc_balance,
-                txid: Some(signed_tx.compute_txid().to_string()),
-                error: None,
+                success: true, amount_withdrawn: amount_nat,
+                new_btc_balance, txid: Some(txid), error: None,
             }
         }
-        Err(e) => {
-            // Restore LP balance on broadcast failure
-            {
-                let mut state = STATE.write().expect("STATE lock: withdraw_btc write 2");
-                state.liq_pool.deposit(caller, PoolAsset::BTC, amount_nat.clone());
-            }
-            let new_btc_balance = {
-                let state = STATE.read().expect("STATE lock: withdraw_btc read 2");
-                state.liq_pool.get_balance(&caller, &PoolAsset::BTC)
-            };
-            LpBtcWithdrawResponse {
-                success: false,
-                amount_withdrawn: Nat::from(0u64),
-                new_btc_balance,
-                txid: None,
-                error: Some(format!("BTC send failed: {:?}", e)),
-            }
-        }
+        Err(e) => restore_and_fail(format!("BTC send failed: {:?}", e)),
     }
 }
 
@@ -390,22 +431,11 @@ pub async fn send_btc_from_depositor_address_impl(
     }
 
     // Parse and validate destination address
-    let dst_address = match Address::from_str(&request.destination_address) {
-        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
-            Ok(a) => a,
-            Err(e) => {
-                return SendFromDepositorResponse {
-                    success: false,
-                    txid: None,
-                    error: Some(format!("Address network mismatch: {:?}", e)),
-                };
-            }
-        },
+    let dst_address = match parse_btc_address(&request.destination_address, ctx.bitcoin_network) {
+        Ok(a) => a,
         Err(e) => {
             return SendFromDepositorResponse {
-                success: false,
-                txid: None,
-                error: Some(format!("Invalid destination address: {}", e)),
+                success: false, txid: None, error: Some(e),
             };
         }
     };
@@ -626,9 +656,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
 
     if request.amount_sat == 0 {
         return FundChannelResponse {
-            success: false,
-            signed_tx: None,
-            txid: None,
+            success: false, signed_tx: None, txid: None,
             error: Some("Amount must be greater than 0".to_string()),
         };
     }
@@ -638,91 +666,34 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
         let state = STATE.read().expect("STATE lock: fund_channel read");
         if state.funded_channels.contains(&request.funding_address) {
             return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
+                success: false, signed_tx: None, txid: None,
                 error: Some("Channel already funded for this address".to_string()),
             };
         }
     }
 
-    // Parse and validate funding address
-    let funding_address = match Address::from_str(&request.funding_address) {
-        Ok(addr) => match addr.require_network(ctx.bitcoin_network) {
-            Ok(a) => a,
+    let funding_address = match parse_btc_address(&request.funding_address, ctx.bitcoin_network) {
+        Ok(a) => a,
+        Err(e) => {
+            return FundChannelResponse {
+                success: false, signed_tx: None, txid: None, error: Some(e),
+            };
+        }
+    };
+
+    // Build and sign (without broadcast — relay passes to LDK)
+    let fee_margin = 5000u64;
+    let (txid, tx_bytes, all_sourced_utxos, selected_indices) =
+        match build_sign_multi_addr_tx_no_broadcast(
+            &ctx, &funding_address, request.amount_sat, fee_margin,
+        ).await {
+            Ok(result) => result,
             Err(e) => {
                 return FundChannelResponse {
-                    success: false,
-                    signed_tx: None,
-                    txid: None,
-                    error: Some(format!("Funding address network mismatch: {:?}", e)),
+                    success: false, signed_tx: None, txid: None, error: Some(e),
                 };
             }
-        },
-        Err(e) => {
-            return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Invalid funding address: {}", e)),
-            };
-        }
-    };
-
-    // Collect UTXOs from all LP addresses (shared + all per-user depositor addresses)
-    let (all_sourced_utxos, change_address) = match collect_all_lp_sourced_utxos(&ctx).await {
-        Ok(result) => result,
-        Err(e) => {
-            return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Failed to collect LP UTXOs: {:?}", e)),
-            };
-        }
-    };
-
-    let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
-    let fee_margin = 5000u64;
-    if total_available < request.amount_sat.saturating_add(fee_margin) {
-        return FundChannelResponse {
-            success: false,
-            signed_tx: None,
-            txid: None,
-            error: Some(format!(
-                "Insufficient BTC across all LP addresses: available {} sats, requested {} sats (+ ~{} fees)",
-                total_available, request.amount_sat, fee_margin
-            )),
         };
-    }
-
-    let fee_per_byte = get_fee_per_byte(&ctx).await;
-
-    // Build multi-address transaction (inputs from different depositor addresses)
-    let (transaction, prevouts, selected_indices) =
-        p2wpkh::build_multi_address_transaction(
-            &ctx,
-            &all_sourced_utxos,
-            &change_address,
-            &funding_address,
-            request.amount_sat,
-            fee_per_byte,
-        )
-        .await;
-
-    // Sign with real ECDSA — each input signed with its own derivation path
-    let signed_tx = p2wpkh::sign_multi_address_transaction(
-        &ctx,
-        &all_sourced_utxos,
-        &selected_indices,
-        transaction,
-        &prevouts,
-        sign_with_ecdsa,
-    )
-    .await;
-
-    let tx_bytes = serialize(&signed_tx);
-    let txid = signed_tx.compute_txid().to_string();
 
     // Track the funding in canister state (atomically with idempotency guard)
     // Two-phase model: create reservation only. LP deduction happens in channel_funded.
@@ -731,9 +702,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
         let mut state = STATE.write().expect("STATE lock: fund_channel write");
         if !state.funded_channels.insert(request.funding_address.clone()) {
             return FundChannelResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
+                success: false, signed_tx: None, txid: None,
                 error: Some("Channel already funded for this address".to_string()),
             };
         }
