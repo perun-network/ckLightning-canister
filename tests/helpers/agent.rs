@@ -20,8 +20,8 @@ use super::id::{
 pub use candid::{Deserialize, Nat, types::Serializer};
 use cklightning::error::{BtcError, CklError, ResultBtc};
 use cklightning::ic_types::{
-    BtcAddressType, Funding, FundingLPArgs, FundingLPQuery, FundingLPQueryArgs, GetBtcAddressArgs,
-    GetBtcBalancesResponse, HoldingsResponse, PoolWithdrawal, SendFromP2pkhAddressArgs,
+    BtcAddressType, FundingLPArgs, FundingLPQuery, FundingLPQueryArgs, GetBtcAddressArgs,
+    GetBtcBalancesResponse, HoldingsResponse, PoolFunding, PoolWithdrawal, SendFromP2pkhAddressArgs,
     SetBtcAddressArgs, SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use cklightning::ic_types::{LnInvoiceRequest, SignedCandidInvoice};
@@ -232,7 +232,7 @@ impl ICAgent {
 
     pub async fn deposit(
         &self,
-        funding: Funding,
+        pool_funding: PoolFunding,
         signed_funding: Vec<u8>,
     ) -> Result<String, CklError> {
         let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID)
@@ -242,11 +242,6 @@ impl ICAgent {
             .fetch_root_key()
             .await
             .map_err(|e| CklError::Other(format!("Failed to fetch root key: {e}")))?;
-
-        let pool_funding = match &funding {
-            Funding::Pool(pf) => pf.clone(),
-            _ => return Err(CklError::Other("Expected Pool funding".to_string())),
-        };
 
         let funding_lp_args = FundingLPArgs {
             pool_funding: pool_funding.clone(),
@@ -441,7 +436,7 @@ impl ICAgent {
 
     pub async fn transaction_notification(
         &self,
-        funding: Funding,
+        funding: PoolFunding,
         block: u64,
         amount: u64,
     ) -> Result<Result<TransactionICRCNotification, ICPReceiverError>, Box<dyn std::error::Error>>
@@ -708,10 +703,8 @@ pub struct TransferIcrc1 {
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]
-/// Identifies the funds belonging to a certain layer 2 identity within a
-/// certain channel.
 pub struct NotifyArgs {
     pub block_height: u64,
     pub amount: u64,
-    pub funding: Funding,
+    pub funding: PoolFunding,
 }

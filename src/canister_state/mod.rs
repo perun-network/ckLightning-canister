@@ -51,9 +51,9 @@ use crate::htlc::HtlcManager;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
-    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, ChannelId, DEVNET_CKBTC_LEDGER,
-    Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
-    HoldingsResponse, NotifyArgs, PoolWithdrawal, SetBtcAddressArgs,
+    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, DEVNET_CKBTC_LEDGER,
+    FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
+    HoldingsResponse, NotifyArgs, PoolFunding, PoolWithdrawal, SetBtcAddressArgs,
     SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use crate::ic_types::{
@@ -530,7 +530,7 @@ pub fn deposit_lp_impl(
 
     let pool_funding = funding.pool_funding;
 
-    state.deposit_icrc(blocktime(), Funding::Pool(pool_funding), signature_bytes)
+    state.deposit_icrc(blocktime(), pool_funding, signature_bytes)
 }
 
 impl<Q> CanisterState<Q>
@@ -663,21 +663,11 @@ where
         }
     }
 
-    // Correct usage:
-    pub fn withdraw_channel(&mut self, _funding: Funding, _amount: Amount) -> ResultCkl<()> {
-        // TODO: withdrawal logic as part of the L2 Lightning protocol
-
-        Ok(())
-    }
-
     pub fn deposit_liq_pool(
         &mut self,
         amount: Amount,
         asset: PoolAsset,
         depositor: L1Account,
-        _pubkey_bytes: Vec<u8>,
-        _funding: &Funding,
-        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         // Extract Principal from L1Account and use simplified LP deposit
         let depositor_principal = depositor.0;
@@ -687,25 +677,17 @@ where
     pub fn deposit_icrc(
         &mut self,
         _time: Timestamp,
-        funding: Funding,
-        signature_bytes: &[u8],
+        funding: PoolFunding,
+        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         let memo = funding.memo();
         // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
 
-        let depositor = funding.get_depositor().ok_or(CklError::InvalidInput)?.clone();
-        let pool_asset = funding.get_asset().ok_or(CklError::InvalidInput)?.clone();
-        let pubkey = funding.get_pubkey().ok_or(CklError::InvalidInput)?.clone();
+        let depositor = funding.get_depositor().clone();
+        let pool_asset = funding.get_asset().clone();
 
-        self.deposit_liq_pool(
-            amount,
-            pool_asset,
-            depositor,
-            pubkey,
-            &funding,
-            signature_bytes,
-        )?;
+        self.deposit_liq_pool(amount, pool_asset, depositor)?;
         Ok(())
     }
 
@@ -714,7 +696,7 @@ where
         &mut self,
         tx: receiver::BlockHeight,
         amount: u64,
-        funding: Funding,
+        funding: PoolFunding,
     ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
         self.icrc_receiver.verify_icrc(tx, amount, funding).await
     }
@@ -799,8 +781,6 @@ where
             lp_btc_address: self.lp_btc_address.clone(),
             pending_btc_deposits,
             processed_utxos,
-            user_holdings: Vec::new(),  // Legacy Perun field, kept for upgrade compatibility
-            channels: Vec::new(),       // Legacy Perun field, kept for upgrade compatibility
             liq_pool: self.liq_pool.clone(),
             swaps,
             ln_channels,
@@ -859,7 +839,6 @@ where
         self.pending_btc_deposits = snap.pending_btc_deposits.into_iter().collect();
         self.processed_utxos = snap.processed_utxos.into_iter()
             .map(|(txid, vout, p)| ((txid, vout), p)).collect();
-        // snap.user_holdings and snap.channels are legacy Perun fields (ignored)
         self.liq_pool = snap.liq_pool;
         self.swaps = snap.swaps.into_iter().collect();
         self.ln_channels = snap.ln_channels.into_iter().collect();
@@ -915,11 +894,6 @@ pub struct CanisterStateSnapshot {
     pub pending_btc_deposits: Vec<([u8; 32], PendingBtcDeposit)>,
     /// Flattened from HashMap<(Vec<u8>, u32), Principal>
     pub processed_utxos: Vec<(Vec<u8>, u32, Principal)>,
-    /// Legacy Perun fields — kept for upgrade deserialization compatibility, always empty.
-    #[serde(default)]
-    pub user_holdings: Vec<(Funding, Amount)>,
-    #[serde(default)]
-    pub channels: Vec<(ChannelId, candid::Reserved)>,
     pub liq_pool: LiquidityPool,
     pub swaps: Vec<([u8; 32], SwapInfo)>,
     pub ln_channels: Vec<([u8; 32], LnChannelInfo)>,

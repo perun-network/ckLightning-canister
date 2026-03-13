@@ -19,7 +19,7 @@ pub use candid::{
     types::{Serializer, Type, TypeInner, TypeInner::Nat8},
 };
 use cklightning::ic_types::{
-    Funding, FundingLPQuery, L1Account, PoolAsset, PoolFunding, PoolWithdrawal,
+    FundingLPQuery, L1Account, PoolAsset, PoolFunding, PoolWithdrawal,
 };
 use cklightning::receiver::icrc3value_map_to_transaction;
 use ic_agent::AgentError;
@@ -184,8 +184,7 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
         timestamp: 0,
     };
 
-    let funding = Funding::Pool(funding_pool.clone());
-    let memo_transfer_bytes = funding.memo().0.to_vec();
+    let memo_transfer_bytes = funding_pool.memo().0.to_vec();
 
     println!("\nMemo for transfer: {memo_transfer_bytes:?}");
 
@@ -251,18 +250,18 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
     let blocku64 = block.0.to_u64_digits()[0];
 
     client
-        .transaction_notification(funding.clone(), blocku64, amount_u64)
+        .transaction_notification(funding_pool.clone(), blocku64, amount_u64)
         .await
         .map(|amount| println!("Notification Result OK: {amount:?}"))
         .map_err(|e| AgentError::MessageError(format!("Notification error: {e}")))?;
 
-    let funding_deserialized = Encode!(&funding.clone()).unwrap();
+    let funding_deserialized = Encode!(&funding_pool.clone()).unwrap();
     let funding_hash = Sha256::digest(&funding_deserialized);
 
     let signed_funding = client.signer.sign_arbitrary(&funding_hash);
     let res_sig = signed_funding.clone().unwrap();
     let sig_bytes = res_sig.signature.unwrap();
-    let resp_contract_deposit = client.deposit(funding.clone(), sig_bytes).await;
+    let resp_contract_deposit = client.deposit(funding_pool.clone(), sig_bytes).await;
 
     println!("\nDeposit Response: {resp_contract_deposit:?}");
 

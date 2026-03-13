@@ -10,7 +10,6 @@ type BtcPurpose = variant {
   LiquidityPoolShared;
   LiquidityPoolUser : principal;
 };
-type ChannelFunding = record { participant : blob; channel : blob };
 type ChannelSecretsInfo = record {
   channel_id : blob;
   has_secrets : bool;
@@ -107,7 +106,6 @@ type FundChannelResponse = record {
   error : opt text;
   success : bool;
 };
-type Funding = variant { Pool : PoolFunding; Channel : ChannelFunding };
 type FundingLPArgs = record { signature : blob; pool_funding : PoolFunding };
 type FundingLPQuery = record {
   asset : PoolAsset;
@@ -275,7 +273,7 @@ type Network = variant { mainnet; regtest; testnet };
 type NotifyArgs = record {
   amount : nat64;
   block_height : nat64;
-  funding : Funding;
+  funding : PoolFunding;
 };
 type OfframpRequest = record {
   fallback_btc_address : opt text;

@@ -15,22 +15,6 @@ pub enum PoolAsset {
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
-pub enum Funding {
-    Channel(ChannelFunding),
-    Pool(PoolFunding),
-}
-
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
-/// Identifies the funds belonging to a certain layer 2 identity within a
-/// certain channel.
-pub struct ChannelFunding {
-    /// The channel's unique identifier.
-    pub channel: ChannelId,
-    /// The funds' owner's layer-2 identity within the channel.
-    pub participant: L2Account,
-}
-
-#[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash, Debug)]
 pub struct PoolFunding {
     pub pubkey_l1: Vec<u8>,
     /// The layer-1 identity to send the funds to.
@@ -39,68 +23,37 @@ pub struct PoolFunding {
     pub asset: PoolAsset,
 }
 
-impl Funding {
-    pub fn get_depositor(&self) -> Option<&L1Account> {
-        match self {
-            Funding::Pool(p) => Some(&p.depositor),
-            _ => None,
-        }
+impl PoolFunding {
+    pub fn get_depositor(&self) -> &L1Account {
+        &self.depositor
     }
 
-    pub fn get_asset(&self) -> Option<&PoolAsset> {
-        match self {
-            Funding::Pool(p) => Some(&p.asset),
-            _ => None,
-        }
+    pub fn get_asset(&self) -> &PoolAsset {
+        &self.asset
     }
 
-    pub fn get_pubkey(&self) -> Option<&Vec<u8>> {
-        match self {
-            Funding::Pool(p) => Some(&p.pubkey_l1),
-            _ => None,
-        }
+    pub fn get_pubkey(&self) -> &Vec<u8> {
+        &self.pubkey_l1
     }
 
-    pub fn new_channel(channel: ChannelId, participant: L2Account) -> Self {
-        Funding::Channel(ChannelFunding {
-            channel,
-            participant,
-        })
-    }
-
-    pub fn new_pool(pubkey_l1: Vec<u8>, depositor: L1Account, ts: u64, asset: PoolAsset) -> Self {
-        Funding::Pool(PoolFunding {
+    pub fn new(pubkey_l1: Vec<u8>, depositor: L1Account, ts: u64, asset: PoolAsset) -> Self {
+        PoolFunding {
             pubkey_l1,
             depositor,
             timestamp: ts,
             asset,
-        })
+        }
     }
 
     pub fn memo(&self) -> Memo {
-        match self {
-            Funding::Channel(c) => {
-                use k256::elliptic_curve::sec1::ToEncodedPoint;
-                let mut data = Vec::new();
-                data.extend_from_slice(&c.channel.0);
-                data.extend_from_slice(c.participant.0.to_encoded_point(false).as_bytes());
-                let h = Hash::digest(&data);
-                let arr: [u8; 8] = [
-                    h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
-                ];
-                Memo::from(arr.to_vec())
-            }
-            Funding::Pool(p) => {
-                let mut data = Vec::new();
-                data.extend_from_slice(p.depositor.0.as_ref());
-                data.extend_from_slice(&p.pubkey_l1);
-                let h = Hash::digest(&data);
-                let arr: [u8; 8] = [
-                    h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
-                ];
-                Memo::from(arr.to_vec())
-            }
-        }
+        let mut data = Vec::new();
+        data.extend_from_slice(self.depositor.0.as_ref());
+        data.extend_from_slice(&self.pubkey_l1);
+        let h = Hash::digest(&data);
+        let arr: [u8; 8] = [
+            h.0[0], h.0[1], h.0[2], h.0[3], h.0[4], h.0[5], h.0[6], h.0[7],
+        ];
+        Memo::from(arr.to_vec())
     }
 }
 
@@ -108,7 +61,7 @@ impl Funding {
 pub struct NotifyArgs {
     pub block_height: u64,
     pub amount: u64,
-    pub funding: Funding,
+    pub funding: PoolFunding,
 }
 
 #[derive(PartialEq, Clone, Deserialize, Eq, CandidType, Hash)]

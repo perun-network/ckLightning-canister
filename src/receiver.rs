@@ -11,7 +11,7 @@
 //  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
-use crate::ic_types::{Amount, CKBTC_LEDGER_PRINCIPAL, Funding, ICP_LEDGER_PRINCIPAL};
+use crate::ic_types::{Amount, PoolFunding};
 use async_trait::async_trait;
 pub use candid::{
     CandidType, Deserialize, Int, Nat, Principal,
@@ -22,7 +22,6 @@ use ic_ledger_types::BlockIndex;
 use ic_ledger_types::{AccountIdentifier, DEFAULT_SUBACCOUNT};
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
 use icrc_ledger_types::icrc1::transfer::Memo;
-use icrc_ledger_types::icrc3::transactions::Transaction as ICRCTransaction;
 use num_traits::cast::ToPrimitive;
 
 use icrc_ledger_types;
@@ -128,7 +127,6 @@ pub trait TXQuerier {
 
 /// Real ICP transaction querier using inter-canister calls to the ICP ledger.
 pub struct CanisterTXQuerier {
-    #[allow(dead_code)] // read in TXQuerier trait impl; clippy can't trace it
     ledger: Principal,
 }
 
@@ -169,18 +167,6 @@ impl CanisterTXQuerier {
         Self { ledger }
     }
 
-    /// Constructs a new canister TX querier targeting the mainnet ICP ledger canister.
-    pub fn for_mainnet() -> Self {
-        Self {
-            ledger: *ICP_LEDGER_PRINCIPAL,
-        }
-    }
-    pub fn for_ckbtc_devnet() -> Self {
-        Self {
-            ledger: *CKBTC_LEDGER_PRINCIPAL,
-        }
-    }
-
     async fn get_blocks_from_ic_ledger(&self, block_height: BlockIndex) -> Option<BlockWithId> {
         use candid::Nat;
         use num_traits::cast::ToPrimitive;
@@ -190,10 +176,8 @@ impl CanisterTXQuerier {
             length: Nat::from(2000u64),
         }];
 
-        let ledger_id = *CKBTC_LEDGER_PRINCIPAL;
-
         let call_result: Result<(GetBlocksResult,), _> =
-            Call::unbounded_wait(ledger_id, "icrc3_get_blocks")
+            Call::unbounded_wait(self.ledger, "icrc3_get_blocks")
                 .with_args(&(args.clone(),))
                 .await
                 .map_err(ic_cdk::call::Error::from)
@@ -270,7 +254,7 @@ where
         &mut self,
         block_height: BlockHeight,
         amount: u64,
-        funding: Funding,
+        funding: PoolFunding,
     ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
         if self.known_txs.contains(&block_height) {
             return Err(ICPReceiverError::DuplicateTransaction);
@@ -318,46 +302,7 @@ pub struct TransactionICRCNotification {
     pub timestamp: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
-pub struct TransactionNotification {
-    pub to: AccountIdentifier,
-    pub amount: u64,
-    pub memo: Memo,
-}
-
 impl TransactionICRCNotification {
-    /// Creates a transaction notification from an ICP ledger transaction. If the transaction is neither a transfer nor a mint, returns nothing.
-    pub fn from_icrc_tx(tx: ICRCTransaction) -> Option<Self> {
-        // Get the inner Transfer struct, if it exists
-        let transfer = tx.transfer.as_ref()?;
-
-        // Derive the AccountIdentifier from `transfer.to`
-
-        let to_identifier = AccountIdentifier::new(&transfer.to.owner, &DEFAULT_SUBACCOUNT);
-        let from_identifier = AccountIdentifier::new(&transfer.from.owner, &DEFAULT_SUBACCOUNT);
-
-        // Convert Nat to u64 (if possible)
-        let amount = transfer.amount.0.to_u64().unwrap_or(0);
-
-        // Get the Memo, if present — return None if no memo
-        let memo = transfer.memo.clone()?;
-
-        Some(Self {
-            to: to_identifier,
-            from: from_identifier,
-            amount,
-            memo,
-            timestamp: None,
-        })
-    }
-
-    /// Returns the transaction's amount.
-    pub fn get_amount(&self) -> Amount {
-        self.amount.into()
-    }
-}
-
-impl TransactionNotification {
     /// Returns the transaction's amount.
     pub fn get_amount(&self) -> Amount {
         self.amount.into()
