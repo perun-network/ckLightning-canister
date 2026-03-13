@@ -32,89 +32,70 @@ use std::str::FromStr;
 // Swap Timeout Handling
 // =============================================================================
 
-/// Check for expired swap requests and handle them appropriately.
-///
-/// - Onramp: Mark as Expired, DO NOT refund ICP fee (anti-DDoS)
-/// - Offramp: Mark as Expired, refund ckBTC to user (not LP!)
-///
-/// This function is called periodically by the heartbeat.
-pub async fn check_expired_swaps_impl() {
-    let now = blocktime();
-
-    // Get timeout values (use test overrides if set)
-    let (onramp_timeout, offramp_timeout) = {
-        let state = STATE.read().expect("STATE lock: check_expired_swaps read");
-        (
-            state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
-            state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
-        )
-    };
-
-    // First, collect expired onramp request IDs (only check active ones)
-    let expired_onramp_ids: Vec<String> = {
-        let state = STATE.read().expect("STATE lock: check_expired_swaps read onramps");
+/// Expire onramp requests that have timed out.
+/// Marks them as Expired and releases reserved ckBTC. ICP fee is NOT refunded.
+fn expire_onramp_requests(now: u64, timeout: u64) {
+    let expired_ids: Vec<String> = {
+        let state = STATE.read().expect("STATE lock: expire_onramp read");
         state.active_onramp_ids.iter()
             .filter(|id| {
                 state.onramp_requests.get(*id).map_or(false, |req| {
                     matches!(req.state, OnrampRequestState::Pending | OnrampRequestState::Ready)
-                        && now > req.created_at + onramp_timeout
+                        && now > req.created_at + timeout
                 })
             })
             .cloned()
             .collect()
     };
 
-    // Mark expired onramp requests AND their corresponding SwapInfo entries
-    if !expired_onramp_ids.is_empty() {
-        let mut state = STATE.write().expect("STATE lock: check_expired_swaps write onramps");
+    if expired_ids.is_empty() {
+        return;
+    }
 
-        // First pass: collect payment hashes and amounts (read-only)
-        let mut swap_hashes_to_expire: Vec<[u8; 32]> = Vec::new();
-        let mut total_reserved_to_release: u64 = 0;
-        for id in &expired_onramp_ids {
-            if let Some(req) = state.onramp_requests.get(id) {
-                if let Some(ref ph) = req.payment_hash {
-                    if ph.len() == 32 {
-                        let mut hash_arr = [0u8; 32];
-                        hash_arr.copy_from_slice(ph);
-                        swap_hashes_to_expire.push(hash_arr);
-                    }
-                }
-                total_reserved_to_release += req.amount_sats;
-            }
-        }
+    let mut state = STATE.write().expect("STATE lock: expire_onramp write");
 
-        // Second pass: mutate state
-        state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_sub(total_reserved_to_release);
-        for id in &expired_onramp_ids {
-            if let Some(req) = state.onramp_requests.get_mut(id) {
-                req.state = OnrampRequestState::Expired;
-                ic_cdk::println!("Onramp request {} expired (ICP fee not refunded)", id);
-            }
-            state.active_onramp_ids.remove(id);
-        }
-
-        // Now expire the corresponding SwapInfo entries
-        for hash_arr in swap_hashes_to_expire {
-            if let Some(swap) = state.swaps.get_mut(&hash_arr) {
-                if matches!(swap.state, crate::ic_types::SwapState::Pending) {
-                    swap.state = crate::ic_types::SwapState::Expired;
+    // Collect payment hashes and reserved amounts
+    let mut swap_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut total_reserved: u64 = 0;
+    for id in &expired_ids {
+        if let Some(req) = state.onramp_requests.get(id) {
+            if let Some(ref ph) = req.payment_hash {
+                if let Ok(arr) = <[u8; 32]>::try_from(ph.as_slice()) {
+                    swap_hashes.push(arr);
                 }
             }
+            total_reserved += req.amount_sats;
         }
     }
 
-    // Collect expired offramp requests that need refunds (only check active ones)
-    let expired_offramp_requests: Vec<(String, Principal, u64)> = {
-        let state = STATE.read().expect("STATE lock: check_expired_swaps read offramps");
+    // Update state
+    state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_sub(total_reserved);
+    for id in &expired_ids {
+        if let Some(req) = state.onramp_requests.get_mut(id) {
+            req.state = OnrampRequestState::Expired;
+            ic_cdk::println!("Onramp request {} expired (ICP fee not refunded)", id);
+        }
+        state.active_onramp_ids.remove(id);
+    }
+    for hash in swap_hashes {
+        if let Some(swap) = state.swaps.get_mut(&hash) {
+            if matches!(swap.state, SwapState::Pending) {
+                swap.state = SwapState::Expired;
+            }
+        }
+    }
+}
+
+/// Expire offramp requests that have timed out and refund ckBTC to users.
+/// Only expires Pending requests — NEVER PaymentInProgress (would cause double-spend).
+async fn expire_offramp_requests(now: u64, timeout: u64) {
+    let expired: Vec<(String, Principal, u64)> = {
+        let state = STATE.read().expect("STATE lock: expire_offramp read");
         state.active_offramp_ids.iter()
             .filter_map(|id| {
                 state.offramp_requests.get(id).and_then(|req| {
-                    // Only expire Pending requests — NEVER expire PaymentInProgress.
-                    // If the relay is actively paying an invoice, expiring it would cause
-                    // the user to get both a ckBTC refund AND the BTC Lightning payment.
                     if matches!(req.state, OfframpRequestState::Pending)
-                        && now > req.created_at + offramp_timeout
+                        && now > req.created_at + timeout
                     {
                         Some((id.clone(), req.user, req.ckbtc_collected))
                     } else {
@@ -125,13 +106,11 @@ pub async fn check_expired_swaps_impl() {
             .collect()
     };
 
-    // Process offramp expirations one at a time (each requires async refund)
-    for (request_id, user, ckbtc_collected) in expired_offramp_requests {
-        // Mark as expired first
+    for (request_id, user, ckbtc_collected) in expired {
+        // Mark as expired first, double-check state
         {
-            let mut state = STATE.write().expect("STATE lock: check_expired_swaps write offramps");
+            let mut state = STATE.write().expect("STATE lock: expire_offramp write");
             if let Some(req) = state.offramp_requests.get_mut(&request_id) {
-                // Double-check state hasn't changed
                 if !matches!(req.state, OfframpRequestState::Pending) {
                     continue;
                 }
@@ -142,14 +121,9 @@ pub async fn check_expired_swaps_impl() {
         }
 
         // Refund ckBTC to user (not to LP!)
-        let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
-
         let transfer_args = icrc_ledger_types::icrc1::transfer::TransferArg {
             from_subaccount: None,
-            to: icrc_ledger_types::icrc1::account::Account {
-                owner: user,
-                subaccount: None,
-            },
+            to: icrc_ledger_types::icrc1::account::Account { owner: user, subaccount: None },
             amount: candid::Nat::from(ckbtc_collected),
             fee: None,
             memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_expire_refund".to_vec())),
@@ -158,41 +132,47 @@ pub async fn check_expired_swaps_impl() {
 
         let call_result: CallResult<(
             Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-        )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_args,)).await;
+        )> = ic_cdk::call(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer", (transfer_args,)).await;
 
         match call_result {
-            Ok((inner_result,)) => match inner_result {
-                Ok(block_index) => {
-                    let mut state = STATE.write().expect("STATE lock: check_expired_swaps write refund");
-                    if let Some(req) = state.offramp_requests.get_mut(&request_id) {
-                        req.state = OfframpRequestState::Expired {
-                            refund_block_index: Some(block_index.clone()),
-                        };
-                        ic_cdk::println!(
-                            "Offramp {} ckBTC refunded to user, block_index: {}",
-                            request_id,
-                            block_index
-                        );
-                    }
+            Ok((Ok(block_index),)) => {
+                let mut state = STATE.write().expect("STATE lock: expire_offramp refund");
+                if let Some(req) = state.offramp_requests.get_mut(&request_id) {
+                    req.state = OfframpRequestState::Expired {
+                        refund_block_index: Some(block_index.clone()),
+                    };
                 }
-                Err(err) => {
-                    ic_cdk::println!(
-                        "Failed to refund ckBTC for expired offramp {}: {:?}",
-                        request_id,
-                        err
-                    );
-                }
-            },
+                ic_cdk::println!("Offramp {} ckBTC refunded to user, block_index: {}", request_id, block_index);
+            }
+            Ok((Err(err),)) => {
+                ic_cdk::println!("Failed to refund ckBTC for expired offramp {}: {:?}", request_id, err);
+            }
             Err((code, msg)) => {
-                ic_cdk::println!(
-                    "ckBTC refund call failed for offramp {}: {:?} - {}",
-                    request_id,
-                    code,
-                    msg
-                );
+                ic_cdk::println!("ckBTC refund call failed for offramp {}: {:?} - {}", request_id, code, msg);
             }
         }
     }
+}
+
+/// Check for expired swap requests and handle them appropriately.
+///
+/// - Onramp: Mark as Expired, DO NOT refund ICP fee (anti-DDoS)
+/// - Offramp: Mark as Expired, refund ckBTC to user (not LP!)
+///
+/// This function is called periodically by the heartbeat.
+pub async fn check_expired_swaps_impl() {
+    let now = blocktime();
+
+    let (onramp_timeout, offramp_timeout) = {
+        let state = STATE.read().expect("STATE lock: check_expired_swaps read");
+        (
+            state.test_onramp_timeout_ns.unwrap_or(ONRAMP_TIMEOUT_NS),
+            state.test_offramp_timeout_ns.unwrap_or(OFFRAMP_TIMEOUT_NS),
+        )
+    };
+
+    expire_onramp_requests(now, onramp_timeout);
+    expire_offramp_requests(now, offramp_timeout).await;
 }
 
 /// Get count of expired swaps for monitoring
@@ -382,72 +362,47 @@ pub(super) fn verify_invoice_node_pubkey(invoice_str: &str) -> Result<(), String
 // Rate Limiting Functions
 // =============================================================================
 
-/// Check if a principal is rate limited for onramp requests.
-/// Returns Ok(()) if allowed, Err(message) if rate limited.
-/// Also increments the request count if allowed.
-pub(super) fn check_onramp_rate_limit(caller: Principal) -> Result<(), String> {
+/// Generic rate limit check: looks up `caller` in `limits`, enforces `max_requests`
+/// per window, and returns Ok(()) or an error message.
+fn check_rate_limit(
+    limits: &mut std::collections::HashMap<Principal, RateLimitInfo>,
+    caller: Principal,
+    max_requests: u32,
+    label: &str,
+) -> Result<(), String> {
     let now = blocktime();
-    let mut state = STATE.write().expect("STATE lock: extract_node_pubkey_from_invoice write");
 
-    if let Some(info) = state.onramp_rate_limits.get_mut(&caller) {
-        // Check if window has expired
+    if let Some(info) = limits.get_mut(&caller) {
         if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
-            // Reset window
             info.window_start = now;
             info.request_count = 1;
             Ok(())
-        } else if info.request_count >= MAX_ONRAMP_REQUESTS_PER_WINDOW {
-            // Rate limited
-            let reset_in_ns = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
-            let reset_in_secs = reset_in_ns / 1_000_000_000;
+        } else if info.request_count >= max_requests {
+            let reset_in_secs = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now) / 1_000_000_000;
             Err(format!(
-                "Rate limited: {} onramp requests per hour exceeded. Try again in {} seconds.",
-                MAX_ONRAMP_REQUESTS_PER_WINDOW, reset_in_secs
+                "Rate limited: {} {} requests per hour exceeded. Try again in {} seconds.",
+                max_requests, label, reset_in_secs
             ))
         } else {
-            // Increment and allow
             info.request_count += 1;
             Ok(())
         }
     } else {
-        // First request from this principal
-        state.onramp_rate_limits.insert(caller, RateLimitInfo::new(now));
+        limits.insert(caller, RateLimitInfo::new(now));
         Ok(())
     }
 }
 
-/// Check if a principal is rate limited for offramp requests.
-/// Returns Ok(()) if allowed, Err(message) if rate limited.
-/// Also increments the request count if allowed.
-pub(super) fn check_offramp_rate_limit(caller: Principal) -> Result<(), String> {
-    let now = blocktime();
-    let mut state = STATE.write().expect("STATE lock: extract_node_pubkey_from_invoice write 2");
+/// Check if a principal is rate limited for onramp requests.
+pub(super) fn check_onramp_rate_limit(caller: Principal) -> Result<(), String> {
+    let mut state = STATE.write().expect("STATE lock: check_onramp_rate_limit");
+    check_rate_limit(&mut state.onramp_rate_limits, caller, MAX_ONRAMP_REQUESTS_PER_WINDOW, "onramp")
+}
 
-    if let Some(info) = state.offramp_rate_limits.get_mut(&caller) {
-        // Check if window has expired
-        if now >= info.window_start + RATE_LIMIT_WINDOW_NS {
-            // Reset window
-            info.window_start = now;
-            info.request_count = 1;
-            Ok(())
-        } else if info.request_count >= MAX_OFFRAMP_REQUESTS_PER_WINDOW {
-            // Rate limited
-            let reset_in_ns = (info.window_start + RATE_LIMIT_WINDOW_NS).saturating_sub(now);
-            let reset_in_secs = reset_in_ns / 1_000_000_000;
-            Err(format!(
-                "Rate limited: {} offramp requests per hour exceeded. Try again in {} seconds.",
-                MAX_OFFRAMP_REQUESTS_PER_WINDOW, reset_in_secs
-            ))
-        } else {
-            // Increment and allow
-            info.request_count += 1;
-            Ok(())
-        }
-    } else {
-        // First request from this principal
-        state.offramp_rate_limits.insert(caller, RateLimitInfo::new(now));
-        Ok(())
-    }
+/// Check if a principal is rate limited for offramp requests.
+pub(super) fn check_offramp_rate_limit(caller: Principal) -> Result<(), String> {
+    let mut state = STATE.write().expect("STATE lock: check_offramp_rate_limit");
+    check_rate_limit(&mut state.offramp_rate_limits, caller, MAX_OFFRAMP_REQUESTS_PER_WINDOW, "offramp")
 }
 
 /// Get rate limit status for a principal.
@@ -569,7 +524,23 @@ pub fn update_stableswap_config_impl(
         }
     }
 
-    // Validate new values
+    // Macro: validate an optional bps field (must be <= 10_000) and assign.
+    macro_rules! set_bps {
+        ($req_field:expr, $cfg_field:expr, $name:expr) => {
+            if let Some(v) = $req_field {
+                if v > 10_000 {
+                    return UpdateStableSwapConfigResponse {
+                        success: false,
+                        config: state.stableswap_config.clone(),
+                        error: Some(format!("{} must be <= 10000", $name)),
+                    };
+                }
+                $cfg_field = v;
+            }
+        };
+    }
+
+    // Validate amplification separately (> 0, not bps)
     if let Some(amp) = request.amplification {
         if amp == 0 {
             return UpdateStableSwapConfigResponse {
@@ -580,72 +551,28 @@ pub fn update_stableswap_config_impl(
         }
         state.stableswap_config.amplification = amp;
     }
-    if let Some(fee) = request.fee_bps {
-        if fee > 10_000 {
-            return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
-                error: Some("fee_bps must be <= 10000".to_string()),
-            };
-        }
-        state.stableswap_config.fee_bps = fee;
-    }
-    if let Some(share) = request.protocol_fee_share_bps {
-        if share > 10_000 {
-            return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
-                error: Some("protocol_fee_share_bps must be <= 10000".to_string()),
-            };
-        }
-        state.stableswap_config.protocol_fee_share_bps = share;
-    }
-    if let Some(max_slip) = request.max_slippage_bps {
-        if max_slip > 10_000 {
-            return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
-                error: Some("max_slippage_bps must be <= 10000".to_string()),
-            };
-        }
-        state.stableswap_config.max_slippage_bps = max_slip;
-    }
+
+    set_bps!(request.fee_bps, state.stableswap_config.fee_bps, "fee_bps");
+    set_bps!(request.protocol_fee_share_bps, state.stableswap_config.protocol_fee_share_bps, "protocol_fee_share_bps");
+    set_bps!(request.max_slippage_bps, state.stableswap_config.max_slippage_bps, "max_slippage_bps");
+    set_bps!(request.rebate_bps, state.stableswap_config.rebate_bps, "rebate_bps");
+    set_bps!(request.max_swap_pct_bps, state.stableswap_config.max_swap_pct_bps, "max_swap_pct_bps");
+
+    // imbalance_fee_bps has an additional constraint: must be >= fee_bps
     if let Some(imb_fee) = request.imbalance_fee_bps {
         if imb_fee > 10_000 {
             return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
+                success: false, config: state.stableswap_config.clone(),
                 error: Some("imbalance_fee_bps must be <= 10000".to_string()),
             };
         }
         if imb_fee < state.stableswap_config.fee_bps {
             return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
+                success: false, config: state.stableswap_config.clone(),
                 error: Some("imbalance_fee_bps must be >= fee_bps".to_string()),
             };
         }
         state.stableswap_config.imbalance_fee_bps = imb_fee;
-    }
-    if let Some(rebate) = request.rebate_bps {
-        if rebate > 10_000 {
-            return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
-                error: Some("rebate_bps must be <= 10000".to_string()),
-            };
-        }
-        state.stableswap_config.rebate_bps = rebate;
-    }
-    if let Some(max_pct) = request.max_swap_pct_bps {
-        if max_pct > 10_000 {
-            return UpdateStableSwapConfigResponse {
-                success: false,
-                config: state.stableswap_config.clone(),
-                error: Some("max_swap_pct_bps must be <= 10000".to_string()),
-            };
-        }
-        state.stableswap_config.max_swap_pct_bps = max_pct;
     }
 
     UpdateStableSwapConfigResponse {

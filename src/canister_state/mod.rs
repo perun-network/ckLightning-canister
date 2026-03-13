@@ -558,19 +558,17 @@ impl<Q> CanisterState<Q>
 where
     Q: receiver::TXQuerier,
 {
-    /// Test-only constructor that doesn't call canister_self() (which panics outside IC runtime).
-    #[cfg(test)]
-    pub fn new_for_test(q: Q) -> Self {
-        let dummy_principal = Principal::anonymous();
+    /// Common initializer for all fields given a principal and querier.
+    fn init(q: Q, principal: Principal) -> Self {
         Self {
-            principal: dummy_principal,
+            principal,
             btc_liquidity_addresses: HashMap::new(),
             btc_depositor_addresses: HashMap::new(),
             btc_invoice_address: None,
             lp_btc_address: None,
             pending_btc_deposits: HashMap::new(),
             processed_utxos: HashMap::new(),
-            icrc_receiver: receiver::Receiver::new(q, dummy_principal),
+            icrc_receiver: receiver::Receiver::new(q, principal),
             user_holdings: Default::default(),
             channels: Default::default(),
             liq_pool: LiquidityPool::new(),
@@ -602,7 +600,7 @@ where
             },
             protocol_fees_ckbtc: 0,
             admin: None,
-            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            icp_ddos_fee_e8s: 100_000_000,
             max_single_swap_sats: 0,
             max_hourly_swap_sats: 0,
             hourly_swap_volume_sats: 0,
@@ -615,67 +613,15 @@ where
         }
     }
 
+    /// Test-only constructor that doesn't call canister_self() (which panics outside IC runtime).
+    #[cfg(test)]
+    pub fn new_for_test(q: Q) -> Self {
+        Self::init(q, Principal::anonymous())
+    }
+
     pub fn new(q: Q, my_principal: Principal) -> Self {
         assert!(my_principal == canister_self());
-
-        Self {
-            principal: canister_self(),
-            btc_liquidity_addresses: HashMap::new(), // per-user LP deposit addresses
-            btc_depositor_addresses: HashMap::new(), // personal depositor addresses
-            btc_invoice_address: None,               // single global invoice address
-            lp_btc_address: None,                    // single shared LP BTC address
-            pending_btc_deposits: HashMap::new(),    // pending BTC deposits
-            processed_utxos: HashMap::new(),         // processed UTXOs to avoid double-crediting
-            icrc_receiver: receiver::Receiver::new(q, my_principal),
-            user_holdings: Default::default(),
-            channels: Default::default(),
-            liq_pool: LiquidityPool::new(),
-            swaps: HashMap::new(),           // Lightning → ckBTC swaps
-            ln_channels: HashMap::new(),     // Lightning channel funding verification
-            onramp_requests: HashMap::new(), // Onramp invoice requests
-            offramp_requests: HashMap::new(), // Offramp requests (ckBTC → Lightning)
-            // LP Liquidity tracking
-            channel_balances: HashMap::new(),
-            total_btc_deposited: 0,
-            total_btc_in_channels: 0,
-            reserved_utxos: HashMap::new(),
-            // HTLC state management
-            htlc_manager: HtlcManager::new(),
-            // Channel secrets (Phase 2)
-            channel_secrets: HashMap::new(),
-            channel_counterparty_pubkeys: HashMap::new(),
-            htlc_tx_details: HashMap::new(),
-            // Test configuration
-            test_onramp_timeout_ns: None,
-            test_offramp_timeout_ns: None,
-            // Relay registration
-            registered_relay: None,
-            // Rate limiting
-            onramp_rate_limits: HashMap::new(),
-            offramp_rate_limits: HashMap::new(),
-            // StableSwap AMM
-            stableswap_config: crate::stableswap::StableSwapConfig {
-                amplification: 200,
-                fee_bps: 10,
-                protocol_fee_share_bps: 5000,
-                max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
-                imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
-                rebate_bps: 0,            // disabled by default
-                max_swap_pct_bps: 0,      // disabled by default
-            },
-            protocol_fees_ckbtc: 0,
-            admin: None,
-            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
-            max_single_swap_sats: 0,
-            max_hourly_swap_sats: 0,
-            hourly_swap_volume_sats: 0,
-            hourly_swap_window_start: 0,
-            funded_channels: HashSet::new(),
-            channel_funding_reservations: HashMap::new(),
-            active_onramp_ids: HashSet::new(),
-            active_offramp_ids: HashSet::new(),
-            reserved_ckbtc_sats: 0,
-        }
+        Self::init(q, canister_self())
     }
 
     pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
@@ -980,83 +926,48 @@ where
 
     /// Serialize all persistable state into a snapshot for stable memory.
     pub fn to_snapshot(&self) -> CanisterStateSnapshot {
-        // Sort all HashMap-derived Vecs for deterministic serialization.
-        // This ensures identical state produces identical snapshot bytes
-        // regardless of HashMap iteration order.
-        let mut btc_liquidity_addresses: Vec<_> = self.btc_liquidity_addresses.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        btc_liquidity_addresses.sort_by_key(|(k, _)| *k);
+        // Collect HashMap entries into sorted Vecs for deterministic serialization.
+        // Identical state must produce identical snapshot bytes regardless of iteration order.
+        macro_rules! sorted_map {
+            ($map:expr) => {{
+                let mut v: Vec<_> = $map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                v
+            }};
+        }
 
-        let mut btc_depositor_addresses: Vec<_> = self.btc_depositor_addresses.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        btc_depositor_addresses.sort_by_key(|(k, _)| *k);
-
-        let mut pending_btc_deposits: Vec<_> = self.pending_btc_deposits.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        pending_btc_deposits.sort_by_key(|(k, _)| *k);
+        let btc_liquidity_addresses = sorted_map!(self.btc_liquidity_addresses);
+        let btc_depositor_addresses = sorted_map!(self.btc_depositor_addresses);
+        let pending_btc_deposits = sorted_map!(self.pending_btc_deposits);
+        let user_holdings = {
+            let mut v: Vec<_> = self.user_holdings.iter()
+                .map(|(k, v)| (k.clone(), v.clone())).collect();
+            v.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+            v
+        };
+        let channels = sorted_map!(self.channels);
+        let swaps = sorted_map!(self.swaps);
+        let ln_channels = sorted_map!(self.ln_channels);
+        let onramp_requests = sorted_map!(self.onramp_requests);
+        let offramp_requests = sorted_map!(self.offramp_requests);
+        let channel_balances = sorted_map!(self.channel_balances);
+        let channel_secrets = sorted_map!(self.channel_secrets);
+        let channel_counterparty_pubkeys = sorted_map!(self.channel_counterparty_pubkeys);
+        let htlc_tx_details = sorted_map!(self.htlc_tx_details);
+        let onramp_rate_limits = sorted_map!(self.onramp_rate_limits);
+        let offramp_rate_limits = sorted_map!(self.offramp_rate_limits);
+        let channel_funding_reservations = sorted_map!(self.channel_funding_reservations);
 
         let mut processed_utxos: Vec<_> = self.processed_utxos.iter()
             .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect();
         processed_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
 
-        let mut user_holdings: Vec<_> = self.user_holdings.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
-        user_holdings.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
-
-        let mut channels: Vec<_> = self.channels.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
-        channels.sort_by_key(|(k, _)| k.clone());
-
-        let mut swaps: Vec<_> = self.swaps.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        swaps.sort_by_key(|(k, _)| *k);
-
-        let mut ln_channels: Vec<_> = self.ln_channels.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        ln_channels.sort_by_key(|(k, _)| *k);
-
-        let mut onramp_requests: Vec<_> = self.onramp_requests.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
-        onramp_requests.sort_by_key(|(k, _)| k.clone());
-
-        let mut offramp_requests: Vec<_> = self.offramp_requests.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
-        offramp_requests.sort_by_key(|(k, _)| k.clone());
-
-        let mut channel_balances: Vec<_> = self.channel_balances.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        channel_balances.sort_by_key(|(k, _)| *k);
-
         let mut reserved_utxos: Vec<_> = self.reserved_utxos.iter()
             .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect();
         reserved_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
 
-        let mut channel_secrets: Vec<_> = self.channel_secrets.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        channel_secrets.sort_by_key(|(k, _)| *k);
-
-        let mut channel_counterparty_pubkeys: Vec<_> = self.channel_counterparty_pubkeys.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        channel_counterparty_pubkeys.sort_by_key(|(k, _)| *k);
-
-        let mut htlc_tx_details: Vec<_> = self.htlc_tx_details.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        htlc_tx_details.sort_by_key(|(k, _)| *k);
-
-        let mut onramp_rate_limits: Vec<_> = self.onramp_rate_limits.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        onramp_rate_limits.sort_by_key(|(k, _)| *k);
-
-        let mut offramp_rate_limits: Vec<_> = self.offramp_rate_limits.iter()
-            .map(|(k, v)| (*k, v.clone())).collect();
-        offramp_rate_limits.sort_by_key(|(k, _)| *k);
-
         let mut funded_channels: Vec<String> = self.funded_channels.iter().cloned().collect();
         funded_channels.sort();
-
-        let mut channel_funding_reservations: Vec<_> = self.channel_funding_reservations.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
-        channel_funding_reservations.sort_by_key(|(k, _)| k.clone());
 
         // known_txs from Receiver (already sorted since BTreeSet)
         let known_txs: Vec<u64> = self.icrc_receiver.get_known_txs().into_iter().collect();

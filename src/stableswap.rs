@@ -377,6 +377,65 @@ pub fn compute_effective_fee(
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Resolve pool balances (input_pool, output_pool) based on swap direction.
+fn resolve_pools(
+    config: &StableSwapConfig,
+    btc_balance: u64,
+    ckbtc_balance: u64,
+    direction: &SwapDirection,
+) -> Result<(u128, u128), StableSwapError> {
+    if config.amplification == 0 {
+        return Err(StableSwapError::ZeroAmplification);
+    }
+    let (x, y) = match direction {
+        SwapDirection::BtcToCkbtc => (btc_balance as u128, ckbtc_balance as u128),
+        SwapDirection::CkbtcToBtc => (ckbtc_balance as u128, btc_balance as u128),
+    };
+    if x == 0 || y == 0 {
+        return Err(StableSwapError::EmptyPool);
+    }
+    Ok((x, y))
+}
+
+/// Check slippage and max swap size guards. Returns the price impact in bps.
+fn check_swap_guards(
+    config: &StableSwapConfig,
+    raw_output: u128,
+    output_pool: u128,
+    input: u128,
+    output_after_fee: u128,
+) -> Result<u64, StableSwapError> {
+    // Price impact: (1 - output/input) * 10000
+    let price_impact_bps = if input > 0 && output_after_fee <= input {
+        (input - output_after_fee)
+            .checked_mul(10_000)
+            .ok_or(StableSwapError::Overflow)?
+            / input
+    } else {
+        0
+    };
+
+    let impact = price_impact_bps as u64;
+    if config.max_slippage_bps > 0 && impact > config.max_slippage_bps {
+        return Err(StableSwapError::SlippageExceeded {
+            price_impact_bps: impact,
+            max_slippage_bps: config.max_slippage_bps,
+        });
+    }
+
+    if config.max_swap_pct_bps > 0 {
+        let swap_pct = (raw_output * 10_000) / output_pool;
+        if swap_pct as u64 > config.max_swap_pct_bps {
+            return Err(StableSwapError::SwapSizeExceeded {
+                swap_pct_bps: swap_pct as u64,
+                max_swap_pct_bps: config.max_swap_pct_bps,
+            });
+        }
+    }
+
+    Ok(impact)
+}
+
 /// Compute swap output given an input amount and direction.
 ///
 /// Returns the output amount after fees, with fee breakdown.
@@ -390,31 +449,8 @@ pub fn get_swap_output(
     if input_amount == 0 {
         return Err(StableSwapError::ZeroInput);
     }
-    if config.amplification == 0 {
-        return Err(StableSwapError::ZeroAmplification);
-    }
 
-    let x: u128;
-    let y: u128;
-
-    match direction {
-        SwapDirection::BtcToCkbtc => {
-            // User sends BTC, receives ckBTC
-            // x = BTC pool, y = ckBTC pool
-            x = btc_balance as u128;
-            y = ckbtc_balance as u128;
-        }
-        SwapDirection::CkbtcToBtc => {
-            // User sends ckBTC, receives BTC
-            // x = ckBTC pool, y = BTC pool
-            x = ckbtc_balance as u128;
-            y = btc_balance as u128;
-        }
-    }
-
-    if x == 0 || y == 0 {
-        return Err(StableSwapError::EmptyPool);
-    }
+    let (x, y) = resolve_pools(config, btc_balance, ckbtc_balance, direction)?;
 
     let input = input_amount as u128;
     let amp = config.amplification as u128;
@@ -476,41 +512,7 @@ pub fn get_swap_output(
         (output_with_rebate, 0u128, 0u128, 0u128, rebate)
     };
 
-    // Price impact: compare effective rate vs 1:1
-    // price_impact_bps = (1 - output/input) * 10000
-    // Using integer math: (input - output_after_fee) * 10000 / input
-    let price_impact_bps = if input > 0 && output_after_fee <= input {
-        (input - output_after_fee)
-            .checked_mul(10_000)
-            .ok_or(StableSwapError::Overflow)?
-            / input
-    } else if output_after_fee > input {
-        // Output > input means favorable rate (pool rebalancing incentive)
-        0
-    } else {
-        0
-    };
-
-    // Slippage check (0 = disabled)
-    let impact = price_impact_bps as u64;
-    if config.max_slippage_bps > 0 && impact > config.max_slippage_bps {
-        return Err(StableSwapError::SlippageExceeded {
-            price_impact_bps: impact,
-            max_slippage_bps: config.max_slippage_bps,
-        });
-    }
-
-    // Max swap size check (0 = disabled)
-    // raw_output as % of output pool (y)
-    if config.max_swap_pct_bps > 0 {
-        let swap_pct = (raw_output * 10_000) / y;
-        if swap_pct as u64 > config.max_swap_pct_bps {
-            return Err(StableSwapError::SwapSizeExceeded {
-                swap_pct_bps: swap_pct as u64,
-                max_swap_pct_bps: config.max_swap_pct_bps,
-            });
-        }
-    }
+    let impact = check_swap_guards(config, raw_output, y, input, output_after_fee)?;
 
     Ok(SwapResult {
         output_amount: output_after_fee as u64,
@@ -536,27 +538,8 @@ pub fn get_swap_input(
     if desired_output == 0 {
         return Err(StableSwapError::ZeroInput);
     }
-    if config.amplification == 0 {
-        return Err(StableSwapError::ZeroAmplification);
-    }
 
-    let x: u128;
-    let y: u128;
-
-    match direction {
-        SwapDirection::BtcToCkbtc => {
-            x = btc_balance as u128;
-            y = ckbtc_balance as u128;
-        }
-        SwapDirection::CkbtcToBtc => {
-            x = ckbtc_balance as u128;
-            y = btc_balance as u128;
-        }
-    }
-
-    if x == 0 || y == 0 {
-        return Err(StableSwapError::EmptyPool);
-    }
+    let (x, y) = resolve_pools(config, btc_balance, ckbtc_balance, direction)?;
 
     let output = desired_output as u128;
     let amp = config.amplification as u128;
@@ -652,36 +635,7 @@ pub fn get_swap_input(
         (0u128, 0u128, 0u128)
     };
 
-    // Price impact
-    let price_impact_bps = if input > 0 && output <= input {
-        (input - output)
-            .checked_mul(10_000)
-            .ok_or(StableSwapError::Overflow)?
-            / input
-    } else {
-        0
-    };
-
-    // Slippage check (0 = disabled)
-    let impact = price_impact_bps as u64;
-    if config.max_slippage_bps > 0 && impact > config.max_slippage_bps {
-        return Err(StableSwapError::SlippageExceeded {
-            price_impact_bps: impact,
-            max_slippage_bps: config.max_slippage_bps,
-        });
-    }
-
-    // Max swap size check (0 = disabled)
-    // raw_output as % of output pool (y)
-    if config.max_swap_pct_bps > 0 {
-        let swap_pct = (raw_output * 10_000) / y;
-        if swap_pct as u64 > config.max_swap_pct_bps {
-            return Err(StableSwapError::SwapSizeExceeded {
-                swap_pct_bps: swap_pct as u64,
-                max_swap_pct_bps: config.max_swap_pct_bps,
-            });
-        }
-    }
+    let impact = check_swap_guards(config, raw_output, y, input, output)?;
 
     Ok(SwapResult {
         output_amount: input as u64, // For get_swap_input, output_amount is the required input

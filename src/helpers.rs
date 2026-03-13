@@ -49,6 +49,11 @@ use std::str::FromStr;
 /// Using a single key for all channels for simplicity.
 pub const LN_FUNDING_DERIVATION_PATH: &[&[u8]] = &[b"lightning", b"funding"];
 
+/// Convert the static derivation path to the Vec<Vec<u8>> format required by ECDSA APIs.
+fn ln_funding_derivation_path() -> Vec<Vec<u8>> {
+    LN_FUNDING_DERIVATION_PATH.iter().map(|s| s.to_vec()).collect()
+}
+
 // =============================================================================
 // Ledger Transfer Helpers
 // =============================================================================
@@ -213,80 +218,41 @@ pub async fn send_btc_tx_impl(
     let fee_per_byte = get_fee_per_byte(&ctx).await;
 
     // Build, sign, send transaction based on address type
-    let txid = match from_address_type {
+    let signed_tx = match from_address_type {
         BtcAddressType::P2PKH => {
-            // Build transaction
             let transaction = p2pkh::build_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                &own_utxos,
-                &PrimaryOutput::Address(dst_address, amount_in_satoshi),
-                fee_per_byte,
-            )
-            .await;
-
-            // Sign transaction
-            let signed_tx = p2pkh::sign_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                transaction,
-                derivation_path.to_vec_u8_path(),
-                crate::btc::ecdsa::sign_with_ecdsa,
-            )
-            .await;
-
-            // Send transaction to Bitcoin canister
-            bitcoin_send_transaction(&SendTransactionRequest {
-                network: ctx.network,
-                transaction: serialize(&signed_tx),
-            })
-            .await
-            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
-
-            signed_tx.compute_txid().to_string()
+                &ctx, &own_public_key, &own_address, &own_utxos,
+                &PrimaryOutput::Address(dst_address, amount_in_satoshi), fee_per_byte,
+            ).await;
+            p2pkh::sign_transaction(
+                &ctx, &own_public_key, &own_address, transaction,
+                derivation_path.to_vec_u8_path(), crate::btc::ecdsa::sign_with_ecdsa,
+            ).await
         }
         BtcAddressType::P2WPKH => {
-            // Build transaction with prevouts
             let (transaction, prevouts) = p2wpkh::build_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                &own_utxos,
-                &dst_address,
-                amount_in_satoshi,
-                fee_per_byte,
-            )
-            .await;
-
-            // Sign transaction
-            let signed_tx = p2wpkh::sign_transaction(
-                &ctx,
-                &own_public_key,
-                &own_address,
-                transaction,
-                &prevouts,
-                derivation_path.to_vec_u8_path(),
-                crate::btc::ecdsa::sign_with_ecdsa,
-            )
-            .await;
-
-            bitcoin_send_transaction(&SendTransactionRequest {
-                network: ctx.network,
-                transaction: serialize(&signed_tx),
-            })
-            .await
-            .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
-
-            signed_tx.compute_txid().to_string()
+                &ctx, &own_public_key, &own_address, &own_utxos,
+                &dst_address, amount_in_satoshi, fee_per_byte,
+            ).await;
+            p2wpkh::sign_transaction(
+                &ctx, &own_public_key, &own_address, transaction,
+                &prevouts, derivation_path.to_vec_u8_path(), crate::btc::ecdsa::sign_with_ecdsa,
+            ).await
         }
         BtcAddressType::P2TR => {
             return Err(BtcError::Other("P2TR transaction sending not yet supported".to_string()));
         }
     };
 
-    Ok(SendBtcTxMsg::Success(txid))
+    // Broadcast and return txid
+    bitcoin_send_transaction(&SendTransactionRequest {
+        network: ctx.network,
+        transaction: serialize(&signed_tx),
+    })
+    .await
+    .map_err(|e| BtcError::Other(format!("Failed to send transaction: {}", e)))?;
+
+    Ok(SendBtcTxMsg::Success(signed_tx.compute_txid().to_string()))
 }
 
 // =============================================================================
@@ -391,13 +357,7 @@ pub async fn get_ln_invoice_impl(
 /// two keys in the 2-of-2 multisig funding address for Lightning channels.
 pub async fn get_ln_funding_pubkey_impl() -> LnFundingPubkeyResponse {
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
-        .iter()
-        .map(|s| s.to_vec())
-        .collect();
-
-    let pubkey = get_ecdsa_public_key(&ctx, derivation_path).await;
+    let pubkey = get_ecdsa_public_key(&ctx, ln_funding_derivation_path()).await;
 
     LnFundingPubkeyResponse {
         pubkey,
@@ -428,20 +388,13 @@ pub async fn sign_ln_message_impl(request: LnSignRequest) -> LnSignResponse {
 
     let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
 
-    let derivation_path: Vec<Vec<u8>> = LN_FUNDING_DERIVATION_PATH
-        .iter()
-        .map(|s| s.to_vec())
-        .collect();
-
-    // Log the signing request for auditing
     if let Some(purpose) = &request.purpose {
         ic_cdk::println!("Signing LN message for purpose: {}", purpose);
     }
 
-    // Sign using chainkey ECDSA
     let signature = sign_with_ecdsa(
         ctx.key_name.to_string(),
-        derivation_path,
+        ln_funding_derivation_path(),
         request.message_hash,
     )
     .await;

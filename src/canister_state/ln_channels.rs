@@ -12,44 +12,42 @@ use crate::ic_types::{
 use ic_cdk::api::time as blocktime;
 use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
 
+/// Parse and validate a 32-byte channel_id, returning a fixed-size array.
+fn parse_channel_id(bytes: &[u8]) -> Result<[u8; 32], String> {
+    bytes.try_into().map_err(|_| format!(
+        "Invalid channel_id length: expected 32 bytes, got {}", bytes.len()
+    ))
+}
+
+/// Validate a byte field has the expected length, returning descriptive error.
+fn validate_len(field: &str, bytes: &[u8], expected: usize) -> Result<(), String> {
+    if bytes.len() != expected {
+        Err(format!("Invalid {} length (must be {} bytes)", field, expected))
+    } else {
+        Ok(())
+    }
+}
+
 /// Register a new Lightning channel for funding verification
 ///
 /// Called by the relay node when a channel is opened.
 /// Stores the channel info so the funding UTXO can be verified on-chain.
 pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLnChannelResponse {
-    // Validate channel_id length
-    if request.channel_id.len() != 32 {
-        return RegisterLnChannelResponse {
-            success: false,
-            error: Some("Invalid channel_id length (must be 32 bytes)".to_string()),
-        };
-    }
+    let channel_id_arr = match parse_channel_id(&request.channel_id) {
+        Ok(arr) => arr,
+        Err(e) => return RegisterLnChannelResponse { success: false, error: Some(e) },
+    };
 
-    // Validate funding_txid length
-    if request.funding_txid.len() != 32 {
-        return RegisterLnChannelResponse {
-            success: false,
-            error: Some("Invalid funding_txid length (must be 32 bytes)".to_string()),
-        };
+    // Validate field lengths
+    for (field, bytes, len) in [
+        ("funding_txid", request.funding_txid.as_slice(), 32),
+        ("local_node_id", request.local_node_id.as_slice(), 33),
+        ("remote_node_id", request.remote_node_id.as_slice(), 33),
+    ] {
+        if let Err(e) = validate_len(field, bytes, len) {
+            return RegisterLnChannelResponse { success: false, error: Some(e) };
+        }
     }
-
-    // Validate node IDs (33 bytes compressed pubkey)
-    if request.local_node_id.len() != 33 {
-        return RegisterLnChannelResponse {
-            success: false,
-            error: Some("Invalid local_node_id length (must be 33 bytes)".to_string()),
-        };
-    }
-    if request.remote_node_id.len() != 33 {
-        return RegisterLnChannelResponse {
-            success: false,
-            error: Some("Invalid remote_node_id length (must be 33 bytes)".to_string()),
-        };
-    }
-
-    // Convert to fixed array
-    let mut channel_id_arr = [0u8; 32];
-    channel_id_arr.copy_from_slice(&request.channel_id);
 
     // Check if channel already exists
     {
@@ -97,153 +95,115 @@ pub fn register_ln_channel_impl(request: RegisterLnChannelRequest) -> RegisterLn
 pub async fn verify_ln_channel_impl(
     request: QueryLnChannelRequest,
 ) -> VerifyLnChannelResponse {
-    // Validate channel_id length
-    if request.channel_id.len() != 32 {
-        return VerifyLnChannelResponse {
-            verified: false,
-            confirmations: None,
-            utxo_value_sats: None,
-            error: Some("Invalid channel_id length (must be 32 bytes)".to_string()),
-        };
-    }
-
-    let mut channel_id_arr = [0u8; 32];
-    channel_id_arr.copy_from_slice(&request.channel_id);
+    let channel_id_arr = match parse_channel_id(&request.channel_id) {
+        Ok(arr) => arr,
+        Err(e) => return verify_err(e),
+    };
 
     // Get channel info
     let channel_info = {
         let state = STATE.read().expect("STATE lock: verify_ln_channel read");
         match state.ln_channels.get(&channel_id_arr) {
             Some(info) => info.clone(),
-            None => {
-                return VerifyLnChannelResponse {
-                    verified: false,
-                    confirmations: None,
-                    utxo_value_sats: None,
-                    error: Some("Channel not found".to_string()),
-                };
-            }
+            None => return verify_err("Channel not found".to_string()),
         }
     };
-
-    // Get Bitcoin context
-    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
-
-    // Use the stored funding address (provided by relay when registering)
-    let funding_address = &channel_info.funding_address;
 
     // Query UTXOs for the funding address
-    let utxos_result = bitcoin_get_utxos(&GetUtxosRequest {
-        address: funding_address.clone(),
+    let ctx = crate::BTC_CONTEXT.with(|ctx| ctx.get());
+    let utxos_response = match bitcoin_get_utxos(&GetUtxosRequest {
+        address: channel_info.funding_address.clone(),
         network: ctx.network,
-        filter: None, // Get all UTXOs including unconfirmed
-    })
-    .await;
-
-    let utxos_response = match utxos_result {
+        filter: None,
+    }).await {
         Ok(response) => response,
-        Err(e) => {
-            return VerifyLnChannelResponse {
-                verified: false,
-                confirmations: None,
-                utxo_value_sats: None,
-                error: Some(format!("Failed to query UTXOs: {:?}", e)),
-            };
-        }
+        Err(e) => return verify_err(format!("Failed to query UTXOs: {:?}", e)),
     };
 
-    // Get current tip height to calculate confirmations
-    let tip_height = utxos_response.tip_height;
+    // Find the specific funding UTXO by txid and vout
+    let found_utxo = find_funding_utxo(&utxos_response, &channel_info);
 
-    // Look for the specific funding UTXO by matching txid and vout
-    // Note: The txid in the UTXO response is in internal byte order (little-endian)
-    // while Lightning typically uses big-endian (display order)
+    // Update channel status and build response
+    update_channel_verification(&channel_id_arr, &channel_info, found_utxo)
+}
+
+/// Build a failed VerifyLnChannelResponse.
+fn verify_err(msg: String) -> VerifyLnChannelResponse {
+    VerifyLnChannelResponse { verified: false, confirmations: None, utxo_value_sats: None, error: Some(msg) }
+}
+
+/// Search UTXO set for the channel's funding outpoint, returning (value, confirmations).
+fn find_funding_utxo(
+    utxos_response: &ic_cdk::bitcoin_canister::GetUtxosResponse,
+    channel_info: &LnChannelInfo,
+) -> Option<(u64, u32)> {
     let funding_txid = &channel_info.funding_outpoint.txid;
     let funding_vout = channel_info.funding_outpoint.vout;
 
-    let mut found_utxo: Option<(u64, u32)> = None; // (value, confirmations)
-
-    for utxo in &utxos_response.utxos {
-        // Compare txid (both should be in the same byte order from the canister)
+    utxos_response.utxos.iter().find_map(|utxo| {
         if utxo.outpoint.txid.as_slice() == funding_txid.as_slice()
             && utxo.outpoint.vout == funding_vout
         {
-            // Found the funding UTXO
             let confirmations = if utxo.height > 0 {
-                tip_height.saturating_sub(utxo.height) + 1
+                utxos_response.tip_height.saturating_sub(utxo.height) + 1
             } else {
-                0 // Unconfirmed
+                0
             };
-            found_utxo = Some((utxo.value, confirmations));
-            break;
+            Some((utxo.value, confirmations))
+        } else {
+            None
         }
-    }
+    })
+}
+
+/// Update channel status based on UTXO verification result and build the response.
+fn update_channel_verification(
+    channel_id_arr: &[u8; 32],
+    channel_info: &LnChannelInfo,
+    found_utxo: Option<(u64, u32)>,
+) -> VerifyLnChannelResponse {
+    let current_time = blocktime();
+    let mut state = STATE.write().expect("STATE lock: verify_ln_channel write");
+    let channel = match state.ln_channels.get_mut(channel_id_arr) {
+        Some(ch) => ch,
+        None => return verify_err("Channel not found".to_string()),
+    };
+    channel.last_verified_at = Some(current_time);
 
     match found_utxo {
         Some((value, confirmations)) => {
-            // Verify the value matches the claimed capacity
             let value_matches = value == channel_info.capacity_sats;
 
-            // Update channel status
-            let current_time = blocktime();
-            {
-                let mut state = STATE.write().expect("STATE lock: verify_ln_channel write");
-                if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
-                    channel.last_verified_at = Some(current_time);
-                    if value_matches && confirmations >= 3 {
-                        channel.status = LnChannelStatus::Verified {
-                            confirmations: confirmations as u32,
-                        };
-                    } else if !value_matches {
-                        channel.status = LnChannelStatus::Failed {
-                            reason: format!(
-                                "Value mismatch: expected {} sats, found {} sats",
-                                channel_info.capacity_sats, value
-                            ),
-                        };
-                    } else {
-                        // Not enough confirmations yet, keep as pending
-                        channel.status = LnChannelStatus::Pending;
-                    }
+            channel.status = if value_matches && confirmations >= 3 {
+                LnChannelStatus::Verified { confirmations: confirmations as u32 }
+            } else if !value_matches {
+                LnChannelStatus::Failed {
+                    reason: format!("Value mismatch: expected {} sats, found {} sats",
+                        channel_info.capacity_sats, value),
                 }
-            }
+            } else {
+                LnChannelStatus::Pending
+            };
+
+            let error = if !value_matches {
+                Some(format!("Value mismatch: expected {} sats, found {} sats",
+                    channel_info.capacity_sats, value))
+            } else if confirmations < 3 {
+                Some(format!("Insufficient confirmations: {} (need at least 3)", confirmations))
+            } else {
+                None
+            };
 
             VerifyLnChannelResponse {
                 verified: value_matches && confirmations >= 3,
                 confirmations: Some(confirmations as u32),
                 utxo_value_sats: Some(value),
-                error: if !value_matches {
-                    Some(format!(
-                        "Value mismatch: expected {} sats, found {} sats",
-                        channel_info.capacity_sats, value
-                    ))
-                } else if confirmations < 3 {
-                    Some(format!(
-                        "Insufficient confirmations: {} (need at least 3)",
-                        confirmations
-                    ))
-                } else {
-                    None
-                },
+                error,
             }
         }
         None => {
-            // UTXO not found - channel might be closed or funding tx not yet confirmed
-            let current_time = blocktime();
-            {
-                let mut state = STATE.write().expect("STATE lock: verify_ln_channel write 2");
-                if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
-                    channel.last_verified_at = Some(current_time);
-                    // Check if channel was previously verified - if so, it's now closed
-                    match &channel.status {
-                        LnChannelStatus::Verified { .. } => {
-                            channel.status = LnChannelStatus::Closed;
-                        }
-                        _ => {
-                            // Keep current status, UTXO might not be confirmed yet
-                        }
-                    }
-                }
+            if matches!(&channel.status, LnChannelStatus::Verified { .. }) {
+                channel.status = LnChannelStatus::Closed;
             }
 
             VerifyLnChannelResponse {
@@ -252,7 +212,7 @@ pub async fn verify_ln_channel_impl(
                 utxo_value_sats: None,
                 error: Some(format!(
                     "Funding UTXO not found at address {}. Channel may be closed or funding tx not yet confirmed.",
-                    funding_address
+                    channel_info.funding_address
                 )),
             }
         }
@@ -261,13 +221,7 @@ pub async fn verify_ln_channel_impl(
 
 /// Query a specific Lightning channel
 pub fn query_ln_channel_impl(request: QueryLnChannelRequest) -> Option<LnChannelInfo> {
-    if request.channel_id.len() != 32 {
-        return None;
-    }
-
-    let mut channel_id_arr = [0u8; 32];
-    channel_id_arr.copy_from_slice(&request.channel_id);
-
+    let channel_id_arr = parse_channel_id(&request.channel_id).ok()?;
     let state = STATE.read().expect("STATE lock: query_ln_channel");
     state.ln_channels.get(&channel_id_arr).cloned()
 }
@@ -289,13 +243,10 @@ pub fn query_ln_channels_impl() -> QueryLnChannelsResponse {
 
 /// Update a Lightning channel's status (e.g., when closed)
 pub fn update_ln_channel_status_impl(channel_id: Vec<u8>, status: LnChannelStatus) -> bool {
-    if channel_id.len() != 32 {
-        return false;
-    }
-
-    let mut channel_id_arr = [0u8; 32];
-    channel_id_arr.copy_from_slice(&channel_id);
-
+    let channel_id_arr = match parse_channel_id(&channel_id) {
+        Ok(arr) => arr,
+        Err(_) => return false,
+    };
     let mut state = STATE.write().expect("STATE lock: update_ln_channel_status");
     if let Some(channel) = state.ln_channels.get_mut(&channel_id_arr) {
         channel.status = status;
