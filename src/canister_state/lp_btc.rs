@@ -747,8 +747,8 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
         );
 
         // Reserve the exact outpoints selected for this funding TX.
-        // Derive a synthetic channel ID from the funding address so
-        // release_reserved_utxos_impl / channel_funded_impl can clear them.
+        // Derive a reservation key from the funding address so
+        // cancel_channel_funding_impl / channel_funded_impl can clear them.
         use bitcoin::hashes::{Hash, sha256};
         let reservation_id: [u8; 32] = sha256::Hash::hash(
             request.funding_address.as_bytes()

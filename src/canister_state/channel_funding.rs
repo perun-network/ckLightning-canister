@@ -207,12 +207,6 @@ pub fn reserve_utxos_for_channel_impl(utxos: &[LpBtcUtxo], channel_id: [u8; 32])
     }
 }
 
-/// Release reserved UTXOs (on channel open failure)
-pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
-    let mut state = STATE.write().expect("STATE lock: release_reserved_utxos");
-    state.reserved_utxos.retain(|_, v| *v != channel_id);
-}
-
 /// Called when a channel is successfully funded and TX confirmed.
 ///
 /// Two-phase model: this is where LP balances are actually deducted and
@@ -221,12 +215,19 @@ pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
 pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     let mut state = STATE.write().expect("STATE lock: channel_funded");
 
-    // Remove from reserved UTXOs
-    state.reserved_utxos.retain(|_, v| *v != channel_id);
-
     // Find the funding address for this channel to look up the reservation
     let funding_address = state.ln_channels.get(&channel_id)
         .map(|ch| ch.funding_address.clone());
+
+    // Remove reserved UTXOs using the correct reservation key (sha256(funding_address)),
+    // which matches how fund_channel_impl stores them.
+    if let Some(ref addr) = funding_address {
+        use bitcoin::hashes::{Hash, sha256};
+        let reservation_id: [u8; 32] = sha256::Hash::hash(
+            addr.as_bytes()
+        ).to_byte_array();
+        state.reserved_utxos.retain(|_, v| *v != reservation_id);
+    }
 
     // Look up reservation — only LP-funded channels have one (from fund_channel).
     // Channels funded by the peer (e.g. inbound channels) have no reservation
@@ -234,8 +235,17 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     let amount_sat = if let Some(ref addr) = funding_address {
         if let Some(reservation) = state.channel_funding_reservations.remove(addr) {
             reservation.amount_sat
+        } else if state.funded_channels.contains(addr) {
+            // Reservation expired but funded_channels guard exists — this is a late
+            // commit from WAL recovery after the relay was down past reservation timeout.
+            // The channel is live on-chain (relay verified it), so proceed with capacity_sats.
+            ic_cdk::println!(
+                "channel_funded: reservation expired for address {} — late commit, using capacity_sats={}",
+                addr, capacity_sats
+            );
+            capacity_sats
         } else {
-            // No reservation = channel was NOT funded from LP (peer-funded/inbound).
+            // No reservation AND no funded_channels entry = peer-funded/inbound channel.
             // Skip LP accounting entirely — no deduction, no channel balance tracking.
             ic_cdk::println!(
                 "channel_funded: no reservation for address {} — peer-funded channel, skipping LP deduction",
@@ -315,7 +325,9 @@ pub fn expire_channel_funding_reservations() {
 
     for addr in &expired {
         state.channel_funding_reservations.remove(addr);
-        state.funded_channels.remove(addr);
+        // NOTE: Do NOT remove funded_channels entry here. It serves as a durable
+        // breadcrumb so that late channel_funded calls (via WAL recovery after
+        // relay downtime) can still use the late-commit path in channel_funded_impl.
         // Release reserved UTXOs for this funding address
         use bitcoin::hashes::{Hash, sha256};
         let reservation_id: [u8; 32] = sha256::Hash::hash(
