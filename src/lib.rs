@@ -34,7 +34,7 @@ use crate::ic_types::{
     QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
     RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse, RegisteredState,
     SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, SignedCandidInvoice,
-    Timestamp, TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
     // BTC LP types
     LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
     LpBtcWithdrawRequest, LpBtcWithdrawResponse,

@@ -9,7 +9,7 @@ use crate::ic_types::{
     LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse,
 };
 
-use candid::{Nat, Principal};
+use candid::Nat;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::msg_caller;
 use icrc_ledger_types::icrc1::account::Account;

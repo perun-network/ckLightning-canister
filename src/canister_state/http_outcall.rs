@@ -3,13 +3,10 @@
 // =============================================================================
 
 use super::STATE;
-use ic_cdk::api::management_canister::http_request::{
-    http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod, HttpResponse, TransformArgs,
-    TransformContext,
+use ic_cdk::management_canister::{
+    http_request, transform_context_from_query,
+    HttpHeader, HttpMethod, HttpRequestArgs, HttpRequestResult, TransformArgs,
 };
-
-/// Cycles budget per outcall (~49M cycles, conservative estimate)
-const OUTCALL_CYCLES: u128 = 49_000_000;
 
 /// Notify the relay via HTTPS outcall (fire-and-forget).
 ///
@@ -34,8 +31,8 @@ pub fn notify_relay_webhook(path: &str) {
     let full_url = format!("{}{}", url, path);
 
     // Fire-and-forget: spawn the outcall, don't block the update call
-    ic_cdk::spawn(async move {
-        let request = CanisterHttpRequestArgument {
+    ic_cdk::futures::spawn(async move {
+        let request = HttpRequestArgs {
             url: full_url.clone(),
             method: HttpMethod::POST,
             headers: vec![
@@ -50,20 +47,20 @@ pub fn notify_relay_webhook(path: &str) {
             ],
             body: Some(br#"{"request_id":null}"#.to_vec()),
             max_response_bytes: Some(256),
-            transform: Some(TransformContext::from_name(
+            transform: Some(transform_context_from_query(
                 "transform_webhook_response".to_string(),
                 vec![],
             )),
         };
 
-        match http_request(request, OUTCALL_CYCLES).await {
-            Ok((_response,)) => {
+        match http_request(&request).await {
+            Ok(_response) => {
                 ic_cdk::println!("Webhook outcall to {} succeeded", full_url);
             }
-            Err((code, msg)) => {
+            Err(e) => {
                 ic_cdk::println!(
-                    "Webhook outcall to {} failed: {:?} - {}",
-                    full_url, code, msg
+                    "Webhook outcall to {} failed: {:?}",
+                    full_url, e
                 );
             }
         }
@@ -74,8 +71,8 @@ pub fn notify_relay_webhook(path: &str) {
 ///
 /// All replicas must produce the same response. We extract just the status code
 /// and discard the body, ensuring deterministic consensus across replicas.
-pub fn transform_webhook_response(args: TransformArgs) -> HttpResponse {
-    HttpResponse {
+pub fn transform_webhook_response(args: TransformArgs) -> HttpRequestResult {
+    HttpRequestResult {
         status: args.response.status,
         headers: vec![],
         body: vec![],

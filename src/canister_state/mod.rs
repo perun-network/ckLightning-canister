@@ -46,7 +46,7 @@ use crate::BtcPurpose;
 use crate::btc::address::get_balance;
 use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
-use crate::error::{BtcError, CklError, ResultBtc};
+use crate::error::{BtcError, CklError};
 use crate::helpers::execute_ledger_transfer;
 use crate::htlc::HtlcManager;
 use crate::ic_types::PoolAsset;
@@ -75,9 +75,8 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::error::ResultCkl;
-use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
+use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, Timestamp};
 use crate::receiver;
-use crate::require;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use lazy_static::lazy_static;
 use std::collections::{HashMap, HashSet};
@@ -659,22 +658,6 @@ where
 
         Ok(())
     }
-    async fn get_btc_address(&self, address_type: BtcAddressType) -> ResultBtc<String> {
-        let result = match address_type {
-            BtcAddressType::P2PKH => get_p2pkh_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2PKH error: {}", e))),
-            BtcAddressType::P2WPKH => get_p2wpkh_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2WPKH error: {}", e))),
-            BtcAddressType::P2TR => get_p2tr_key_path_only_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2TR error: {}", e))),
-        };
-
-        result
-    }
-
     async fn send_funds_to_l1(
         &self,
         receiver: Principal,
@@ -806,37 +789,6 @@ where
     /// Queries a registered state.
     pub fn state(&self, id: &ChannelId) -> Option<RegisteredState> {
         self.channels.get(&id).cloned()
-    }
-
-    /// Updates the holdings associated with a channel to the outcome of the
-    /// supplied state, then registers the state. If the state is the channel's
-    /// initial state, the holdings are not updated, as initial states are
-    /// allowed to be under-funded and are otherwise expected to match the
-    /// deposit distribution exactly if fully funded.
-    fn register_channel(&mut self, params: &Params, state: RegisteredState) -> ResultCkl<()> {
-        let total = &self.holdings_total(&params);
-        if total < &state.state.total() {
-            require!(
-                state.state.may_be_underfunded(),
-                CklError::InsufficientFunding
-            );
-        } else {
-            self.update_channel_holdings(&params, &state.state);
-        }
-
-        self.channels.insert(state.state.channel.clone(), state);
-        Ok(())
-    }
-
-    /// Pushes a state's funding allocation into the channel's holdings mapping
-    /// in the canister.
-    fn update_channel_holdings(&mut self, params: &Params, state: &State) {
-        for (i, outcome) in state.allocation.iter().enumerate() {
-            self.user_holdings.insert(
-                Funding::new_channel(state.channel.clone(), params.participants[i].clone()),
-                outcome.clone(),
-            );
-        }
     }
 
     /// Calculates the total funds held in a channel. If the channel is unknown

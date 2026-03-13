@@ -416,8 +416,8 @@ pub async fn generate_channel_secrets_impl(
     }
 
     // Generate master seed using IC's raw_rand()
-    let master_seed: [u8; 32] = match ic_cdk::api::management_canister::main::raw_rand().await {
-        Ok((random_bytes,)) => {
+    let master_seed: [u8; 32] = match ic_cdk::management_canister::raw_rand().await {
+        Ok(random_bytes) => {
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&random_bytes[..32]);
             seed

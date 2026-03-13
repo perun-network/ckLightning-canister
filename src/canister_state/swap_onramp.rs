@@ -13,7 +13,7 @@ use crate::ic_types::{
 };
 
 use bitcoin::hashes::{Hash, sha256};
-use candid::{Nat, Principal};
+use candid::Nat;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;

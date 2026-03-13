@@ -949,7 +949,7 @@ fn inspect_message() {
     };
 
     if allowed {
-        ic_cdk::api::call::accept_message();
+        ic_cdk::api::accept_message();
     }
     // Otherwise: message silently rejected, no cycles spent on arg decoding
 }
@@ -1075,8 +1075,8 @@ fn get_relay_info() -> GetRelayInfoResponse {
 #[query(name = "transform_webhook_response")]
 #[candid_method(query, rename = "transform_webhook_response")]
 fn transform_webhook_response_query(
-    args: ic_cdk::api::management_canister::http_request::TransformArgs,
-) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    args: ic_cdk::management_canister::TransformArgs,
+) -> ic_cdk::management_canister::HttpRequestResult {
     transform_webhook_response(args)
 }
 

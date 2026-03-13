@@ -33,7 +33,7 @@ use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_2};
 use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::{consensus::serialize, Address, CompressedPublicKey, PublicKey, ScriptBuf};
-use candid::{Nat, Principal};
+use candid::Nat;
 use ic_cdk::api::call::CallResult;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
