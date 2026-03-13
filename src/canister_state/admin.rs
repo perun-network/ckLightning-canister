@@ -21,7 +21,7 @@ use crate::ic_types::{
 };
 
 use candid::{Nat, Principal};
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
@@ -130,11 +130,12 @@ async fn expire_offramp_requests(now: u64, timeout: u64) {
             created_at_time: Some(ic_cdk::api::time()),
         };
 
-        let call_result: CallResult<(
-            Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-        )> = ic_cdk::call(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer", (transfer_args,)).await;
-
-        match call_result {
+        match Call::unbounded_wait(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer")
+            .with_args(&(transfer_args,))
+            .await
+            .map_err(ic_cdk::call::Error::from)
+            .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+        {
             Ok((Ok(block_index),)) => {
                 let mut state = STATE.write().expect("STATE lock: expire_offramp refund");
                 if let Some(req) = state.offramp_requests.get_mut(&request_id) {
@@ -147,8 +148,8 @@ async fn expire_offramp_requests(now: u64, timeout: u64) {
             Ok((Err(err),)) => {
                 ic_cdk::println!("Failed to refund ckBTC for expired offramp {}: {:?}", request_id, err);
             }
-            Err((code, msg)) => {
-                ic_cdk::println!("ckBTC refund call failed for offramp {}: {:?} - {}", request_id, code, msg);
+            Err(e) => {
+                ic_cdk::println!("ckBTC refund call failed for offramp {}: {}", request_id, e);
             }
         }
     }
@@ -635,11 +636,12 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
 
     let ckbtc_ledger = *CKBTC_LEDGER_PRINCIPAL;
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(ckbtc_ledger, "icrc1_transfer")
+        .with_args(&(transfer_arg,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
                 // Counter already zeroed before transfer
@@ -665,17 +667,17 @@ pub async fn withdraw_protocol_fees_impl(recipient: Principal) -> WithdrawProtoc
                 }
             }
         },
-        Err((code, msg)) => {
+        Err(e) => {
             // Restore counter on failure
             let mut state = STATE.write().expect("STATE lock: withdraw_protocol_fees write 3");
             state.protocol_fees_ckbtc = state.protocol_fees_ckbtc.saturating_add(amount);
-            ic_cdk::println!("Protocol fee withdrawal call failed: {:?} - {}", code, msg);
+            ic_cdk::println!("Protocol fee withdrawal call failed: {}", e);
             WithdrawProtocolFeesResponse {
                 success: false,
                 btc_amount: 0,
                 ckbtc_amount: amount,
                 ckbtc_block_index: None,
-                error: Some(format!("Ledger call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Ledger call failed: {}", e)),
             }
         }
     }
@@ -750,20 +752,19 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
     let icp_ledger = *ICP_LEDGER_PRINCIPAL;
     let canister_principal = ic_cdk::api::canister_self();
 
-    let balance_result: CallResult<(Nat,)> = ic_cdk::call(
-        icp_ledger,
-        "icrc1_balance_of",
-        (Account { owner: canister_principal, subaccount: None },),
-    ).await;
-
-    let balance: u64 = match balance_result {
+    let balance: u64 = match Call::unbounded_wait(icp_ledger, "icrc1_balance_of")
+        .with_args(&(Account { owner: canister_principal, subaccount: None },))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Nat,)>().map_err(Into::into))
+    {
         Ok((bal,)) => bal.0.try_into().unwrap_or(0),
-        Err((code, msg)) => {
+        Err(e) => {
             return WithdrawIcpFeesResponse {
                 success: false,
                 amount_e8s: 0,
                 block_index: None,
-                error: Some(format!("Failed to query ICP balance: {:?} - {}", code, msg)),
+                error: Some(format!("Failed to query ICP balance: {}", e)),
             };
         }
     };
@@ -791,11 +792,12 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(icp_ledger, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(icp_ledger, "icrc1_transfer")
+        .with_args(&(transfer_arg,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => WithdrawIcpFeesResponse {
                 success: true,
@@ -813,13 +815,13 @@ pub async fn withdraw_icp_fees_impl(recipient: Principal) -> WithdrawIcpFeesResp
                 }
             }
         },
-        Err((code, msg)) => {
-            ic_cdk::println!("ICP fee withdrawal call failed: {:?} - {}", code, msg);
+        Err(e) => {
+            ic_cdk::println!("ICP fee withdrawal call failed: {}", e);
             WithdrawIcpFeesResponse {
                 success: false,
                 amount_e8s: withdraw_amount,
                 block_index: None,
-                error: Some(format!("Ledger call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Ledger call failed: {}", e)),
             }
         }
     }

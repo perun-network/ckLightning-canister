@@ -67,7 +67,7 @@ use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
 
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
@@ -679,16 +679,17 @@ where
 
         let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
-        let call_result: CallResult<(
-            std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-        )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-        match call_result {
+        match Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+            .with_args(&(transfer_arg,))
+            .await
+            .map_err(ic_cdk::call::Error::from)
+            .and_then(|r| r.candid_tuple::<(std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+        {
             Ok((inner_result,)) => match inner_result {
                 Ok(_block_height) => Ok(()),
                 Err(_e) => Err(CklError::LedgerError),
             },
-            Err((_code, _msg)) => Err(CklError::LedgerError),
+            Err(_e) => Err(CklError::LedgerError),
         }
     }
 

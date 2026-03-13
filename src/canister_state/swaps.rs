@@ -14,7 +14,7 @@ use crate::ic_types::DEFAULT_CKBTC_FEE;
 
 use bitcoin::hashes::{Hash, sha256};
 use candid::{Nat, Principal};
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::time as blocktime;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
@@ -267,11 +267,12 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer")
+        .with_args(&(transfer_arg,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((Ok(block_index),)) => {
             finalize_swap_completion(payment_hash_arr, block_index.clone(), ckbtc_out).await;
             CompleteSwapResponse { success: true, block_index: Some(block_index), error: None }
@@ -281,12 +282,12 @@ pub async fn complete_swap_impl(request: CompleteSwapRequest) -> CompleteSwapRes
             restore_lp_and_fail_swap(&payment_hash_arr, ckbtc_out, reason.clone());
             CompleteSwapResponse { success: false, block_index: None, error: Some(format!("ckBTC transfer failed: {:?}", e)) }
         }
-        Err((code, msg)) => {
-            let reason = format!("Call error: {:?} - {}", code, msg);
+        Err(e) => {
+            let reason = format!("Call error: {}", e);
             restore_lp_and_fail_swap(&payment_hash_arr, ckbtc_out, reason);
             CompleteSwapResponse {
                 success: false, block_index: None,
-                error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Canister call failed: {}", e)),
             }
         }
     }
@@ -326,15 +327,16 @@ pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> 
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(icp_ledger, "icrc1_transfer", (transfer_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(icp_ledger, "icrc1_transfer")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => Ok(block_index),
             Err(e) => Err(format!("ICP transfer failed: {:?}", e)),
         },
-        Err((code, msg)) => Err(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+        Err(e) => Err(format!("ICP ledger call failed: {}", e)),
     }
 }

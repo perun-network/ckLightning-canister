@@ -16,7 +16,7 @@ use crate::ic_types::{
 
 use bitcoin::hashes::Hash;
 use candid::{Nat, Principal};
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use std::str::FromStr;
@@ -96,11 +96,12 @@ async fn collect_icp_fee(
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(*ICP_LEDGER_PRINCIPAL, "icrc2_transfer_from", (transfer_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(*ICP_LEDGER_PRINCIPAL, "icrc2_transfer_from")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((Ok(block_index),)) => Ok(block_index),
         Ok((Err(err),)) => {
             let fee_icp = icp_ddos_fee as f64 / 1e8;
@@ -109,8 +110,8 @@ async fn collect_icp_fee(
                 amount_sats,
             ))
         }
-        Err((code, msg)) => Err(offramp_err_with_amount(
-            format!("ICP ledger call failed: {:?} - {}", code, msg),
+        Err(e) => Err(offramp_err_with_amount(
+            format!("ICP ledger call failed: {}", e),
             amount_sats,
         )),
     }
@@ -133,11 +134,12 @@ async fn collect_offramp_ckbtc(
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(*CKBTC_LEDGER_PRINCIPAL, "icrc2_transfer_from", (transfer_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(*CKBTC_LEDGER_PRINCIPAL, "icrc2_transfer_from")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((Ok(_),)) => Ok(()),
         Ok((Err(err),)) => {
             ic_cdk::println!("ckBTC collection failed, ICP fee (block {}) not refunded", icp_fee_block_index);
@@ -146,10 +148,10 @@ async fn collect_offramp_ckbtc(
                 amount_sats,
             ))
         }
-        Err((code, msg)) => {
+        Err(e) => {
             ic_cdk::println!("ckBTC ledger call failed, ICP fee (block {}) not refunded", icp_fee_block_index);
             Err(offramp_err_with_amount(
-                format!("ckBTC ICRC-2 transfer_from failed: {:?} - {}. ICP fee was collected and is NOT refunded.", code, msg),
+                format!("ckBTC ICRC-2 transfer_from failed: {}. ICP fee was collected and is NOT refunded.", e),
                 amount_sats,
             ))
         }
@@ -407,11 +409,12 @@ async fn refund_ckbtc_to_user(
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer", (transfer_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(*CKBTC_LEDGER_PRINCIPAL, "icrc1_transfer")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((Ok(block_index),)) => {
             let mut state = STATE.write().expect("STATE lock: refund_ckbtc write");
             if let Some(info) = state.offramp_requests.get_mut(request_id) {
@@ -424,9 +427,9 @@ async fn refund_ckbtc_to_user(
             success: false, refund_block_index: None,
             error: Some(format!("Refund transfer failed (retryable): {:?}", err)),
         },
-        Err((code, msg)) => FailOfframpResponse {
+        Err(e) => FailOfframpResponse {
             success: false, refund_block_index: None,
-            error: Some(format!("Refund call failed (retryable): {:?} - {}", code, msg)),
+            error: Some(format!("Refund call failed (retryable): {}", e)),
         },
     }
 }

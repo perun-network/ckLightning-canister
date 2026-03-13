@@ -17,7 +17,7 @@ pub use candid::{
     CandidType, Deserialize, Int, Nat, Principal,
     types::{Serializer, Type},
 };
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_ledger_types::BlockIndex;
 use ic_ledger_types::{AccountIdentifier, DEFAULT_SUBACCOUNT};
 use icrc_ledger_types::icrc::generic_value::ICRC3Value;
@@ -194,8 +194,11 @@ impl CanisterTXQuerier {
 
         let ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
-        let call_result: CallResult<(GetBlocksResult,)> =
-            ic_cdk::call(ledger_id, "icrc3_get_blocks", (args.clone(),)).await;
+        let call_result: Result<(GetBlocksResult,), _> = Call::unbounded_wait(ledger_id, "icrc3_get_blocks")
+            .with_args(&(args.clone(),))
+            .await
+            .map_err(ic_cdk::call::Error::from)
+            .and_then(|r| r.candid_tuple().map_err(Into::into));
 
         if let Ok((result,)) = call_result {
             if !result.blocks.is_empty() {
@@ -214,12 +217,14 @@ impl CanisterTXQuerier {
                     };
 
                     if start <= block_height && block_height < start + len {
-                        let archived_result: CallResult<(GetBlocksResult,)> = ic_cdk::call(
+                        let archived_result: Result<(GetBlocksResult,), _> = Call::unbounded_wait(
                             archive.callback.canister_id,
                             &archive.callback.method,
-                            (req.clone(),),
                         )
-                        .await;
+                        .with_args(&(req.clone(),))
+                        .await
+                        .map_err(ic_cdk::call::Error::from)
+                        .and_then(|r| r.candid_tuple().map_err(Into::into));
 
                         if let Ok((archived_blocks_result,)) = archived_result {
                             if !archived_blocks_result.blocks.is_empty() {

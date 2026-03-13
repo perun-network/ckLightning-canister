@@ -10,7 +10,7 @@ use crate::ic_types::{
 };
 
 use candid::Nat;
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::msg_caller;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
@@ -50,11 +50,12 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc2_transfer_from", (transfer_from_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(ckbtc_ledger_id, "icrc2_transfer_from")
+        .with_args(&(transfer_from_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(_block_index) => {
                 // Credit the caller's LP balance
@@ -75,10 +76,10 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
                 error: Some(format!("ICRC-2 transfer_from failed: {:?}", e)),
             },
         },
-        Err((code, msg)) => LpDepositResponse {
+        Err(e) => LpDepositResponse {
             success: false,
             new_balance: Nat::from(0u64),
-            error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+            error: Some(format!("Canister call failed: {}", e)),
         },
     }
 }
@@ -155,11 +156,12 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+        .with_args(&(transfer_arg,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
                 let state = STATE.read().expect("STATE lock: withdraw_ckbtc read");
@@ -188,7 +190,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 }
             }
         },
-        Err((code, msg)) => {
+        Err(e) => {
             // Call failed - restore the LP balance
             let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write 3");
             state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
@@ -199,7 +201,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 amount_withdrawn: Nat::from(0u64),
                 new_balance,
                 block_index: None,
-                error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Canister call failed: {}", e)),
             }
         }
     }

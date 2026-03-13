@@ -14,7 +14,7 @@ use crate::ic_types::{
 
 use bitcoin::hashes::{Hash, sha256};
 use candid::Nat;
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
@@ -72,11 +72,12 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(icp_ledger, "icrc2_transfer_from", (transfer_args,)).await;
-
-    let icp_fee_block_index = match call_result {
+    let icp_fee_block_index = match Call::unbounded_wait(icp_ledger, "icrc2_transfer_from")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => block_index,
             Err(err) => {
@@ -88,11 +89,11 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
                 };
             }
         },
-        Err((code, msg)) => {
+        Err(e) => {
             return OnrampInvoiceResponse {
                 request_id: String::new(),
                 success: false,
-                error: Some(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+                error: Some(format!("ICP ledger call failed: {}", e)),
             };
         }
     };
