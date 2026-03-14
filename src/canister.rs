@@ -203,7 +203,7 @@ async fn transaction_notification(
 #[query]
 #[candid_method(query)]
 /// Returns the funds deposited for a channel's specified participant, if any.
-/// this function should be used to check whether all participants have
+/// This function should be used to check whether all participants have
 /// deposited their owed funds into a channel to ensure it is fully funded.
 fn query_user_lp_holdings(
     funding: FundingLPQueryArgs,
