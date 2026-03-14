@@ -19,24 +19,11 @@ type ChannelSecretsInfo = record {
   delayed_payment_basepoint : blob;
 };
 type CklError = variant {
-  InvalidInput;
-  InsufficientFunding;
-  NotFinalized;
-  InvalidSignature;
-  OutdatedState;
-  PubKeyMismatch;
   UnauthorizedCaller;
   LedgerError;
-  Authentication;
-  InvalidPubKey;
-  AlreadyConcluded;
   InsufficientLiquidity;
-  SignatureVerificationFailed;
   Other : text;
   NoHoldingsFound;
-  ReceiverError : ICPReceiverError;
-  ConfirmationError;
-  SerializationError;
 };
 type CompleteOfframpRequest = record {
   request_id : text;
