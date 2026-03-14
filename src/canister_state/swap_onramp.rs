@@ -6,7 +6,6 @@ use super::STATE;
 use super::admin::{check_onramp_rate_limit, verify_invoice_node_pubkey};
 use super::http_outcall::notify_relay_webhook;
 use crate::ic_types::{
-    ICP_LEDGER_PRINCIPAL,
     OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestInfo, OnrampRequestState,
     PendingInvoiceRequest, SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
     SwapInfo, SwapState,
@@ -14,8 +13,6 @@ use crate::ic_types::{
 
 use bitcoin::hashes::{Hash, sha256};
 use candid::Nat;
-use ic_cdk::call::Call;
-use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
 use std::str::FromStr;
@@ -46,54 +43,14 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         };
     }
 
-    // Read configured ICP anti-DDoS fee from state
-    let icp_ddos_fee = {
-        let state = STATE.read().expect("STATE lock: request_onramp_invoice read");
-        state.icp_ddos_fee_e8s
-    };
-
     // Collect ICP anti-DDoS fee upfront via ICRC-2 transfer_from
-    let icp_ledger = *ICP_LEDGER_PRINCIPAL;
-    let canister_principal = canister_self();
-
-    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
-        spender_subaccount: None,
-        from: icrc_ledger_types::icrc1::account::Account {
-            owner: caller,
-            subaccount: None,
-        },
-        to: icrc_ledger_types::icrc1::account::Account {
-            owner: canister_principal,
-            subaccount: None,
-        },
-        amount: candid::Nat::from(icp_ddos_fee),
-        fee: None,
-        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:onramp_icp_fee".to_vec())),
-        created_at_time: Some(ic_cdk::api::time()),
-    };
-
-    let icp_fee_block_index = match Call::unbounded_wait(icp_ledger, "icrc2_transfer_from")
-        .with_args(&(transfer_args,))
-        .await
-        .map_err(ic_cdk::call::Error::from)
-        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
-    {
-        Ok((inner_result,)) => match inner_result {
-            Ok(block_index) => block_index,
-            Err(err) => {
-                let fee_icp = icp_ddos_fee as f64 / 1e8;
-                return OnrampInvoiceResponse {
-                    request_id: String::new(),
-                    success: false,
-                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?")),
-                };
-            }
-        },
+    let icp_fee_block_index = match super::swaps::collect_icp_fee(caller, b"ckl:onramp_icp_fee").await {
+        Ok(idx) => idx,
         Err(e) => {
             return OnrampInvoiceResponse {
                 request_id: String::new(),
                 success: false,
-                error: Some(format!("ICP ledger call failed: {e}")),
+                error: Some(e),
             };
         }
     };

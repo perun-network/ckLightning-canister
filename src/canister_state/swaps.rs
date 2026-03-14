@@ -304,6 +304,38 @@ fn check_swap_state_pending(state: &SwapState) -> Result<(), String> {
     }
 }
 
+/// Collect ICP anti-DDoS fee from a caller via ICRC-2 transfer_from.
+pub(super) async fn collect_icp_fee(caller: Principal, memo: &[u8]) -> Result<Nat, String> {
+    let icp_ddos_fee = {
+        let state = STATE.read().expect("STATE lock: collect_icp_fee");
+        state.icp_ddos_fee_e8s
+    };
+
+    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
+        spender_subaccount: None,
+        from: icrc_ledger_types::icrc1::account::Account { owner: caller, subaccount: None },
+        to: icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::api::canister_self(), subaccount: None },
+        amount: candid::Nat::from(icp_ddos_fee),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(memo.to_vec())),
+        created_at_time: Some(ic_cdk::api::time()),
+    };
+
+    match Call::unbounded_wait(*ICP_LEDGER_PRINCIPAL, "icrc2_transfer_from")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
+        Ok((Ok(block_index),)) => Ok(block_index),
+        Ok((Err(err),)) => {
+            let fee_icp = icp_ddos_fee as f64 / 1e8;
+            Err(format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?"))
+        }
+        Err(e) => Err(format!("ICP ledger call failed: {e}")),
+    }
+}
+
 /// Helper function to refund ICP anti-DDoS fee to a recipient
 pub(super) async fn refund_icp_fee(recipient: Principal) -> Result<Nat, String> {
     let icp_ledger = *ICP_LEDGER_PRINCIPAL;

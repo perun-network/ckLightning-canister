@@ -8,7 +8,7 @@ use super::http_outcall::notify_relay_webhook;
 use super::swaps::refund_icp_fee;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    CKBTC_LEDGER_PRINCIPAL, ICP_LEDGER_PRINCIPAL,
+    CKBTC_LEDGER_PRINCIPAL,
     OfframpRequest, OfframpResponse, OfframpRequestInfo, OfframpRequestState,
     PendingOfframpRequest, CompleteOfframpRequest, CompleteOfframpResponse,
     FailOfframpRequest, FailOfframpResponse, GetOfframpStatusResponse,
@@ -76,46 +76,6 @@ fn compute_offramp_pricing(btc_out: u64) -> Result<(u64, u64), OfframpResponse> 
     Ok((swap_result.output_amount, swap_result.protocol_fee))
 }
 
-/// Collect ICP anti-DDoS fee from the caller via ICRC-2 transfer_from.
-async fn collect_icp_fee(
-    caller: Principal,
-    amount_sats: u64,
-) -> Result<Nat, OfframpResponse> {
-    let icp_ddos_fee = {
-        let state = STATE.read().expect("STATE lock: collect_icp_fee");
-        state.icp_ddos_fee_e8s
-    };
-
-    let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
-        spender_subaccount: None,
-        from: icrc_ledger_types::icrc1::account::Account { owner: caller, subaccount: None },
-        to: icrc_ledger_types::icrc1::account::Account { owner: canister_self(), subaccount: None },
-        amount: candid::Nat::from(icp_ddos_fee),
-        fee: None,
-        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:offramp_icp_fee".to_vec())),
-        created_at_time: Some(ic_cdk::api::time()),
-    };
-
-    match Call::unbounded_wait(*ICP_LEDGER_PRINCIPAL, "icrc2_transfer_from")
-        .with_args(&(transfer_args,))
-        .await
-        .map_err(ic_cdk::call::Error::from)
-        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
-    {
-        Ok((Ok(block_index),)) => Ok(block_index),
-        Ok((Err(err),)) => {
-            let fee_icp = icp_ddos_fee as f64 / 1e8;
-            Err(offramp_err_with_amount(
-                format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?"),
-                amount_sats,
-            ))
-        }
-        Err(e) => Err(offramp_err_with_amount(
-            format!("ICP ledger call failed: {e}"),
-            amount_sats,
-        )),
-    }
-}
 
 /// Take custody of the user's ckBTC via ICRC-2 transfer_from.
 async fn collect_offramp_ckbtc(
@@ -212,9 +172,9 @@ pub async fn request_offramp_impl(request: OfframpRequest) -> OfframpResponse {
     };
 
     // STEP 1: Collect ICP anti-DDoS fee
-    let icp_fee_block_index = match collect_icp_fee(caller, inv.amount_sats).await {
+    let icp_fee_block_index = match super::swaps::collect_icp_fee(caller, b"ckl:offramp_icp_fee").await {
         Ok(idx) => idx,
-        Err(resp) => return resp,
+        Err(e) => return offramp_err_with_amount(e, inv.amount_sats),
     };
 
     // STEP 2: Take custody of user's ckBTC via ICRC-2
