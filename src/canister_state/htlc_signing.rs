@@ -33,7 +33,7 @@ pub fn get_channel_secrets_info_impl(channel_id: Vec<u8>) -> Option<ChannelSecre
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
     let channel_id: [u8; 32] = channel_id.try_into().ok()?;
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_channel_secrets_info");
     let secrets = state.channel_secrets.get(&channel_id)?;
 
     let secp = Secp256k1::new();
@@ -160,7 +160,7 @@ pub fn create_htlc_with_tx_details_impl(
     );
 
     // Store HTLC in HtlcManager
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: create_htlc_with_tx_details");
 
     if let Err(e) = state.htlc_manager.add_htlc(
         payment_hash,
@@ -201,162 +201,107 @@ pub fn create_htlc_with_tx_details_impl(
 // HTLC Signing
 // =============================================================================
 
+/// Construct a failed SignHtlcResponse.
+fn htlc_err(msg: impl Into<String>) -> SignHtlcResponse {
+    SignHtlcResponse { success: false, signed_tx: None, txid: None, error: Some(msg.into()) }
+}
+
+/// Data loaded from state for HTLC signing (shared by success and timeout paths).
+struct HtlcSigningContext {
+    tx_details: HtlcTxDetails,
+    cltv_expiry: u32,
+    secrets: ChannelSecretsInternal,
+}
+
+/// Load tx details, HTLC info, and channel secrets for a payment hash.
+fn load_htlc_signing_context(payment_hash: &[u8; 32]) -> Result<HtlcSigningContext, SignHtlcResponse> {
+    let state = STATE.read().expect("STATE lock: load_htlc_signing_context");
+
+    let tx_details = state.htlc_tx_details.get(payment_hash)
+        .cloned()
+        .ok_or_else(|| htlc_err("HTLC transaction details not found"))?;
+
+    let htlc = state.htlc_manager.get_htlc(payment_hash)
+        .cloned()
+        .ok_or_else(|| htlc_err("HTLC not found"))?;
+
+    let secrets = state.channel_secrets.get(&tx_details.channel_id)
+        .cloned()
+        .ok_or_else(|| htlc_err("Channel secrets not found"))?;
+
+    Ok(HtlcSigningContext { tx_details, cltv_expiry: htlc.cltv_expiry, secrets })
+}
+
+/// Parse an address string as unchecked and assume_checked.
+fn parse_address_unchecked(addr: &str, label: &str) -> Result<bitcoin::Address, SignHtlcResponse> {
+    let parsed: bitcoin::Address<bitcoin::address::NetworkUnchecked> = addr.parse()
+        .map_err(|_| htlc_err(format!("Invalid {label} address")))?;
+    Ok(parsed.assume_checked())
+}
+
+/// Build the HTLC outpoint from transaction details.
+fn build_htlc_outpoint(tx_details: &HtlcTxDetails) -> bitcoin::OutPoint {
+    use bitcoin::{OutPoint, Txid};
+    OutPoint {
+        txid: Txid::from_byte_array(tx_details.htlc_outpoint_txid),
+        vout: tx_details.htlc_outpoint_vout,
+    }
+}
+
 /// Sign an HTLC-Success transaction (receiver claims with preimage).
 pub fn sign_htlc_success_impl(request: SignHtlcSuccessRequest) -> SignHtlcResponse {
     use bitcoin::secp256k1::SecretKey;
-    use bitcoin::{OutPoint, ScriptBuf, Txid};
+    use bitcoin::ScriptBuf;
 
-    // Validate preimage and compute payment hash
     if request.preimage.len() != 32 {
-        return SignHtlcResponse {
-            success: false,
-            signed_tx: None,
-            txid: None,
-            error: Some("preimage must be 32 bytes".to_string()),
-        };
+        return htlc_err("preimage must be 32 bytes");
     }
 
     let payment_hash: [u8; 32] = match request.payment_hash.clone().try_into() {
         Ok(h) => h,
-        Err(_) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("payment_hash must be 32 bytes".to_string()),
-            };
-        }
+        Err(_) => return htlc_err("payment_hash must be 32 bytes"),
     };
 
-    // Verify preimage matches payment hash
     if !verify_preimage(&request.preimage, &payment_hash) {
-        return SignHtlcResponse {
-            success: false,
-            signed_tx: None,
-            txid: None,
-            error: Some("preimage does not match payment_hash".to_string()),
-        };
+        return htlc_err("preimage does not match payment_hash");
     }
 
-    let state = STATE.read().unwrap();
-
-    // Get HTLC transaction details
-    let tx_details = match state.htlc_tx_details.get(&payment_hash) {
-        Some(d) => d.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("HTLC transaction details not found".to_string()),
-            };
-        }
+    let ctx = match load_htlc_signing_context(&payment_hash) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
 
-    // Get HTLC info
-    let _htlc = match state.htlc_manager.get_htlc(&payment_hash) {
-        Some(h) => h.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("HTLC not found".to_string()),
-            };
-        }
+    let receiver_address = match parse_address_unchecked(&ctx.tx_details.receiver_address, "receiver") {
+        Ok(a) => a,
+        Err(resp) => return resp,
     };
 
-    // Get channel secrets
-    let secrets = match state.channel_secrets.get(&tx_details.channel_id) {
-        Some(s) => s.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("Channel secrets not found".to_string()),
-            };
-        }
-    };
+    let htlc_outpoint = build_htlc_outpoint(&ctx.tx_details);
 
-    drop(state); // Release lock
-
-    // Parse receiver address
-    let receiver_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        match tx_details.receiver_address.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                return SignHtlcResponse {
-                    success: false,
-                    signed_tx: None,
-                    txid: None,
-                    error: Some("Invalid receiver address".to_string()),
-                };
-            }
-        };
-    let receiver_address = receiver_address.assume_checked();
-
-    // Build HTLC outpoint
-    let txid_bytes: [u8; 32] = tx_details.htlc_outpoint_txid;
-    let txid = Txid::from_byte_array(txid_bytes);
-    let htlc_outpoint = OutPoint {
-        txid,
-        vout: tx_details.htlc_outpoint_vout,
-    };
-
-    // Build HTLC-Success transaction
     let mut tx = build_htlc_success_tx(
-        htlc_outpoint,
-        tx_details.htlc_amount_sat,
-        &receiver_address,
-        request.fee_sat,
+        htlc_outpoint, ctx.tx_details.htlc_amount_sat, &receiver_address, request.fee_sat,
     );
 
-    // Get the witness script
-    let witness_script = ScriptBuf::from_bytes(tx_details.witness_script.clone());
+    let witness_script = ScriptBuf::from_bytes(ctx.tx_details.witness_script.clone());
 
-    // Sign the transaction
-    let htlc_secret_key = match SecretKey::from_slice(&secrets.htlc_base_secret) {
+    let htlc_secret_key = match SecretKey::from_slice(&ctx.secrets.htlc_base_secret) {
         Ok(sk) => sk,
-        Err(_) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("Invalid HTLC secret key".to_string()),
-            };
-        }
+        Err(_) => return htlc_err("Invalid HTLC secret key"),
     };
 
     let signature = match sign_htlc_input(
-        &tx,
-        0, // input index
-        &witness_script,
-        tx_details.htlc_amount_sat,
-        &htlc_secret_key,
+        &tx, 0, &witness_script, ctx.tx_details.htlc_amount_sat, &htlc_secret_key,
     ) {
         Ok(sig) => sig,
-        Err(e) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Failed to sign: {}", e)),
-            };
-        }
+        Err(e) => return htlc_err(format!("Failed to sign: {e}")),
     };
 
-    // Apply the success witness
     apply_htlc_success_witness(&mut tx, 0, signature, request.preimage, &witness_script);
-
-    // Serialize the signed transaction
-    let signed_tx = serialize(&tx);
-    let result_txid = tx.compute_txid().to_byte_array().to_vec();
 
     SignHtlcResponse {
         success: true,
-        signed_tx: Some(signed_tx),
-        txid: Some(result_txid),
+        signed_tx: Some(serialize(&tx)),
+        txid: Some(tx.compute_txid().to_byte_array().to_vec()),
         error: None,
     }
 }
@@ -364,140 +309,50 @@ pub fn sign_htlc_success_impl(request: SignHtlcSuccessRequest) -> SignHtlcRespon
 /// Sign an HTLC-Timeout transaction (sender reclaims after expiry).
 pub fn sign_htlc_timeout_impl(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
     use bitcoin::secp256k1::SecretKey;
-    use bitcoin::{OutPoint, ScriptBuf, Txid};
+    use bitcoin::ScriptBuf;
 
     let payment_hash: [u8; 32] = match request.payment_hash.clone().try_into() {
         Ok(h) => h,
-        Err(_) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("payment_hash must be 32 bytes".to_string()),
-            };
-        }
+        Err(_) => return htlc_err("payment_hash must be 32 bytes"),
     };
 
-    let state = STATE.read().unwrap();
-
-    // Get HTLC transaction details
-    let tx_details = match state.htlc_tx_details.get(&payment_hash) {
-        Some(d) => d.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("HTLC transaction details not found".to_string()),
-            };
-        }
+    let ctx = match load_htlc_signing_context(&payment_hash) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
 
-    // Get HTLC info
-    let htlc = match state.htlc_manager.get_htlc(&payment_hash) {
-        Some(h) => h.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("HTLC not found".to_string()),
-            };
-        }
+    let sender_address = match parse_address_unchecked(&ctx.tx_details.sender_address, "sender") {
+        Ok(a) => a,
+        Err(resp) => return resp,
     };
 
-    // Get channel secrets
-    let secrets = match state.channel_secrets.get(&tx_details.channel_id) {
-        Some(s) => s.clone(),
-        None => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("Channel secrets not found".to_string()),
-            };
-        }
-    };
+    let htlc_outpoint = build_htlc_outpoint(&ctx.tx_details);
 
-    drop(state); // Release lock
-
-    // Parse sender address
-    let sender_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        match tx_details.sender_address.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                return SignHtlcResponse {
-                    success: false,
-                    signed_tx: None,
-                    txid: None,
-                    error: Some("Invalid sender address".to_string()),
-                };
-            }
-        };
-    let sender_address = sender_address.assume_checked();
-
-    // Build HTLC outpoint
-    let txid_bytes: [u8; 32] = tx_details.htlc_outpoint_txid;
-    let txid = Txid::from_byte_array(txid_bytes);
-    let htlc_outpoint = OutPoint {
-        txid,
-        vout: tx_details.htlc_outpoint_vout,
-    };
-
-    // Build HTLC-Timeout transaction
     let mut tx = build_htlc_timeout_tx(
-        htlc_outpoint,
-        tx_details.htlc_amount_sat,
-        &sender_address,
-        htlc.cltv_expiry,
-        request.fee_sat,
+        htlc_outpoint, ctx.tx_details.htlc_amount_sat, &sender_address,
+        ctx.cltv_expiry, request.fee_sat,
     );
 
-    // Get the witness script
-    let witness_script = ScriptBuf::from_bytes(tx_details.witness_script.clone());
+    let witness_script = ScriptBuf::from_bytes(ctx.tx_details.witness_script.clone());
 
-    // Sign the transaction
-    let htlc_secret_key = match SecretKey::from_slice(&secrets.htlc_base_secret) {
+    let htlc_secret_key = match SecretKey::from_slice(&ctx.secrets.htlc_base_secret) {
         Ok(sk) => sk,
-        Err(_) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some("Invalid HTLC secret key".to_string()),
-            };
-        }
+        Err(_) => return htlc_err("Invalid HTLC secret key"),
     };
 
     let signature = match sign_htlc_input(
-        &tx,
-        0, // input index
-        &witness_script,
-        tx_details.htlc_amount_sat,
-        &htlc_secret_key,
+        &tx, 0, &witness_script, ctx.tx_details.htlc_amount_sat, &htlc_secret_key,
     ) {
         Ok(sig) => sig,
-        Err(e) => {
-            return SignHtlcResponse {
-                success: false,
-                signed_tx: None,
-                txid: None,
-                error: Some(format!("Failed to sign: {}", e)),
-            };
-        }
+        Err(e) => return htlc_err(format!("Failed to sign: {e}")),
     };
 
-    // Apply the timeout witness
     apply_htlc_timeout_witness(&mut tx, 0, signature, &witness_script);
-
-    // Serialize the signed transaction
-    let signed_tx = serialize(&tx);
-    let result_txid = tx.compute_txid().to_byte_array().to_vec();
 
     SignHtlcResponse {
         success: true,
-        signed_tx: Some(signed_tx),
-        txid: Some(result_txid),
+        signed_tx: Some(serialize(&tx)),
+        txid: Some(tx.compute_txid().to_byte_array().to_vec()),
         error: None,
     }
 }
@@ -536,7 +391,7 @@ pub async fn generate_channel_secrets_impl(
 
     // Check if secrets already exist for this channel
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: generate_channel_secrets read");
         if state.channel_secrets.contains_key(&channel_keys_id) {
             // Return existing public keys
             return match get_channel_secrets_info_impl(channel_keys_id.to_vec()) {
@@ -561,8 +416,8 @@ pub async fn generate_channel_secrets_impl(
     }
 
     // Generate master seed using IC's raw_rand()
-    let master_seed: [u8; 32] = match ic_cdk::api::management_canister::main::raw_rand().await {
-        Ok((random_bytes,)) => {
+    let master_seed: [u8; 32] = match ic_cdk::management_canister::raw_rand().await {
+        Ok(random_bytes) => {
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&random_bytes[..32]);
             seed
@@ -574,7 +429,7 @@ pub async fn generate_channel_secrets_impl(
                 revocation_basepoint: None,
                 delayed_payment_basepoint: None,
                 payment_point: None,
-                error: Some(format!("raw_rand() failed: {:?}", e)),
+                error: Some(format!("raw_rand() failed: {e:?}")),
             };
         }
     };
@@ -596,61 +451,28 @@ pub async fn generate_channel_secrets_impl(
 
     // Compute public keys from secrets
     let secp = Secp256k1::new();
-
-    let htlc_basepoint = match SecretKey::from_slice(&htlc_base_secret) {
-        Ok(sk) => sk.public_key(&secp).serialize().to_vec(),
-        Err(_) => {
-            return GenerateChannelSecretsResponse {
+    let to_pubkey = |secret: &[u8; 32], label: &str| -> Result<Vec<u8>, GenerateChannelSecretsResponse> {
+        SecretKey::from_slice(secret)
+            .map(|sk| sk.public_key(&secp).serialize().to_vec())
+            .map_err(|_| GenerateChannelSecretsResponse {
                 success: false,
-                htlc_basepoint: None,
-                revocation_basepoint: None,
-                delayed_payment_basepoint: None,
-                payment_point: None,
-                error: Some("Derived invalid htlc_base_secret".to_string()),
-            };
-        }
+                htlc_basepoint: None, revocation_basepoint: None,
+                delayed_payment_basepoint: None, payment_point: None,
+                error: Some(format!("Derived invalid {label}")),
+            })
     };
 
-    let revocation_basepoint = match SecretKey::from_slice(&revocation_base_secret) {
-        Ok(sk) => sk.public_key(&secp).serialize().to_vec(),
-        Err(_) => {
-            return GenerateChannelSecretsResponse {
-                success: false,
-                htlc_basepoint: None,
-                revocation_basepoint: None,
-                delayed_payment_basepoint: None,
-                payment_point: None,
-                error: Some("Derived invalid revocation_base_secret".to_string()),
-            };
-        }
+    let htlc_basepoint = match to_pubkey(&htlc_base_secret, "htlc_base_secret") {
+        Ok(v) => v, Err(r) => return r,
     };
-
-    let delayed_payment_basepoint = match SecretKey::from_slice(&delayed_payment_base_secret) {
-        Ok(sk) => sk.public_key(&secp).serialize().to_vec(),
-        Err(_) => {
-            return GenerateChannelSecretsResponse {
-                success: false,
-                htlc_basepoint: None,
-                revocation_basepoint: None,
-                delayed_payment_basepoint: None,
-                payment_point: None,
-                error: Some("Derived invalid delayed_payment_base_secret".to_string()),
-            };
-        }
+    let revocation_basepoint = match to_pubkey(&revocation_base_secret, "revocation_base_secret") {
+        Ok(v) => v, Err(r) => return r,
     };
-
-    let payment_point = match SecretKey::from_slice(&payment_secret) {
-        Ok(sk) => sk.public_key(&secp).serialize().to_vec(),
-        Err(_) => {
-            return GenerateChannelSecretsResponse {
-                success: false,
-                htlc_basepoint: None,
-                revocation_basepoint: None,
-                delayed_payment_basepoint: None,
-                payment_point: None,
-                error: Some("Derived invalid payment_secret".to_string()),
-            };
-        }
+    let delayed_payment_basepoint = match to_pubkey(&delayed_payment_base_secret, "delayed_payment_base_secret") {
+        Ok(v) => v, Err(r) => return r,
+    };
+    let payment_point = match to_pubkey(&payment_secret, "payment_secret") {
+        Ok(v) => v, Err(r) => return r,
     };
 
     // Store in canister state
@@ -663,7 +485,7 @@ pub async fn generate_channel_secrets_impl(
     };
 
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: generate_channel_secrets write");
         state.channel_secrets.insert(channel_keys_id, internal_secrets);
     }
 
@@ -702,7 +524,7 @@ pub fn get_per_commitment_point_impl(
         }
     };
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_per_commitment_point");
     let secrets = match state.channel_secrets.get(&channel_keys_id) {
         Some(s) => s,
         None => {
@@ -726,7 +548,7 @@ pub fn get_per_commitment_point_impl(
             return GetPerCommitmentPointResponse {
                 success: false,
                 point: None,
-                error: Some(format!("Invalid per-commitment secret: {:?}", e)),
+                error: Some(format!("Invalid per-commitment secret: {e:?}")),
             };
         }
     };
@@ -757,7 +579,7 @@ pub fn release_commitment_secret_impl(
         }
     };
 
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: release_commitment_secret");
     let secrets = match state.channel_secrets.get(&channel_keys_id) {
         Some(s) => s,
         None => {
@@ -800,7 +622,7 @@ pub fn register_channel_info_impl(request: RegisterChannelInfoRequest) -> bool {
         return false;
     }
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: register_channel_info");
     state.channel_counterparty_pubkeys.insert(
         channel_keys_id,
         request.counterparty_funding_pubkey,
@@ -823,7 +645,7 @@ mod tests {
             payment_secret: [24u8; 32],
             commitment_seed: [25u8; 32],
         };
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: setup_test_channel_secrets");
         state.channel_secrets.insert(channel_keys_id, secrets.clone());
         secrets
     }
@@ -973,7 +795,7 @@ mod tests {
         assert!(result, "Should succeed with valid pubkey");
 
         // Verify it's stored in STATE
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: test_register_channel_info");
         let stored = state.channel_counterparty_pubkeys.get(&channel_keys_id).unwrap();
         assert_eq!(stored, &counterparty_pubkey, "Stored pubkey must match input");
     }

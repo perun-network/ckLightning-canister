@@ -6,18 +6,19 @@ use super::STATE;
 use super::admin::{check_onramp_rate_limit, verify_invoice_node_pubkey};
 use super::http_outcall::notify_relay_webhook;
 use crate::ic_types::{
-    DEVNET_ICP_LEDGER,
+    ICP_LEDGER_PRINCIPAL,
     OnrampInvoiceRequest, OnrampInvoiceResponse, OnrampRequestInfo, OnrampRequestState,
     PendingInvoiceRequest, SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
     SwapInfo, SwapState,
 };
 
 use bitcoin::hashes::{Hash, sha256};
-use candid::{Nat, Principal};
-use ic_cdk::api::call::CallResult;
+use candid::Nat;
+use ic_cdk::call::Call;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
+use std::str::FromStr;
 
 /// Request a new onramp invoice
 ///
@@ -47,12 +48,12 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 
     // Read configured ICP anti-DDoS fee from state
     let icp_ddos_fee = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: request_onramp_invoice read");
         state.icp_ddos_fee_e8s
     };
 
     // Collect ICP anti-DDoS fee upfront via ICRC-2 transfer_from
-    let icp_ledger = Principal::from_text(DEVNET_ICP_LEDGER).unwrap();
+    let icp_ledger = *ICP_LEDGER_PRINCIPAL;
     let canister_principal = canister_self();
 
     let transfer_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
@@ -67,15 +68,16 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
         },
         amount: candid::Nat::from(icp_ddos_fee),
         fee: None,
-        memo: None,
-        created_at_time: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:onramp_icp_fee".to_vec())),
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(icp_ledger, "icrc2_transfer_from", (transfer_args,)).await;
-
-    let icp_fee_block_index = match call_result {
+    let icp_fee_block_index = match Call::unbounded_wait(icp_ledger, "icrc2_transfer_from")
+        .with_args(&(transfer_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => block_index,
             Err(err) => {
@@ -83,15 +85,15 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
                 return OnrampInvoiceResponse {
                     request_id: String::new(),
                     success: false,
-                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {:?}. Did you approve {} ICP?", err, fee_icp)),
+                    error: Some(format!("Failed to collect ICP anti-DDoS fee: {err:?}. Did you approve {fee_icp} ICP?")),
                 };
             }
         },
-        Err((code, msg)) => {
+        Err(e) => {
             return OnrampInvoiceResponse {
                 request_id: String::new(),
                 success: false,
-                error: Some(format!("ICP ledger call failed: {:?} - {}", code, msg)),
+                error: Some(format!("ICP ledger call failed: {e}")),
             };
         }
     };
@@ -105,7 +107,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
     // Convert first 16 bytes to hex string
     let request_id = request_id_hash.as_byte_array()[..16]
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
     // Create the request info with ICP fee tracking
@@ -125,7 +127,9 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 
     // Store the request
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: request_onramp_invoice write");
+        state.active_onramp_ids.insert(request_id.clone());
+        state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_add(request.amount_sats);
         state.onramp_requests.insert(request_id.clone(), request_info);
     }
 
@@ -143,7 +147,7 @@ pub async fn request_onramp_invoice_impl(request: OnrampInvoiceRequest) -> Onram
 ///
 /// Called by the relay to find requests that need invoices created.
 pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_pending_invoice_requests");
 
     state.onramp_requests
         .values()
@@ -152,7 +156,7 @@ pub fn get_pending_invoice_requests_impl() -> Vec<PendingInvoiceRequest> {
             request_id: req.request_id.clone(),
             recipient: req.recipient,
             amount_sats: req.amount_sats,
-            amount_msat: req.amount_sats * 1000,
+            amount_msat: req.amount_sats.saturating_mul(1000),
             created_at: req.created_at,
         })
         .collect()
@@ -181,11 +185,52 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
         ic_cdk::println!("Invoice verification FAILED: {}", e);
         return SubmitInvoiceResponse {
             success: false,
-            error: Some(format!("Invoice verification failed: {}", e)),
+            error: Some(format!("Invoice verification failed: {e}")),
         };
     }
 
-    let mut state = STATE.write().unwrap();
+    // SECURITY: Parse BOLT11 and verify payment_hash and amount match the submitted values.
+    // This prevents a compromised relay from submitting mismatched invoices.
+    let parsed_invoice = match lightning_invoice::Bolt11Invoice::from_str(&request.invoice) {
+        Ok(inv) => inv,
+        Err(e) => {
+            return SubmitInvoiceResponse {
+                success: false,
+                error: Some(format!("Invalid BOLT11 invoice: {e}")),
+            };
+        }
+    };
+
+    // Verify payment_hash matches
+    let invoice_payment_hash: &[u8] = parsed_invoice.payment_hash().as_ref();
+    if invoice_payment_hash != request.payment_hash.as_slice() {
+        return SubmitInvoiceResponse {
+            success: false,
+            error: Some("Invoice payment_hash does not match submitted payment_hash".to_string()),
+        };
+    }
+
+    // Verify amount matches the request
+    if let Some(invoice_msat) = parsed_invoice.amount_milli_satoshis() {
+        // Look up the request to get expected amount
+        let expected_msat = {
+            let state = STATE.read().expect("STATE lock: submit_invoice read");
+            state.onramp_requests.get(&request.request_id)
+                .map(|req| req.amount_sats.saturating_mul(1000))
+        };
+        if let Some(expected) = expected_msat {
+            if invoice_msat != expected {
+                return SubmitInvoiceResponse {
+                    success: false,
+                    error: Some(format!(
+                        "Invoice amount {invoice_msat}msat does not match request amount {expected}msat"
+                    )),
+                };
+            }
+        }
+    }
+
+    let mut state = STATE.write().expect("STATE lock: submit_invoice write");
 
     // Find the request
     let request_info = match state.onramp_requests.get_mut(&request.request_id) {
@@ -218,7 +263,7 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
 
     let swap_info = SwapInfo {
         payment_hash: request.payment_hash,
-        amount_msat: request_info.amount_sats * 1000,
+        amount_msat: request_info.amount_sats.saturating_mul(1000),
         recipient: request_info.recipient,
         created_at: blocktime(),
         expiry_timestamp: request.expiry_timestamp,
@@ -236,14 +281,30 @@ pub fn submit_invoice_impl(request: SubmitInvoiceRequest) -> SubmitInvoiceRespon
 /// Get the invoice for a request (client polling)
 ///
 /// Called by clients to check if their invoice is ready.
+/// Only the requesting user or the registered relay can query a given request.
 pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
-    let state = STATE.read().unwrap();
+    let caller = ic_cdk::api::msg_caller();
+    let state = STATE.read().expect("STATE lock: get_invoice_by_request");
 
     match state.onramp_requests.get(&request_id) {
-        Some(info) => GetInvoiceResponse {
-            state: info.state.clone(),
-            invoice: info.invoice.clone(),
-            error: None,
+        Some(info) => {
+            let is_owner = (info.icp_fee_payer == Some(caller))
+                || info.recipient == caller;
+            let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+            if !is_owner && !is_relay {
+                return GetInvoiceResponse {
+                    state: OnrampRequestState::Failed {
+                        reason: "Request not found".to_string(),
+                    },
+                    invoice: None,
+                    error: Some("Request not found".to_string()),
+                };
+            }
+            GetInvoiceResponse {
+                state: info.state.clone(),
+                invoice: info.invoice.clone(),
+                error: None,
+            }
         },
         None => GetInvoiceResponse {
             state: OnrampRequestState::Failed {
@@ -259,15 +320,18 @@ pub fn get_invoice_by_request_impl(request_id: String) -> GetInvoiceResponse {
 ///
 /// Internal function to update onramp request state when swap completes.
 pub fn mark_onramp_completed_impl(payment_hash: &[u8], block_index: Nat) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: mark_onramp_completed");
 
-    // Find the request by payment_hash
-    for request in state.onramp_requests.values_mut() {
-        if let Some(ref ph) = request.payment_hash {
-            if ph.as_slice() == payment_hash {
-                request.state = OnrampRequestState::Completed { block_index };
-                break;
-            }
+    // Find the request_id and amount by payment_hash first
+    let found = state.onramp_requests.values()
+        .find(|req| req.payment_hash.as_deref() == Some(payment_hash))
+        .map(|req| (req.request_id.clone(), req.amount_sats));
+
+    if let Some((request_id, amount_sats)) = found {
+        state.active_onramp_ids.remove(&request_id);
+        state.reserved_ckbtc_sats = state.reserved_ckbtc_sats.saturating_sub(amount_sats);
+        if let Some(request) = state.onramp_requests.get_mut(&request_id) {
+            request.state = OnrampRequestState::Completed { block_index };
         }
     }
 }

@@ -8,8 +8,8 @@ type BtcPurpose = variant {
   LnInvoiceDeposit;
   LiquidityDepositor : principal;
   LiquidityPoolShared;
+  LiquidityPoolUser : principal;
 };
-type ChannelFunding = record { participant : blob; channel : blob };
 type ChannelSecretsInfo = record {
   channel_id : blob;
   has_secrets : bool;
@@ -18,7 +18,6 @@ type ChannelSecretsInfo = record {
   htlc_basepoint : blob;
   delayed_payment_basepoint : blob;
 };
-type CklChannelAction = variant { Depositing; Idle; Withdrawing };
 type CklError = variant {
   InvalidInput;
   InsufficientFunding;
@@ -107,7 +106,6 @@ type FundChannelResponse = record {
   error : opt text;
   success : bool;
 };
-type Funding = variant { Pool : PoolFunding; Channel : ChannelFunding };
 type FundingLPArgs = record { signature : blob; pool_funding : PoolFunding };
 type FundingLPQuery = record {
   asset : PoolAsset;
@@ -177,7 +175,7 @@ type HtlcInfo = record {
   amount_msat : nat64;
 };
 type HttpHeader = record { value : text; name : text };
-type HttpResponse = record {
+type HttpRequestResult = record {
   status : nat;
   body : blob;
   headers : vec HttpHeader;
@@ -275,7 +273,7 @@ type Network = variant { mainnet; regtest; testnet };
 type NotifyArgs = record {
   amount : nat64;
   block_height : nat64;
-  funding : Funding;
+  funding : PoolFunding;
 };
 type OfframpRequest = record {
   fallback_btc_address : opt text;
@@ -284,6 +282,7 @@ type OfframpRequest = record {
 type OfframpRequestState = variant {
   Failed : record { reason : text };
   Refunded : record { block_index : nat };
+  FailedPendingRefund : record { reason : text };
   PaymentInProgress;
   Completed : FulfillHtlcRequest;
   Expired : record { refund_block_index : opt nat };
@@ -340,6 +339,12 @@ type PoolWithdrawal = record {
   pubkey_l1 : blob;
   amount : nat;
 };
+type PruneResult = record {
+  onramp_requests_pruned : nat64;
+  swaps_pruned : nat64;
+  rate_limits_pruned : nat64;
+  offramp_requests_pruned : nat64;
+};
 type QueryLnChannelRequest = record { channel_id : blob };
 type QueryLnChannelsResponse = record { channels : vec LnChannelInfo };
 type RateLimitStatus = record {
@@ -379,7 +384,7 @@ type RegisterSwapRequest = record {
   expiry_timestamp : nat64;
   amount_msat : nat64;
 };
-type RegisteredState = record { state : State; timeout : nat64 };
+type RegisterSwapResponse = record { error : opt text; success : bool };
 type ReleaseCommitmentSecretResponse = record {
   secret : opt blob;
   error : opt text;
@@ -397,7 +402,6 @@ type Result_13 = variant {
   Ok : TransactionICRCNotification;
   Err : ICPReceiverError;
 };
-type Result_14 = variant { Ok : nat; Err : CklError };
 type Result_2 = variant { Ok : GetBtcBalancesResponse; Err : BtcError };
 type Result_3 = variant { Ok : text; Err : BtcError };
 type Result_4 = variant { Ok : GetFundingUtxosResponse; Err : BtcError };
@@ -525,13 +529,16 @@ type StableSwapConfig = record {
   protocol_fee_share_bps : nat64;
   max_slippage_bps : nat64;
 };
-type State = record {
-  action : CklChannelAction;
-  version : nat64;
-  finalized : bool;
-  remote_id : opt blob;
-  allocation : vec nat;
-  channel : blob;
+type StateStats = record {
+  swaps_count : nat64;
+  offramp_requests_count : nat64;
+  offramp_rate_limits_count : nat64;
+  channel_secrets_count : nat64;
+  onramp_rate_limits_count : nat64;
+  funded_channels_count : nat64;
+  onramp_requests_count : nat64;
+  htlc_tx_details_count : nat64;
+  processed_utxos_count : nat64;
 };
 type SubmitInvoiceRequest = record {
   request_id : text;
@@ -574,7 +581,7 @@ type TransactionICRCNotification = record {
   timestamp : opt nat64;
   amount : nat64;
 };
-type TransformArgs = record { context : blob; response : HttpResponse };
+type TransformArgs = record { context : blob; response : HttpRequestResult };
 type UpdateChannelBalanceRequest = record {
   channel_id : blob;
   our_balance_sats : nat64;
@@ -618,13 +625,12 @@ type WithdrawalLPArgs = record {
   signature : blob;
   pool_withdrawal : PoolWithdrawal;
 };
-type WithdrawalReq = record {
-  participant : blob;
-  channel : blob;
-  amount : nat;
-  receiver : principal;
-};
 service : (Network) -> {
+  // Cancel a pending channel funding (TX never broadcast or relay aborted).
+  // 
+  // Releases the idempotency guard and reservation so funding can be re-attempted.
+  // No LP balance changes occur since deduction hasn't happened yet (two-phase model).
+  __candid_method_cancel_channel_funding : (text) -> (Result);
   // Called when a channel is closed
   // 
   // The relay calls this when a channel is closed (cooperative or force).
@@ -667,18 +673,18 @@ service : (Network) -> {
   __candid_method_create_htlc_with_tx_details : (
       CreateHtlcWithTxDetailsRequest,
     ) -> (CreateHtlcWithTxDetailsResponse);
-  // Deposit BTC to the liquidity pool
+  // Deposit BTC to the liquidity pool using per-user address
   // 
   // Flow:
-  // 1. Call get_lp_btc_address() to get the deposit address
+  // 1. Call get_lp_btc_user_address() to get your unique deposit address
   // 2. Send BTC to that address (off-chain, via wallet)
   // 3. Wait for 6 confirmations
   // 4. Call this function to claim your deposit
   // 
-  // The canister will scan UTXOs at the LP address and credit new deposits
-  // to the caller's LP balance.
-  __candid_method_deposit_btc : (LpBtcDepositRequest) -> (LpBtcDepositResponse);
-  __candid_method_deposit_channel : (ChannelFunding, blob) -> (Result_1);
+  // Only UTXOs at the caller's own address are credited.
+  __candid_method_deposit_btc_user : (LpBtcDepositRequest) -> (
+      LpBtcDepositResponse,
+    );
   // Deposit ckBTC into the liquidity pool
   // 
   // The caller must first approve the canister to spend their ckBTC using ICRC-2:
@@ -752,11 +758,11 @@ service : (Network) -> {
   // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
   // This key is used as one half of the 2-of-2 multisig for channel funding.
   __candid_method_get_ln_funding_pubkey : () -> (LnFundingPubkeyResponse);
-  // Get the shared LP BTC address
+  // Get the caller's per-user LP BTC deposit address
   // 
-  // Returns the single shared Bitcoin address for LP BTC deposits.
-  // All users deposit to this address, then call deposit_btc() to claim.
-  __candid_method_get_lp_btc_address : () -> (Result_5);
+  // Each LP depositor gets a unique address derived from their principal.
+  // This prevents the first-claimer-wins issue of the shared address.
+  __candid_method_get_lp_btc_user_address : () -> (Result_5);
   // Get overall LP liquidity status
   // 
   // Returns the current state of both ckBTC pool and BTC/Lightning liquidity.
@@ -806,6 +812,8 @@ service : (Network) -> {
   // 
   // Returns the amplification coefficient, fee basis points, and protocol fee share.
   __candid_method_get_stableswap_config : () -> (StableSwapConfig) query;
+  // Get statistics about canister state collection sizes.
+  __candid_method_get_state_stats : () -> (StateStats) query;
   // Preview a swap output without executing.
   // 
   // Returns the expected output, fees, and price impact for a given input
@@ -827,6 +835,11 @@ service : (Network) -> {
   // 
   // Called by the relay when it starts attempting to pay the invoice.
   __candid_method_mark_offramp_in_progress : (text) -> (bool);
+  // Prune terminal-state entries older than cutoff (admin-only).
+  // 
+  // Pass a nanosecond timestamp; entries with `created_at < older_than_ns` in
+  // terminal states (Completed, Expired, Failed, Refunded) will be removed.
+  __candid_method_prune_state : (nat64) -> (PruneResult);
   // Query a specific Lightning channel by ID
   __candid_method_query_ln_channel : (QueryLnChannelRequest) -> (
       opt LnChannelInfo,
@@ -834,7 +847,6 @@ service : (Network) -> {
   // Query all registered Lightning channels
   __candid_method_query_ln_channels : () -> (QueryLnChannelsResponse) query;
   __candid_method_query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
-  __candid_method_query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
@@ -880,7 +892,9 @@ service : (Network) -> {
   // 
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
-  __candid_method_register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
+  __candid_method_register_swap : (RegisterSwapRequest) -> (
+      RegisterSwapResponse,
+    );
   // Release (reveal) a per-commitment secret.
   // 
   // Returns the raw 32-byte secret for a given commitment index.
@@ -913,6 +927,10 @@ service : (Network) -> {
   __candid_method_request_onramp_invoice : (OnrampInvoiceRequest) -> (
       OnrampInvoiceResponse,
     );
+  // Retry a failed offramp ckBTC refund
+  // 
+  // Called by admin/relay to retry refund for requests stuck in FailedPendingRefund.
+  __candid_method_retry_offramp_refund : (text) -> (FailOfframpResponse);
   // Send BTC from the caller's depositor address to a destination
   // 
   // The caller must have BTC at their depositor address (derived from their principal).
@@ -935,6 +953,11 @@ service : (Network) -> {
   // Controls how much ICP is collected as a security deposit for swap requests.
   // The fee is refunded on successful swap completion.
   __candid_method_set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
+  // Set withdrawal / swap amount caps (admin-only).
+  // 
+  // max_single_swap_sats: max satoshis per individual swap (0 = disabled).
+  // max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
+  __candid_method_set_swap_caps : (nat64, nat64) -> (Result);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.
@@ -1006,7 +1029,7 @@ service : (Network) -> {
   // Called by the relay after creating a BOLT11 invoice for a pending request.
   // This also registers the swap internally so complete_swap will work.
   __candid_method_submit_invoice : (SubmitInvoiceRequest) -> (
-      CreateHtlcResponse,
+      RegisterSwapResponse,
     );
   // Timeout an HTLC after CLTV expiry
   // 
@@ -1014,13 +1037,12 @@ service : (Network) -> {
   // The sender can reclaim the funds.
   __candid_method_timeout_htlc : (TimeoutHtlcRequest) -> (TimeoutHtlcResponse);
   __candid_method_transaction_notification : (NotifyArgs) -> (Result_13);
-  __candid_method_trigger_withdraw : (WithdrawalReq) -> (Result_14);
   // Update channel balance after Lightning payment activity
   // 
   // The relay calls this to report updated channel balances after payments.
   // This allows the canister to track available outbound/inbound capacity.
   __candid_method_update_channel_balance : (UpdateChannelBalanceRequest) -> (
-      CreateHtlcResponse,
+      RegisterSwapResponse,
     );
   // Update the StableSwap configuration (admin-only).
   // 
@@ -1060,6 +1082,11 @@ service : (Network) -> {
   __candid_method_withdraw_protocol_fees : (principal) -> (
       WithdrawProtocolFeesResponse,
     );
+  // Cancel a pending channel funding (TX never broadcast or relay aborted).
+  // 
+  // Releases the idempotency guard and reservation so funding can be re-attempted.
+  // No LP balance changes occur since deduction hasn't happened yet (two-phase model).
+  cancel_channel_funding : (text) -> (Result);
   // Called when a channel is closed
   // 
   // The relay calls this when a channel is closed (cooperative or force).
@@ -1080,7 +1107,7 @@ service : (Network) -> {
   // Called by the relay after successfully paying the Lightning invoice.
   // Requires the payment preimage as proof of payment.
   // Refunds the ICP anti-DDoS fee to the user on success.
-  complete_offramp : (CompleteOfframpRequest) -> (CreateHtlcResponse);
+  complete_offramp : (CompleteOfframpRequest) -> (RegisterSwapResponse);
   // Complete a Lightning → ckBTC swap after payment received
   // 
   // Called by the relay node when a Lightning payment is received and claimed.
@@ -1090,7 +1117,7 @@ service : (Network) -> {
   // 
   // Called by the relay when an HTLC is added to a commitment transaction.
   // The canister tracks the HTLC state for later fulfillment or timeout.
-  create_htlc : (CreateHtlcRequest) -> (CreateHtlcResponse);
+  create_htlc : (CreateHtlcRequest) -> (RegisterSwapResponse);
   // Create an HTLC with full transaction details for later signing.
   // 
   // This is an extended version of create_htlc that stores all information
@@ -1098,18 +1125,16 @@ service : (Network) -> {
   create_htlc_with_tx_details : (CreateHtlcWithTxDetailsRequest) -> (
       CreateHtlcWithTxDetailsResponse,
     );
-  // Deposit BTC to the liquidity pool
+  // Deposit BTC to the liquidity pool using per-user address
   // 
   // Flow:
-  // 1. Call get_lp_btc_address() to get the deposit address
+  // 1. Call get_lp_btc_user_address() to get your unique deposit address
   // 2. Send BTC to that address (off-chain, via wallet)
   // 3. Wait for 6 confirmations
   // 4. Call this function to claim your deposit
   // 
-  // The canister will scan UTXOs at the LP address and credit new deposits
-  // to the caller's LP balance.
-  deposit_btc : (LpBtcDepositRequest) -> (LpBtcDepositResponse);
-  deposit_channel : (ChannelFunding, blob) -> (Result_1);
+  // Only UTXOs at the caller's own address are credited.
+  deposit_btc_user : (LpBtcDepositRequest) -> (LpBtcDepositResponse);
   // Deposit ckBTC into the liquidity pool
   // 
   // The caller must first approve the canister to spend their ckBTC using ICRC-2:
@@ -1179,11 +1204,11 @@ service : (Network) -> {
   // Returns the compressed SEC1 public key (33 bytes) derived via chainkey ECDSA.
   // This key is used as one half of the 2-of-2 multisig for channel funding.
   get_ln_funding_pubkey : () -> (LnFundingPubkeyResponse);
-  // Get the shared LP BTC address
+  // Get the caller's per-user LP BTC deposit address
   // 
-  // Returns the single shared Bitcoin address for LP BTC deposits.
-  // All users deposit to this address, then call deposit_btc() to claim.
-  get_lp_btc_address : () -> (Result_5);
+  // Each LP depositor gets a unique address derived from their principal.
+  // This prevents the first-claimer-wins issue of the shared address.
+  get_lp_btc_user_address : () -> (Result_5);
   // Get overall LP liquidity status
   // 
   // Returns the current state of both ckBTC pool and BTC/Lightning liquidity.
@@ -1239,6 +1264,8 @@ service : (Network) -> {
   // 
   // Returns the amplification coefficient, fee basis points, and protocol fee share.
   get_stableswap_config : () -> (StableSwapConfig) query;
+  // Get statistics about canister state collection sizes.
+  get_state_stats : () -> (StateStats) query;
   // Preview a swap output without executing.
   // 
   // Returns the expected output, fees, and price impact for a given input
@@ -1258,12 +1285,16 @@ service : (Network) -> {
   // 
   // Called by the relay when it starts attempting to pay the invoice.
   mark_offramp_in_progress : (text) -> (bool);
+  // Prune terminal-state entries older than cutoff (admin-only).
+  // 
+  // Pass a nanosecond timestamp; entries with `created_at < older_than_ns` in
+  // terminal states (Completed, Expired, Failed, Refunded) will be removed.
+  prune_state : (nat64) -> (PruneResult);
   // Query a specific Lightning channel by ID
   query_ln_channel : (QueryLnChannelRequest) -> (opt LnChannelInfo) query;
   // Query all registered Lightning channels
   query_ln_channels : () -> (QueryLnChannelsResponse) query;
   query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
-  query_state : (blob) -> (opt RegisteredState) query;
   // Returns the funds deposited for a channel's specified participant, if any.
   // this function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
@@ -1282,7 +1313,7 @@ service : (Network) -> {
   // 
   // Called by the relay node when a channel is opened.
   // Stores channel info (funding txid, vout, capacity) so it can be verified on-chain.
-  register_ln_channel : (RegisterLnChannelRequest) -> (CreateHtlcResponse);
+  register_ln_channel : (RegisterLnChannelRequest) -> (RegisterSwapResponse);
   // Register a relay with its Lightning node pubkey.
   // 
   // The relay must call this before it can submit invoices for onramp requests.
@@ -1296,12 +1327,12 @@ service : (Network) -> {
   // - Only one relay can be registered at a time
   // - The same principal can update its pubkey by calling again
   // - Invoice submission will fail if the invoice's destination node doesn't match
-  register_relay : (RegisterRelayRequest) -> (CreateHtlcResponse);
+  register_relay : (RegisterRelayRequest) -> (RegisterSwapResponse);
   // Register a new Lightning → ckBTC swap
   // 
   // Called by the relay node when an invoice is created with an IC principal.
   // The relay stores the mapping: payment_hash → (amount, recipient)
-  register_swap : (RegisterSwapRequest) -> (CreateHtlcResponse);
+  register_swap : (RegisterSwapRequest) -> (RegisterSwapResponse);
   // Release (reveal) a per-commitment secret.
   // 
   // Returns the raw 32-byte secret for a given commitment index.
@@ -1332,6 +1363,10 @@ service : (Network) -> {
   // 8. Relay receives payment, calls complete_swap
   // 9. Canister transfers ckBTC AND refunds ICP to user
   request_onramp_invoice : (OnrampInvoiceRequest) -> (OnrampInvoiceResponse);
+  // Retry a failed offramp ckBTC refund
+  // 
+  // Called by admin/relay to retry refund for requests stuck in FailedPendingRefund.
+  retry_offramp_refund : (text) -> (FailOfframpResponse);
   // Send BTC from the caller's depositor address to a destination
   // 
   // The caller must have BTC at their depositor address (derived from their principal).
@@ -1342,7 +1377,7 @@ service : (Network) -> {
       SendFromDepositorResponse,
     );
   send_btc_tx : (SendBtcTxArgs) -> (Result_10);
-  send_from_p2pkh_address : (SendRequest) -> (text);
+  send_from_p2pkh_address : (SendRequest) -> (Result_3);
   // Set the admin principal (controller-only).
   // 
   // Only canister controllers can call this. The admin can then update
@@ -1355,6 +1390,11 @@ service : (Network) -> {
   // Controls how much ICP is collected as a security deposit for swap requests.
   // The fee is refunded on successful swap completion.
   set_icp_ddos_fee : (nat64) -> (SetIcpDdosFeeResponse);
+  // Set withdrawal / swap amount caps (admin-only).
+  // 
+  // max_single_swap_sats: max satoshis per individual swap (0 = disabled).
+  // max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
+  set_swap_caps : (nat64, nat64) -> (Result);
   // Set test timeout values (for E2E testing only)
   // 
   // Pass 0 to reset to default values.
@@ -1419,7 +1459,7 @@ service : (Network) -> {
   // 
   // Called by the relay after creating a BOLT11 invoice for a pending request.
   // This also registers the swap internally so complete_swap will work.
-  submit_invoice : (SubmitInvoiceRequest) -> (CreateHtlcResponse);
+  submit_invoice : (SubmitInvoiceRequest) -> (RegisterSwapResponse);
   // Timeout an HTLC after CLTV expiry
   // 
   // Called by the relay when an HTLC has expired without being fulfilled.
@@ -1430,14 +1470,13 @@ service : (Network) -> {
   // 
   // Ensures deterministic response across replicas by stripping response body.
   // Name must match the string in `TransformContext::from_name()` in http_outcall.rs.
-  transform_webhook_response : (TransformArgs) -> (HttpResponse) query;
-  trigger_withdraw : (WithdrawalReq) -> (Result_14);
+  transform_webhook_response : (TransformArgs) -> (HttpRequestResult) query;
   // Update channel balance after Lightning payment activity
   // 
   // The relay calls this to report updated channel balances after payments.
   // This allows the canister to track available outbound/inbound capacity.
   update_channel_balance : (UpdateChannelBalanceRequest) -> (
-      CreateHtlcResponse,
+      RegisterSwapResponse,
     );
   // Update the StableSwap configuration (admin-only).
   // 

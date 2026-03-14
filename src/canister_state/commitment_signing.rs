@@ -33,7 +33,7 @@ use bitcoin::Transaction;
 /// 1. The canister's funding pubkey (from chainkey ECDSA)
 /// 2. The counterparty's funding pubkey (stored via register_channel_info)
 fn get_funding_redeemscript(channel_keys_id: &[u8; 32]) -> Result<bitcoin::ScriptBuf, String> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_funding_redeemscript");
     let counterparty_pubkey = state
         .channel_counterparty_pubkeys
         .get(channel_keys_id)
@@ -89,7 +89,7 @@ fn compute_funding_sighash(
             bitcoin::Amount::from_sat(funding_amount_sat),
             bitcoin::sighash::EcdsaSighashType::All,
         )
-        .map_err(|e| format!("Failed to compute sighash: {:?}", e))?;
+        .map_err(|e| format!("Failed to compute sighash: {e:?}"))?;
     Ok(sighash.to_byte_array())
 }
 
@@ -108,18 +108,81 @@ fn compute_witness_sighash(
             bitcoin::Amount::from_sat(amount_sat),
             bitcoin::sighash::EcdsaSighashType::All,
         )
-        .map_err(|e| format!("Failed to compute sighash: {:?}", e))?;
+        .map_err(|e| format!("Failed to compute sighash: {e:?}"))?;
     Ok(sighash.to_byte_array())
 }
 
 /// Helper: look up channel secrets by channel_keys_id.
 fn get_channel_secrets(channel_keys_id: &[u8; 32]) -> Result<ChannelSecretsInternal, String> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_channel_secrets");
     state
         .channel_secrets
         .get(channel_keys_id)
         .cloned()
         .ok_or_else(|| "Channel secrets not found".to_string())
+}
+
+// =============================================================================
+// Shared helpers
+// =============================================================================
+
+/// Parse a Vec<u8> as a 32-byte channel_keys_id.
+fn parse_channel_keys_id(bytes: Vec<u8>) -> Result<[u8; 32], String> {
+    bytes.try_into().map_err(|_| "channel_keys_id must be 32 bytes".to_string())
+}
+
+/// Deserialize, compute sighash, and sign a funding-output transaction with chainkey ECDSA.
+/// Shared by holder commitment, closing tx, and the commitment part of counterparty signing.
+async fn sign_funding_output_tx(
+    channel_keys_id: &[u8; 32],
+    tx_bytes: &[u8],
+    funding_amount_sat: u64,
+) -> Result<Vec<u8>, String> {
+    let tx: Transaction = deserialize(tx_bytes)
+        .map_err(|e| format!("Failed to deserialize tx: {e:?}"))?;
+    let funding_redeemscript = get_funding_redeemscript(channel_keys_id)?;
+    let sighash = compute_funding_sighash(&tx, &funding_redeemscript, funding_amount_sat)?;
+    sign_funding_sighash(&sighash).await
+        .map_err(|e| format!("Chainkey signing failed: {e}"))
+}
+
+/// Derive the HTLC signing key for a given channel and per-commitment point.
+fn derive_htlc_key(
+    channel_keys_id: &[u8; 32],
+    per_commitment_point_bytes: &[u8],
+) -> Result<SecretKey, String> {
+    let secrets = get_channel_secrets(channel_keys_id)?;
+    let secp = Secp256k1::new();
+
+    let per_commitment_point = bitcoin::secp256k1::PublicKey::from_slice(per_commitment_point_bytes)
+        .map_err(|_| "Invalid per_commitment_point".to_string())?;
+    let htlc_base_secret = SecretKey::from_slice(&secrets.htlc_base_secret)
+        .map_err(|_| "Invalid htlc_base_secret".to_string())?;
+
+    bolt3_keys::derive_private_key(&secp, &per_commitment_point, &htlc_base_secret)
+        .map_err(|e| format!("HTLC key derivation failed: {e}"))
+}
+
+/// Sign a witness sighash with a local secret key, returning the compact signature.
+fn sign_witness_with_key(
+    tx_bytes: &[u8],
+    input_index: usize,
+    witness_script_bytes: &[u8],
+    amount_sat: u64,
+    signing_key: &SecretKey,
+) -> Result<Vec<u8>, String> {
+    let tx: Transaction = deserialize(tx_bytes)
+        .map_err(|e| format!("Failed to deserialize tx: {e:?}"))?;
+    let witness_script = bitcoin::ScriptBuf::from_bytes(witness_script_bytes.to_vec());
+    let sighash = compute_witness_sighash(&tx, input_index, &witness_script, amount_sat)?;
+    let secp = Secp256k1::new();
+    let msg = Message::from_digest(sighash);
+    let sig = secp.sign_ecdsa(&msg, signing_key);
+    Ok(sig.serialize_compact().to_vec())
+}
+
+fn ln_sign_err(msg: impl Into<String>) -> LnSignResponse {
+    LnSignResponse { success: false, signature: None, error: Some(msg.into()) }
 }
 
 // =============================================================================
@@ -133,182 +196,53 @@ fn get_channel_secrets(channel_keys_id: &[u8; 32]) -> Result<ChannelSecretsInter
 pub async fn sign_counterparty_commitment_impl(
     request: SignCounterpartyCommitmentRequest,
 ) -> SignCounterpartyCommitmentResponse {
-    let channel_keys_id: [u8; 32] = match request.channel_keys_id.clone().try_into() {
+    let channel_keys_id = match parse_channel_keys_id(request.channel_keys_id.clone()) {
         Ok(id) => id,
-        Err(_) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some("channel_keys_id must be 32 bytes".to_string()),
-            };
-        }
+        Err(e) => return SignCounterpartyCommitmentResponse {
+            success: false, commitment_sig: None, htlc_sigs: None, error: Some(e),
+        },
     };
 
-    // Validate HTLC arrays are consistent
     let num_htlcs = request.htlc_tx_bytes.len();
     if request.htlc_amounts_sat.len() != num_htlcs || request.htlc_redeemscripts.len() != num_htlcs {
         return SignCounterpartyCommitmentResponse {
-            success: false,
-            commitment_sig: None,
-            htlc_sigs: None,
+            success: false, commitment_sig: None, htlc_sigs: None,
             error: Some("HTLC arrays must have consistent lengths".to_string()),
         };
     }
 
-    // Deserialize commitment transaction
-    let commitment_tx: Transaction = match deserialize(&request.commitment_tx_bytes) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(format!("Failed to deserialize commitment tx: {:?}", e)),
-            };
-        }
-    };
-
-    // Get the funding redeemscript
-    let funding_redeemscript = match get_funding_redeemscript(&channel_keys_id) {
-        Ok(script) => script,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Compute commitment sighash
-    let sighash = match compute_funding_sighash(
-        &commitment_tx,
-        &funding_redeemscript,
-        request.funding_amount_sat,
-    ) {
-        Ok(h) => h,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Sign commitment with chainkey ECDSA
-    let commitment_sig = match sign_funding_sighash(&sighash).await {
+    // Sign the commitment transaction with chainkey ECDSA
+    let commitment_sig = match sign_funding_output_tx(
+        &channel_keys_id, &request.commitment_tx_bytes, request.funding_amount_sat,
+    ).await {
         Ok(sig) => sig,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(format!("Chainkey signing failed: {}", e)),
-            };
-        }
+        Err(e) => return SignCounterpartyCommitmentResponse {
+            success: false, commitment_sig: None, htlc_sigs: None, error: Some(e),
+        },
     };
 
-    // Sign each HTLC transaction with derived HTLC key
-    let secrets = match get_channel_secrets(&channel_keys_id) {
-        Ok(s) => s,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Parse per-commitment point
-    let per_commitment_point = match bitcoin::secp256k1::PublicKey::from_slice(&request.per_commitment_point) {
-        Ok(p) => p,
-        Err(_) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some("Invalid per_commitment_point".to_string()),
-            };
-        }
-    };
-
-    let secp = Secp256k1::new();
-    let htlc_base_secret = match SecretKey::from_slice(&secrets.htlc_base_secret) {
-        Ok(sk) => sk,
-        Err(_) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some("Invalid HTLC base secret".to_string()),
-            };
-        }
-    };
-
-    // Derive the HTLC key for this commitment
-    let derived_htlc_key = match bolt3_keys::derive_private_key(
-        &secp,
-        &per_commitment_point,
-        &htlc_base_secret,
-    ) {
+    // Derive the HTLC key for signing HTLC transactions
+    let derived_htlc_key = match derive_htlc_key(&channel_keys_id, &request.per_commitment_point) {
         Ok(k) => k,
-        Err(e) => {
-            return SignCounterpartyCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                htlc_sigs: None,
-                error: Some(format!("HTLC key derivation failed: {}", e)),
-            };
-        }
+        Err(e) => return SignCounterpartyCommitmentResponse {
+            success: false, commitment_sig: None, htlc_sigs: None, error: Some(e),
+        },
     };
 
+    // Sign each HTLC transaction
     let mut htlc_sigs = Vec::with_capacity(num_htlcs);
     for i in 0..num_htlcs {
-        // Deserialize HTLC transaction
-        let htlc_tx: Transaction = match deserialize(&request.htlc_tx_bytes[i]) {
-            Ok(tx) => tx,
-            Err(e) => {
-                return SignCounterpartyCommitmentResponse {
-                    success: false,
-                    commitment_sig: None,
-                    htlc_sigs: None,
-                    error: Some(format!("Failed to deserialize HTLC tx {}: {:?}", i, e)),
-                };
-            }
-        };
-
-        let htlc_redeemscript = bitcoin::ScriptBuf::from_bytes(request.htlc_redeemscripts[i].clone());
-
-        // Compute HTLC sighash
-        let htlc_sighash = match compute_witness_sighash(
-            &htlc_tx,
-            0, // HTLC txs always sign input 0
-            &htlc_redeemscript,
-            request.htlc_amounts_sat[i],
+        let sig = match sign_witness_with_key(
+            &request.htlc_tx_bytes[i], 0, &request.htlc_redeemscripts[i],
+            request.htlc_amounts_sat[i], &derived_htlc_key,
         ) {
-            Ok(h) => h,
-            Err(e) => {
-                return SignCounterpartyCommitmentResponse {
-                    success: false,
-                    commitment_sig: None,
-                    htlc_sigs: None,
-                    error: Some(format!("HTLC {} sighash failed: {}", i, e)),
-                };
-            }
+            Ok(s) => s,
+            Err(e) => return SignCounterpartyCommitmentResponse {
+                success: false, commitment_sig: None, htlc_sigs: None,
+                error: Some(format!("HTLC {i}: {e}")),
+            },
         };
-
-        // Sign with local ECDSA
-        let msg = match Message::from_digest(htlc_sighash) {
-            msg => msg,
-        };
-        let sig = secp.sign_ecdsa(&msg, &derived_htlc_key);
-        htlc_sigs.push(sig.serialize_compact().to_vec());
+        htlc_sigs.push(sig);
     }
 
     SignCounterpartyCommitmentResponse {
@@ -321,78 +255,18 @@ pub async fn sign_counterparty_commitment_impl(
 
 /// Sign a holder commitment transaction.
 ///
-/// Only needs the commitment signature (chainkey ECDSA). No HTLC sigs needed
-/// for holder commitments.
+/// Only needs the commitment signature (chainkey ECDSA). No HTLC sigs needed.
 pub async fn sign_holder_commitment_impl(
     request: SignHolderCommitmentRequest,
 ) -> SignHolderCommitmentResponse {
-    let channel_keys_id: [u8; 32] = match request.channel_keys_id.clone().try_into() {
+    let channel_keys_id = match parse_channel_keys_id(request.channel_keys_id.clone()) {
         Ok(id) => id,
-        Err(_) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some("channel_keys_id must be 32 bytes".to_string()),
-            };
-        }
+        Err(e) => return SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) },
     };
 
-    // Deserialize commitment transaction
-    let commitment_tx: Transaction = match deserialize(&request.commitment_tx_bytes) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(format!("Failed to deserialize commitment tx: {:?}", e)),
-            };
-        }
-    };
-
-    // Get the funding redeemscript
-    let funding_redeemscript = match get_funding_redeemscript(&channel_keys_id) {
-        Ok(script) => script,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Compute sighash
-    let sighash = match compute_funding_sighash(
-        &commitment_tx,
-        &funding_redeemscript,
-        request.funding_amount_sat,
-    ) {
-        Ok(h) => h,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Sign with chainkey ECDSA
-    let commitment_sig = match sign_funding_sighash(&sighash).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(format!("Chainkey signing failed: {}", e)),
-            };
-        }
-    };
-
-    SignHolderCommitmentResponse {
-        success: true,
-        commitment_sig: Some(commitment_sig),
-        error: None,
+    match sign_funding_output_tx(&channel_keys_id, &request.commitment_tx_bytes, request.funding_amount_sat).await {
+        Ok(sig) => SignHolderCommitmentResponse { success: true, commitment_sig: Some(sig), error: None },
+        Err(e) => SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) },
     }
 }
 
@@ -400,73 +274,14 @@ pub async fn sign_holder_commitment_impl(
 pub async fn sign_closing_tx_impl(
     request: SignClosingTxRequest,
 ) -> SignHolderCommitmentResponse {
-    let channel_keys_id: [u8; 32] = match request.channel_keys_id.clone().try_into() {
+    let channel_keys_id = match parse_channel_keys_id(request.channel_keys_id.clone()) {
         Ok(id) => id,
-        Err(_) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some("channel_keys_id must be 32 bytes".to_string()),
-            };
-        }
+        Err(e) => return SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) },
     };
 
-    // Deserialize closing transaction
-    let closing_tx: Transaction = match deserialize(&request.closing_tx_bytes) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(format!("Failed to deserialize closing tx: {:?}", e)),
-            };
-        }
-    };
-
-    // Get the funding redeemscript
-    let funding_redeemscript = match get_funding_redeemscript(&channel_keys_id) {
-        Ok(script) => script,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Compute sighash
-    let sighash = match compute_funding_sighash(
-        &closing_tx,
-        &funding_redeemscript,
-        request.funding_amount_sat,
-    ) {
-        Ok(h) => h,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Sign with chainkey ECDSA
-    let sig = match sign_funding_sighash(&sighash).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            return SignHolderCommitmentResponse {
-                success: false,
-                commitment_sig: None,
-                error: Some(format!("Chainkey signing failed: {}", e)),
-            };
-        }
-    };
-
-    SignHolderCommitmentResponse {
-        success: true,
-        commitment_sig: Some(sig),
-        error: None,
+    match sign_funding_output_tx(&channel_keys_id, &request.closing_tx_bytes, request.funding_amount_sat).await {
+        Ok(sig) => SignHolderCommitmentResponse { success: true, commitment_sig: Some(sig), error: None },
+        Err(e) => SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) },
     }
 }
 
@@ -477,230 +292,68 @@ pub async fn sign_closing_tx_impl(
 /// Sign a justice (penalty) transaction.
 ///
 /// Uses the derived revocation key (from per-commitment secret + revocation base secret).
-/// Local ECDSA only — no chainkey needed.
 pub fn sign_justice_tx_impl(request: SignJusticeTxRequest) -> LnSignResponse {
-    let channel_keys_id: [u8; 32] = match request.channel_keys_id.clone().try_into() {
+    let channel_keys_id = match parse_channel_keys_id(request.channel_keys_id.clone()) {
         Ok(id) => id,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("channel_keys_id must be 32 bytes".to_string()),
-            };
-        }
+        Err(e) => return ln_sign_err(e),
     };
 
     let per_commitment_secret_bytes: [u8; 32] = match request.per_commitment_secret.clone().try_into() {
         Ok(s) => s,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("per_commitment_secret must be 32 bytes".to_string()),
-            };
-        }
+        Err(_) => return ln_sign_err("per_commitment_secret must be 32 bytes"),
     };
 
     let secrets = match get_channel_secrets(&channel_keys_id) {
         Ok(s) => s,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(e),
-            };
-        }
+        Err(e) => return ln_sign_err(e),
     };
 
     let secp = Secp256k1::new();
-
     let per_commitment_secret = match SecretKey::from_slice(&per_commitment_secret_bytes) {
         Ok(sk) => sk,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid per_commitment_secret".to_string()),
-            };
-        }
+        Err(_) => return ln_sign_err("Invalid per_commitment_secret"),
     };
-
     let revocation_base_secret = match SecretKey::from_slice(&secrets.revocation_base_secret) {
         Ok(sk) => sk,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid revocation_base_secret".to_string()),
-            };
-        }
+        Err(_) => return ln_sign_err("Invalid revocation_base_secret"),
     };
 
-    // Derive the revocation key
     let revocation_key = match bolt3_keys::derive_private_revocation_key(
-        &secp,
-        &per_commitment_secret,
-        &revocation_base_secret,
+        &secp, &per_commitment_secret, &revocation_base_secret,
     ) {
         Ok(k) => k,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(format!("Revocation key derivation failed: {}", e)),
-            };
-        }
+        Err(e) => return ln_sign_err(format!("Revocation key derivation failed: {e}")),
     };
 
-    // Deserialize justice transaction
-    let justice_tx: Transaction = match deserialize(&request.justice_tx_bytes) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(format!("Failed to deserialize justice tx: {:?}", e)),
-            };
-        }
-    };
-
-    let witness_script = bitcoin::ScriptBuf::from_bytes(request.witness_script);
-
-    // Compute sighash
-    let sighash = match compute_witness_sighash(
-        &justice_tx,
-        request.input_index as usize,
-        &witness_script,
-        request.amount_sat,
+    match sign_witness_with_key(
+        &request.justice_tx_bytes, request.input_index as usize,
+        &request.witness_script, request.amount_sat, &revocation_key,
     ) {
-        Ok(h) => h,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Sign with local ECDSA
-    let msg = Message::from_digest(sighash);
-    let sig = secp.sign_ecdsa(&msg, &revocation_key);
-
-    LnSignResponse {
-        success: true,
-        signature: Some(sig.serialize_compact().to_vec()),
-        error: None,
+        Ok(sig) => LnSignResponse { success: true, signature: Some(sig), error: None },
+        Err(e) => ln_sign_err(e),
     }
 }
 
 /// Sign an HTLC transaction (holder or counterparty second-level HTLC tx).
 ///
 /// Uses the derived HTLC key (from per-commitment point + HTLC base secret).
-/// Local ECDSA only — no chainkey needed.
 pub fn sign_htlc_tx_impl(request: SignHtlcTxRequest) -> LnSignResponse {
-    let channel_keys_id: [u8; 32] = match request.channel_keys_id.clone().try_into() {
+    let channel_keys_id = match parse_channel_keys_id(request.channel_keys_id.clone()) {
         Ok(id) => id,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("channel_keys_id must be 32 bytes".to_string()),
-            };
-        }
+        Err(e) => return ln_sign_err(e),
     };
 
-    let secrets = match get_channel_secrets(&channel_keys_id) {
-        Ok(s) => s,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    let secp = Secp256k1::new();
-
-    // Parse per-commitment point
-    let per_commitment_point = match bitcoin::secp256k1::PublicKey::from_slice(&request.per_commitment_point) {
-        Ok(p) => p,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid per_commitment_point".to_string()),
-            };
-        }
-    };
-
-    let htlc_base_secret = match SecretKey::from_slice(&secrets.htlc_base_secret) {
-        Ok(sk) => sk,
-        Err(_) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid htlc_base_secret".to_string()),
-            };
-        }
-    };
-
-    // Derive the HTLC key for this commitment
-    let derived_htlc_key = match bolt3_keys::derive_private_key(
-        &secp,
-        &per_commitment_point,
-        &htlc_base_secret,
-    ) {
+    let derived_htlc_key = match derive_htlc_key(&channel_keys_id, &request.per_commitment_point) {
         Ok(k) => k,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(format!("HTLC key derivation failed: {}", e)),
-            };
-        }
+        Err(e) => return ln_sign_err(e),
     };
 
-    // Deserialize HTLC transaction
-    let htlc_tx: Transaction = match deserialize(&request.htlc_tx_bytes) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(format!("Failed to deserialize HTLC tx: {:?}", e)),
-            };
-        }
-    };
-
-    let witness_script = bitcoin::ScriptBuf::from_bytes(request.witness_script);
-
-    // Compute sighash
-    let sighash = match compute_witness_sighash(
-        &htlc_tx,
-        request.input_index as usize,
-        &witness_script,
-        request.amount_sat,
+    match sign_witness_with_key(
+        &request.htlc_tx_bytes, request.input_index as usize,
+        &request.witness_script, request.amount_sat, &derived_htlc_key,
     ) {
-        Ok(h) => h,
-        Err(e) => {
-            return LnSignResponse {
-                success: false,
-                signature: None,
-                error: Some(e),
-            };
-        }
-    };
-
-    // Sign with local ECDSA
-    let msg = Message::from_digest(sighash);
-    let sig = secp.sign_ecdsa(&msg, &derived_htlc_key);
-
-    LnSignResponse {
-        success: true,
-        signature: Some(sig.serialize_compact().to_vec()),
-        error: None,
+        Ok(sig) => LnSignResponse { success: true, signature: Some(sig), error: None },
+        Err(e) => ln_sign_err(e),
     }
 }
 
@@ -723,7 +376,7 @@ mod tests {
             payment_secret: [14u8; 32],
             commitment_seed: [15u8; 32],
         };
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: setup_test_channel");
         state.channel_secrets.insert(channel_keys_id, secrets.clone());
         secrets
     }
@@ -756,7 +409,7 @@ mod tests {
         use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1};
         bitcoin::script::Builder::new()
             .push_opcode(OP_PUSHNUM_1)
-            .push_slice(&pubkey.serialize())
+            .push_slice(pubkey.serialize())
             .push_opcode(OP_PUSHNUM_1)
             .push_opcode(OP_CHECKMULTISIG)
             .into_script()

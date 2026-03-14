@@ -19,7 +19,6 @@ pub mod helpers;
 pub mod htlc;
 pub mod ic_types;
 pub mod liquidity_pool;
-use crate::ic_types::ChannelFunding;
 pub mod btc;
 use crate::ic_types::LnInvoiceRequest;
 pub mod receiver;
@@ -28,13 +27,13 @@ use crate::error::ResultBtc;
 use crate::error::{BtcError, CklError};
 use crate::ic_types::GetBtcBalancesResponse;
 use crate::ic_types::{
-    BtcPurpose, ChannelId, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
+    BtcPurpose, CompleteSwapRequest, CompleteSwapResponse, FundingLPArgs,
     FundingLPQueryArgs, HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest,
     LnSignResponse, LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, NotifyArgs,
     QueryLnChannelRequest, QueryLnChannelsResponse, RegisterLnChannelRequest,
-    RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse, RegisteredState,
+    RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
     SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse, SignedCandidInvoice,
-    Timestamp, TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    TotalLpBalanceResponse, VerifyLnChannelResponse, WithdrawalLPArgs,
     // BTC LP types
     LpBtcAddressResponse, LpBtcDepositRequest, LpBtcDepositResponse,
     LpBtcWithdrawRequest, LpBtcWithdrawResponse,
@@ -80,6 +79,7 @@ use crate::ic_types::{
     SwapQuoteRequest, SwapQuoteResponse,
     WithdrawProtocolFeesResponse,
     SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
+    PruneResult, StateStats,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal};
@@ -151,23 +151,22 @@ pub fn init(network: Network) {
 // Serializes canister state to stable memory before the Wasm module is replaced.
 #[pre_upgrade]
 fn pre_upgrade() {
-    let state = canister_state::STATE.read().unwrap();
+    let state = canister_state::STATE.read().expect("STATE lock: pre_upgrade");
     let snapshot = state.to_snapshot();
     let bytes = match candid::encode_one(&snapshot) {
         Ok(b) => b,
         Err(e) => {
-            ic_cdk::trap(&format!("pre_upgrade: failed to encode state: {}", e));
+            ic_cdk::trap(format!("pre_upgrade: failed to encode state: {e}"));
         }
     };
 
     let len = bytes.len() as u64;
-    let pages_needed = (len + 8 + 65535) / 65536;
+    let pages_needed = (len + 8).div_ceil(65536);
     let current_pages = ic_cdk::stable::stable_size();
-    if current_pages < pages_needed {
-        if ic_cdk::stable::stable_grow(pages_needed - current_pages).is_err() {
+    if current_pages < pages_needed
+        && ic_cdk::stable::stable_grow(pages_needed - current_pages).is_err() {
             ic_cdk::trap("pre_upgrade: failed to grow stable memory");
         }
-    }
     ic_cdk::stable::stable_write(0, &len.to_le_bytes());
     ic_cdk::stable::stable_write(8, &bytes);
 }
@@ -190,11 +189,11 @@ fn upgrade(network: Network) {
             let snapshot: canister_state::CanisterStateSnapshot = match candid::decode_one(&bytes) {
                 Ok(s) => s,
                 Err(e) => {
-                    ic_cdk::trap(&format!("post_upgrade: failed to decode state: {}", e));
+                    ic_cdk::trap(format!("post_upgrade: failed to decode state: {e}"));
                 }
             };
 
-            let mut state = canister_state::STATE.write().unwrap();
+            let mut state = canister_state::STATE.write().expect("STATE lock: post_upgrade");
             state.restore_from_snapshot(snapshot);
         }
     }

@@ -19,7 +19,7 @@ pub use candid::{
     types::{Serializer, Type, TypeInner, TypeInner::Nat8},
 };
 use cklightning::ic_types::{
-    Funding, FundingLPQuery, L1Account, PoolAsset, PoolFunding, PoolWithdrawal,
+    FundingLPQuery, L1Account, PoolAsset, PoolFunding, PoolWithdrawal,
 };
 use cklightning::receiver::icrc3value_map_to_transaction;
 use ic_agent::AgentError;
@@ -69,10 +69,7 @@ async fn get_balance(
 #[tokio::test]
 async fn test_ckbtc_balance_node_and_user() -> Result<(), AgentError> {
     let nat_amount = Nat(10000u64.into());
-    println!(
-        "\nTransfer {:?} msat from Lightning node to Lightning user\n",
-        nat_amount
-    );
+    println!("\nTransfer {nat_amount:?} msat from Lightning node to Lightning user\n");
 
     let client = ICAgent::new_from_pem_file(Some(str_home_from_path(PEM_NODE_ACC_PATH)))?;
     client.fetch_root_key().await?;
@@ -91,8 +88,8 @@ async fn test_ckbtc_balance_node_and_user() -> Result<(), AgentError> {
     let balance_node_before = get_balance(&client, &ledger_id, usr_node_pr).await?;
     let balance_user_before = get_balance(&client, &ledger_id, usr_user_pr).await?;
 
-    println!("Balance of node before tx: {:?}", balance_node_before);
-    println!("Balance of user before tx: {:?}", balance_user_before);
+    println!("Balance of node before tx: {balance_node_before:?}");
+    println!("Balance of user before tx: {balance_user_before:?}");
 
     let tx_args = TransferIcrc1 {
         from: Account {
@@ -118,14 +115,14 @@ async fn test_ckbtc_balance_node_and_user() -> Result<(), AgentError> {
         .await?;
 
     let transfer_result = Decode!(&transfer_resp, Result<Nat, TransferError>).unwrap();
-    println!("Transfer result: {:?}", transfer_result);
+    println!("Transfer result: {transfer_result:?}");
 
     // Fetch balances after transfer
     let balance_node_after = get_balance(&client, &ledger_id, usr_node_pr).await?;
     let balance_user_after = get_balance(&client, &ledger_id, usr_user_pr).await?;
 
-    println!("Balance of node after tx: {:?}", balance_node_after);
-    println!("Balance of user after tx: {:?}", balance_user_after);
+    println!("Balance of node after tx: {balance_node_after:?}");
+    println!("Balance of user after tx: {balance_user_after:?}");
 
     Ok(())
 }
@@ -154,31 +151,31 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
     client.fetch_root_key().await?;
 
     let can_ckl_id = Principal::from_text(CKLIGHTNING_LEDGER_ID).unwrap();
-    println!("\nckLightning Ledger Canister ID: {:?}", can_ckl_id);
+    println!("\nckLightning Ledger Canister ID: {can_ckl_id:?}");
     let str_user = str_home_from_path(PEM_USER_ACC_PATH);
     let usr_user_id = create_identity(Some(&str_user));
 
     let usr_user_pr = usr_user_id.sender().unwrap();
-    println!("\nUser Principal: {:?}", usr_user_pr);
+    println!("\nUser Principal: {usr_user_pr:?}");
 
     let zero_subaccount = Subaccount([0; 32]);
 
     let usr_acc_id = AccountIdentifier::new(&usr_user_pr, &zero_subaccount);
-    println!("\nUser Account ID: {:?}", usr_acc_id);
+    println!("\nUser Account ID: {usr_acc_id:?}");
 
     // Query user's ckBTC balance
 
     let resp_user_balance = client
         .icrc1_balance_of(usr_user_pr)
         .await
-        .map_err(|e| AgentError::MessageError(format!("Failed to get user balance: {}", e)))?;
+        .map_err(|e| AgentError::MessageError(format!("Failed to get user balance: {e}")))?;
     let resp_contract_balance = client
         .icrc1_balance_of(can_ckl_id)
         .await
-        .map_err(|e| AgentError::MessageError(format!("Failed to get contract balance: {}", e)))?;
+        .map_err(|e| AgentError::MessageError(format!("Failed to get contract balance: {e}")))?;
 
-    println!("\nUser ckBTC Balance in Wallet: {:?}", resp_user_balance);
-    println!("\nContract ckBTC Balance: {:?}", resp_contract_balance);
+    println!("\nUser ckBTC Balance in Wallet: {resp_user_balance:?}");
+    println!("\nContract ckBTC Balance: {resp_contract_balance:?}");
 
     let funding_pool = PoolFunding {
         pubkey_l1: client.signer.public_key().unwrap(),
@@ -187,48 +184,37 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
         timestamp: 0,
     };
 
-    let funding = Funding::Pool(funding_pool.clone());
-    let memo_transfer_bytes = funding.memo().0.to_vec();
+    let memo_transfer_bytes = funding_pool.memo().0.to_vec();
 
-    println!("\nMemo for transfer: {:?}", memo_transfer_bytes.clone());
+    println!("\nMemo for transfer: {memo_transfer_bytes:?}");
 
     let transfer_some_tx_decoded = client
         .tx_icrc1_transfer(
             can_ckl_id,
             usr_user_pr,
-            amount_u64.clone(),
+            amount_u64,
             memo_transfer_bytes,
         )
         .await
-        .map_err(|e| AgentError::MessageError(format!("Failed to get user balance: {}", e)))?;
+        .map_err(|e| AgentError::MessageError(format!("Failed to get user balance: {e}")))?;
 
-    println!(
-        "\nUser -> ckLightning icrc1_transfer in Block: {:?} with amount: {:?}",
-        transfer_some_tx_decoded.clone(),
-        nat_amount.clone()
-    );
+    println!("\nUser -> ckLightning icrc1_transfer in Block: {transfer_some_tx_decoded:?} with amount: {nat_amount:?}");
 
     let block_idx = transfer_some_tx_decoded.clone();
 
     let resp_contract_balance2 = client.icrc1_balance_of(can_ckl_id).await.map_err(|e| {
-        AgentError::MessageError(format!(
-            "Failed to get contract balance after transfer: {}",
-            e
-        ))
+        AgentError::MessageError(format!("Failed to get contract balance after transfer: {e}"))
     })?;
-    println!(
-        "\nContract ckBTC Balance after transfer: {:?}",
-        resp_contract_balance2
-    );
+    println!("\nContract ckBTC Balance after transfer: {resp_contract_balance2:?}");
 
     //query blocks
 
     let blocks_result = client
-        .query_block(&BTC_LEDGER_ID, block_idx)
+        .query_block(BTC_LEDGER_ID, block_idx)
         .await
-        .map_err(|e| AgentError::MessageError(format!("Failed to query block: {}", e)))?;
+        .map_err(|e| AgentError::MessageError(format!("Failed to query block: {e}")))?;
 
-    println!("\nQueried Block ID from BTC Ledger: {:?}", blocks_result);
+    println!("\nQueried Block ID from BTC Ledger: {blocks_result:?}");
 
     let first_block = blocks_result
         .blocks
@@ -247,7 +233,7 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
 
         if let ICRC3Value::Map(tx_map) = tx_map {
             icrc3value_map_to_transaction(tx_map, timestamp_opt).map_err(|e| {
-                AgentError::MessageError(format!("Failed to decode transaction: {}", e))
+                AgentError::MessageError(format!("Failed to decode transaction: {e}"))
             })?;
         } else {
             return Err(AgentError::MessageError(
@@ -263,34 +249,29 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
     let block = transfer_some_tx_decoded.clone();
     let blocku64 = block.0.to_u64_digits()[0];
 
-    let tx_notif = client
-        .transaction_notification(funding.clone(), blocku64, amount_u64)
+    client
+        .transaction_notification(funding_pool.clone(), blocku64, amount_u64)
         .await
-        .map(|amount| println!("Notification Result OK: {:?}", amount))
-        .map_err(|e| AgentError::MessageError(format!("Notification error: {}", e)))?;
+        .map(|amount| println!("Notification Result OK: {amount:?}"))
+        .map_err(|e| AgentError::MessageError(format!("Notification error: {e}")))?;
 
-    println!("tx notification: {:?}", tx_notif);
-
-    let funding_deserialized = Encode!(&funding.clone()).unwrap();
+    let funding_deserialized = Encode!(&funding_pool.clone()).unwrap();
     let funding_hash = Sha256::digest(&funding_deserialized);
 
     let signed_funding = client.signer.sign_arbitrary(&funding_hash);
     let res_sig = signed_funding.clone().unwrap();
     let sig_bytes = res_sig.signature.unwrap();
-    let resp_contract_deposit = client.deposit(funding.clone(), sig_bytes).await;
+    let resp_contract_deposit = client.deposit(funding_pool.clone(), sig_bytes).await;
 
-    println!("\nDeposit Response: {:?}", resp_contract_deposit);
+    println!("\nDeposit Response: {resp_contract_deposit:?}");
 
     // Query user's balance after deposit
 
     let resp_user_after_tx = client.icrc1_balance_of(usr_user_pr).await.map_err(|e| {
-        AgentError::MessageError(format!("Failed to get user balance after deposit: {}", e))
+        AgentError::MessageError(format!("Failed to get user balance after deposit: {e}"))
     })?;
 
-    println!(
-        "\nUser ckBTC balance after deposit: {:?}",
-        resp_user_after_tx
-    );
+    println!("\nUser ckBTC balance after deposit: {resp_user_after_tx:?}");
 
     let funding_lp_query = FundingLPQuery {
         asset: PoolAsset::CkBTC,
@@ -310,28 +291,21 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
         .query_user_lp_holdings(funding_lp_query.clone(), sig_funding_lp_query)
         .await
         .map_err(|e| {
-            AgentError::MessageError(format!("Failed to query user LP holdings: {}", e))
+            AgentError::MessageError(format!("Failed to query user LP holdings: {e}"))
         })?;
 
-    println!(
-        "\nUser contract balance after deposit: {:?}",
-        user_contract_balance_after
-    );
+    println!("\nUser contract balance after deposit: {user_contract_balance_after:?}");
 
     // User balance before withdrawal
 
     let user_balance_before_withdrawal =
         client.icrc1_balance_of(usr_user_pr).await.map_err(|e| {
             AgentError::MessageError(format!(
-                "Failed to get user balance before withdrawal: {}",
-                e
+                "Failed to get user balance before withdrawal: {e}"
             ))
         })?;
 
-    println!(
-        "User ckBTC balance before withdrawal: {:?}",
-        user_balance_before_withdrawal
-    );
+    println!("User ckBTC balance before withdrawal: {user_balance_before_withdrawal:?}");
 
     // // Trigger withdraw
 
@@ -359,21 +333,15 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
     let withdraw_lp_tx = client
         .withdraw_lp(pool_withdrawal.clone(), sig_pool_withdrawal, usr_user_pr)
         .await
-        .map_err(|e| AgentError::MessageError(format!("Failed to trigger LP withdrawal: {}", e)))?;
+        .map_err(|e| AgentError::MessageError(format!("Failed to trigger LP withdrawal: {e}")))?;
 
-    println!("withdraw_lp_tx decoded: {:?}", withdraw_lp_tx);
+    println!("withdraw_lp_tx decoded: {withdraw_lp_tx:?}");
 
     let resp_user_after_withdrawal = client.icrc1_balance_of(usr_user_pr).await.map_err(|e| {
-        AgentError::MessageError(format!(
-            "Failed to get user balance after withdrawal: {}",
-            e
-        ))
+        AgentError::MessageError(format!("Failed to get user balance after withdrawal: {e}"))
     })?;
 
-    println!(
-        "\nUser's ckBTC balance after withdrawal: {:?}",
-        resp_user_after_withdrawal
-    );
+    println!("\nUser's ckBTC balance after withdrawal: {resp_user_after_withdrawal:?}");
 
     // Final contract holdings
     let funding_lp_query = FundingLPQuery {
@@ -394,24 +362,17 @@ async fn test_ckbtc_deposit_lp_with_auth_cklightning_contract() -> Result<(), Ag
         .await
         .map_err(|e| {
             AgentError::MessageError(format!(
-                "Failed to query user LP holdings after withdrawal: {}",
-                e
+                "Failed to query user LP holdings after withdrawal: {e}"
             ))
         })?;
 
-    println!(
-        "\nFinal User holdings in Contract: {:?}",
-        resp_user_after_withdrawal_query_tx
-    );
+    println!("\nFinal User holdings in Contract: {resp_user_after_withdrawal_query_tx:?}");
 
     let resp_contract_final_query_tx = client.icrc1_balance_of(can_ckl_id).await.map_err(|e| {
-        AgentError::MessageError(format!("Failed to get final contract balance: {}", e))
+        AgentError::MessageError(format!("Failed to get final contract balance: {e}"))
     })?;
 
-    println!(
-        "Contract final ckBTC Balance in ckLightning Canister: {:?}",
-        resp_contract_final_query_tx
-    );
+    println!("Contract final ckBTC Balance in ckLightning Canister: {resp_contract_final_query_tx:?}");
 
     Ok(())
 }

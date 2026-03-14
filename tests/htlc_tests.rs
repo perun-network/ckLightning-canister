@@ -27,7 +27,7 @@ use bitcoin::{
     secp256k1::{PublicKey, Secp256k1, SecretKey},
 };
 use cklightning::htlc::{
-    Htlc, HtlcManager, HtlcState, apply_htlc_success_witness, apply_htlc_timeout_witness,
+    HtlcManager, HtlcState, apply_htlc_success_witness, apply_htlc_timeout_witness,
     build_htlc_success_tx, build_htlc_timeout_tx, build_htlc_witness_script, compute_payment_hash,
     create_htlc_output, sign_htlc_input, verify_preimage,
 };
@@ -89,13 +89,13 @@ fn create_mock_funding_tx(htlc_output: &TxOut) -> (Transaction, OutPoint) {
 #[test]
 fn test_htlc_success_path_alice_to_bob() {
     let network = Network::Regtest;
-    let secp = Secp256k1::new();
+    let _secp = Secp256k1::new();
 
     // === Setup: Create Alice (sender) and Bob (receiver) ===
-    let (alice_sk, alice_pk) = create_test_keypair(1);
+    let (_alice_sk, alice_pk) = create_test_keypair(1);
     let (bob_sk, bob_pk) = create_test_keypair(2);
 
-    let alice_address = pubkey_to_p2wpkh_address(&alice_pk, network);
+    let _alice_address = pubkey_to_p2wpkh_address(&alice_pk, network);
     let bob_address = pubkey_to_p2wpkh_address(&bob_pk, network);
 
     // === Step 1: Create the payment preimage and hash ===
@@ -177,7 +177,7 @@ fn test_htlc_success_path_alice_to_bob() {
     assert_eq!(witness_preimage, preimage);
 
     println!("HTLC Success Path Test Passed!");
-    println!("  Alice -> Bob payment: {} sats", htlc_amount_sat);
+    println!("  Alice -> Bob payment: {htlc_amount_sat} sats");
     println!("  Payment hash: {}", hex::encode(payment_hash));
     println!("  Bob claimed with preimage: {}", hex::encode(preimage));
 }
@@ -271,13 +271,13 @@ fn test_htlc_timeout_path_alice_reclaims() {
 
     println!("HTLC Timeout Path Test Passed!");
     println!("  Alice reclaimed: {} sats", htlc_amount_sat - fee_sat);
-    println!("  After CLTV expiry block: {}", cltv_expiry);
+    println!("  After CLTV expiry block: {cltv_expiry}");
 }
 
 /// Test HTLC Manager state transitions.
 #[test]
 fn test_htlc_manager_lifecycle() {
-    let (alice_sk, alice_pk) = create_test_keypair(5);
+    let (_alice_sk, alice_pk) = create_test_keypair(5);
     let (_bob_sk, bob_pk) = create_test_keypair(6);
 
     let mut manager = HtlcManager::new();
@@ -338,7 +338,7 @@ fn test_htlc_manager_lifecycle() {
 /// Test that wrong preimage doesn't fulfill HTLC.
 #[test]
 fn test_htlc_wrong_preimage_fails() {
-    let (alice_sk, alice_pk) = create_test_keypair(7);
+    let (_alice_sk, alice_pk) = create_test_keypair(7);
     let (_bob_sk, bob_pk) = create_test_keypair(8);
 
     let mut manager = HtlcManager::new();
@@ -372,7 +372,7 @@ fn test_htlc_wrong_preimage_fails() {
 /// Test HTLC timeout state transition.
 #[test]
 fn test_htlc_timeout_state() {
-    let (alice_sk, alice_pk) = create_test_keypair(9);
+    let (_alice_sk, alice_pk) = create_test_keypair(9);
     let (_bob_sk, bob_pk) = create_test_keypair(10);
 
     let mut manager = HtlcManager::new();
@@ -412,7 +412,7 @@ fn test_htlc_timeout_state() {
 /// Test multiple concurrent HTLCs.
 #[test]
 fn test_multiple_htlcs() {
-    let (alice_sk, alice_pk) = create_test_keypair(11);
+    let (_alice_sk, alice_pk) = create_test_keypair(11);
     let (_bob_sk, bob_pk) = create_test_keypair(12);
 
     let mut manager = HtlcManager::new();
@@ -444,7 +444,7 @@ fn test_multiple_htlcs() {
     assert_eq!(pending.len(), 3);
 
     // Fulfill the second one
-    let (hash, amount) = manager.fulfill_htlc(preimages[1].to_vec()).unwrap();
+    let (_hash, amount) = manager.fulfill_htlc(preimages[1].to_vec()).unwrap();
     assert_eq!(amount, 200_000);
 
     // Now only 2 pending

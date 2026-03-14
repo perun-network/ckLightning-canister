@@ -23,7 +23,7 @@ pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingU
 
     // Get the LP BTC address
     let lp_address = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_funding_utxos read");
         state.lp_btc_address.clone()
     };
 
@@ -40,9 +40,9 @@ pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingU
 
     // Parse address
     let _address = Address::from_str(&lp_address)
-        .map_err(|e| BtcError::Other(format!("Invalid LP address: {}", e)))?
+        .map_err(|e| BtcError::Other(format!("Invalid LP address: {e}")))?
         .require_network(ctx.bitcoin_network)
-        .map_err(|e| BtcError::Other(format!("LP address network mismatch: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("LP address network mismatch: {e:?}")))?;
 
     // Fetch UTXOs from Bitcoin canister
     let utxo_response = bitcoin_get_utxos(&GetUtxosRequest {
@@ -51,11 +51,11 @@ pub async fn get_funding_utxos_impl(_min_amount_sats: u64) -> Result<GetFundingU
         filter: None,
     })
     .await
-    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+    .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {e:?}")))?;
 
     // Get reserved UTXOs to exclude
     let reserved = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_funding_utxos read 2");
         state.reserved_utxos.clone()
     };
 
@@ -98,7 +98,7 @@ pub fn update_channel_balance_impl(request: UpdateChannelBalanceRequest) -> Upda
         }
     };
 
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: update_channel_balance");
 
     // Check if channel exists and get capacity for potential new entry
     let channel_capacity = match state.ln_channels.get(&channel_id) {
@@ -139,7 +139,7 @@ pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcErro
 
     // Get on-chain BTC balance
     let (lp_address, channel_balances, total_btc_deposited, total_btc_in_channels) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_lp_liquidity_status read");
         (
             state.lp_btc_address.clone(),
             state.channel_balances.clone(),
@@ -156,7 +156,7 @@ pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcErro
             filter: None,
         })
         .await
-        .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {:?}", e)))?;
+        .map_err(|e| BtcError::Other(format!("Failed to get UTXOs: {e:?}")))?;
 
         let total: u64 = utxo_response.utxos.iter().map(|u| u.value).sum();
         (total, utxo_response.utxos.len() as u32)
@@ -181,7 +181,7 @@ pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcErro
 
     // Get ckBTC pool balance from liquidity pool
     let ckbtc_pool_sats = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_lp_liquidity_status read 2");
         state.liq_pool.get_total(&PoolAsset::CkBTC).0.try_into().unwrap_or(0)
     };
 
@@ -200,28 +200,73 @@ pub async fn get_lp_liquidity_status_impl() -> Result<LpLiquidityStatus, BtcErro
 
 /// Reserve UTXOs for a pending channel open
 pub fn reserve_utxos_for_channel_impl(utxos: &[LpBtcUtxo], channel_id: [u8; 32]) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: reserve_utxos_for_channel");
     for utxo in utxos {
         let key = (utxo.txid.clone(), utxo.vout);
         state.reserved_utxos.insert(key, channel_id);
     }
 }
 
-/// Release reserved UTXOs (on channel open failure)
-pub fn release_reserved_utxos_impl(channel_id: [u8; 32]) {
-    let mut state = STATE.write().unwrap();
-    state.reserved_utxos.retain(|_, v| *v != channel_id);
-}
-
-/// Called when a channel is successfully funded - update tracking
+/// Called when a channel is successfully funded and TX confirmed.
 ///
-/// NOTE: total_btc_in_channels is already incremented in fund_channel_impl(),
-/// so we do NOT increment it again here to avoid double-counting.
+/// Two-phase model: this is where LP balances are actually deducted and
+/// total_btc_in_channels is incremented. Looks up the reservation by
+/// funding_address (from ln_channels registry) or falls back to capacity_sats.
 pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: channel_funded");
 
-    // Remove from reserved UTXOs
-    state.reserved_utxos.retain(|_, v| *v != channel_id);
+    // Find the funding address for this channel to look up the reservation
+    let funding_address = state.ln_channels.get(&channel_id)
+        .map(|ch| ch.funding_address.clone());
+
+    // Remove reserved UTXOs using the correct reservation key (sha256(funding_address)),
+    // which matches how fund_channel_impl stores them.
+    if let Some(ref addr) = funding_address {
+        use bitcoin::hashes::{Hash, sha256};
+        let reservation_id: [u8; 32] = sha256::Hash::hash(
+            addr.as_bytes()
+        ).to_byte_array();
+        state.reserved_utxos.retain(|_, v| *v != reservation_id);
+    }
+
+    // Look up reservation — only LP-funded channels have one (from fund_channel).
+    // Channels funded by the peer (e.g. inbound channels) have no reservation
+    // and must NOT be deducted from the LP pool.
+    let amount_sat = if let Some(ref addr) = funding_address {
+        if let Some(reservation) = state.channel_funding_reservations.remove(addr) {
+            reservation.amount_sat
+        } else if state.funded_channels.contains(addr) {
+            // Reservation expired but funded_channels guard exists — this is a late
+            // commit from WAL recovery after the relay was down past reservation timeout.
+            // The channel is live on-chain (relay verified it), so proceed with capacity_sats.
+            ic_cdk::println!(
+                "channel_funded: reservation expired for address {} — late commit, using capacity_sats={}",
+                addr, capacity_sats
+            );
+            capacity_sats
+        } else {
+            // No reservation AND no funded_channels entry = peer-funded/inbound channel.
+            // Skip LP accounting entirely — no deduction, no channel balance tracking.
+            ic_cdk::println!(
+                "channel_funded: no reservation for address {} — peer-funded channel, skipping LP deduction",
+                addr
+            );
+            return;
+        }
+    } else {
+        ic_cdk::println!(
+            "channel_funded: no ln_channel entry for channel — skipping LP deduction"
+        );
+        return;
+    };
+
+    // Deduct from LPs first, then increment total (avoids stale total on failure)
+    let amount_nat = Nat::from(amount_sat);
+    if let Err(e) = state.liq_pool.deduct_proportional(PoolAsset::BTC, amount_nat) {
+        ic_cdk::println!("ERROR: deduct_proportional failed on channel_funded: {:?}", e);
+        return;
+    }
+    state.total_btc_in_channels = state.total_btc_in_channels.saturating_add(amount_sat);
 
     // Initialize channel balance tracking
     state.channel_balances.insert(channel_id, LnChannelBalance {
@@ -234,13 +279,72 @@ pub fn channel_funded_impl(channel_id: [u8; 32], capacity_sats: u64) {
     });
 }
 
+/// Cancel a pending channel funding (TX never broadcast or failed).
+///
+/// Removes the idempotency guard and reservation so the channel can be re-attempted.
+/// No LP balance changes needed since deduction hasn't happened yet (two-phase model).
+pub fn cancel_channel_funding_impl(funding_address: String) -> Result<(), String> {
+    let mut state = STATE.write().expect("STATE lock: cancel_channel_funding");
+
+    // Remove idempotency guard
+    if !state.funded_channels.remove(&funding_address) {
+        return Err(format!("No funded_channels entry for address {funding_address}"));
+    }
+
+    // Remove reservation (may not exist if already timed out)
+    if state.channel_funding_reservations.remove(&funding_address).is_some() {
+        ic_cdk::println!("Cancelled channel funding reservation for {}", funding_address);
+    }
+
+    // Release reserved UTXOs for this funding address.
+    // fund_channel_impl uses sha256(funding_address) as the reservation ID.
+    use bitcoin::hashes::{Hash, sha256};
+    let reservation_id: [u8; 32] = sha256::Hash::hash(
+        funding_address.as_bytes()
+    ).to_byte_array();
+    state.reserved_utxos.retain(|_, v| *v != reservation_id);
+
+    Ok(())
+}
+
+/// Expire stale channel funding reservations (called from heartbeat).
+///
+/// If a reservation is older than the timeout and channel_funded was never called,
+/// release the idempotency guard so the channel can be re-attempted.
+pub fn expire_channel_funding_reservations() {
+    let now = blocktime();
+    // 6 hours in nanoseconds (IC time is in nanoseconds)
+    const RESERVATION_TIMEOUT_NS: u64 = 6 * 60 * 60 * 1_000_000_000;
+
+    let mut state = STATE.write().expect("STATE lock: expire_channel_funding_reservations");
+
+    let expired: Vec<String> = state.channel_funding_reservations.iter()
+        .filter(|(_, r)| now.saturating_sub(r.created_at) > RESERVATION_TIMEOUT_NS)
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    for addr in &expired {
+        state.channel_funding_reservations.remove(addr);
+        // NOTE: Do NOT remove funded_channels entry here. It serves as a durable
+        // breadcrumb so that late channel_funded calls (via WAL recovery after
+        // relay downtime) can still use the late-commit path in channel_funded_impl.
+        // Release reserved UTXOs for this funding address
+        use bitcoin::hashes::{Hash, sha256};
+        let reservation_id: [u8; 32] = sha256::Hash::hash(
+            addr.as_bytes()
+        ).to_byte_array();
+        state.reserved_utxos.retain(|_, v| *v != reservation_id);
+        ic_cdk::println!("Expired channel funding reservation for {}", addr);
+    }
+}
+
 /// Called when a channel is closed - update tracking and credit LPs
 ///
 /// Uses the last known `our_balance_sats` from `channel_balances` (updated
 /// by periodic `update_channel_balance` calls from the relay) to credit LPs
 /// proportionally with the BTC returned from the channel.
 pub fn channel_closed_impl(channel_id: [u8; 32]) {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: channel_closed");
 
     // Try channel_balances first (has per-update balance tracking)
     let (our_sats, capacity) = if let Some(balance) = state.channel_balances.get_mut(&channel_id) {

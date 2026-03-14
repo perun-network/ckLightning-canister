@@ -46,16 +46,15 @@ use crate::BtcPurpose;
 use crate::btc::address::get_balance;
 use crate::btc::address::get_segwit_address;
 use crate::btc::address::{get_p2pkh_address, get_p2tr_key_path_only_address, get_p2wpkh_address};
-use crate::error::{BtcError, CklError, ResultBtc};
-use crate::helpers::execute_ledger_transfer;
+use crate::error::{BtcError, CklError};
 use crate::htlc::HtlcManager;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::{
-    Amount, BtcAddressType, ChannelFunding, ChannelId, DEVNET_CKBTC_LEDGER,
-    Funding, FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
-    HoldingsResponse, NotifyArgs, PoolWithdrawal, RegisteredState, SetBtcAddressArgs,
-    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs, WithdrawalReq,
+    Amount, BtcAddressType, CKBTC_LEDGER_PRINCIPAL, DEVNET_CKBTC_LEDGER,
+    FundingLPArgs, FundingLPQueryArgs, GetBtcBalanceArgs, GetBtcBalancesResponse,
+    HoldingsResponse, NotifyArgs, PoolFunding, PoolWithdrawal, SetBtcAddressArgs,
+    SetBtcAddressMsg, SetBtcAddressResponse, WithdrawalLPArgs,
 };
 use crate::ic_types::{
     OnrampRequestInfo, OfframpRequestInfo,
@@ -67,7 +66,7 @@ use crate::liquidity_pool::LiquidityPool;
 use crate::receiver::ICPReceiverError;
 use crate::receiver::TransactionICRCNotification;
 
-use ic_cdk::api::call::CallResult;
+use ic_cdk::call::Call;
 use ic_cdk::api::canister_self;
 use ic_cdk::api::msg_caller;
 use ic_cdk::api::time as blocktime;
@@ -75,21 +74,60 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
 
 use crate::error::ResultCkl;
-use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Params, State, Timestamp};
+use crate::ic_types::{DEFAULT_CKBTC_FEE, L1Account, Timestamp};
 use crate::receiver;
-use crate::require;
 use candid::{CandidType, Deserialize, Nat, Principal};
 use lazy_static::lazy_static;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use crate::ic_types::RelayRegistration;
+
+/// Check swap amount against withdrawal caps.
+/// Must be called while holding STATE write lock. Returns Ok(()) or Err with reason.
+pub fn check_swap_caps(state: &mut CanisterState<impl receiver::TXQuerier>, amount_sats: u64) -> Result<(), String> {
+    // Per-swap cap
+    if state.max_single_swap_sats > 0 && amount_sats > state.max_single_swap_sats {
+        return Err(format!(
+            "Swap amount {} exceeds max single swap cap of {} sats",
+            amount_sats, state.max_single_swap_sats
+        ));
+    }
+
+    // Hourly aggregate cap
+    if state.max_hourly_swap_sats > 0 {
+        let now = ic_cdk::api::time();
+        const HOUR_NS: u64 = 60 * 60 * 1_000_000_000;
+
+        // Reset window if expired
+        if now.saturating_sub(state.hourly_swap_window_start) > HOUR_NS {
+            state.hourly_swap_volume_sats = 0;
+            state.hourly_swap_window_start = now;
+        }
+
+        if state.hourly_swap_volume_sats.saturating_add(amount_sats) > state.max_hourly_swap_sats {
+            return Err(format!(
+                "Hourly swap volume would exceed cap of {} sats (current: {} + requested: {})",
+                state.max_hourly_swap_sats, state.hourly_swap_volume_sats, amount_sats
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Record a completed swap's volume against the hourly cap.
+pub fn record_swap_volume(state: &mut CanisterState<impl receiver::TXQuerier>, amount_sats: u64) {
+    if state.max_hourly_swap_sats > 0 {
+        state.hourly_swap_volume_sats = state.hourly_swap_volume_sats.saturating_add(amount_sats);
+    }
+}
 
 /// Check that the caller is the registered relay.
 /// Returns Ok(()) if authorized, Err(String) with descriptive error otherwise.
 pub fn assert_relay_caller() -> Result<(), String> {
     let caller = msg_caller();
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: assert_relay_caller");
     match &state.registered_relay {
         Some(relay) if relay.principal == caller => Ok(()),
         Some(_) => Err("Unauthorized: caller is not the registered relay".to_string()),
@@ -124,8 +162,11 @@ where
 {
     pub(crate) principal: Principal,
 
-    // Multiple liquidity depositor addresses
+    // Per-user LP BTC deposit addresses (LiquidityPoolUser derivation)
     pub(crate) btc_liquidity_addresses: HashMap<Principal, String>,
+
+    // Personal depositor BTC addresses (LiquidityDepositor derivation)
+    pub(crate) btc_depositor_addresses: HashMap<Principal, String>,
 
     // SINGLE global invoice deposit address
     pub(crate) btc_invoice_address: Option<String>,
@@ -140,8 +181,6 @@ where
     pub(crate) processed_utxos: HashMap<(Vec<u8>, u32), Principal>,
 
     pub(crate) icrc_receiver: receiver::Receiver<Q>,
-    pub(crate) user_holdings: HashMap<Funding, Amount>,
-    pub(crate) channels: HashMap<ChannelId, RegisteredState>,
     pub(crate) liq_pool: LiquidityPool,
 
     // Lightning → ckBTC swaps storage (payment_hash -> SwapInfo)
@@ -226,6 +265,43 @@ where
 
     // Configurable ICP anti-DDoS fee (in e8s). Default: 100_000_000 (1 ICP)
     pub(crate) icp_ddos_fee_e8s: u64,
+
+    // Withdrawal / swap amount caps (admin-configurable)
+    // max_single_swap_sats: 0 = disabled (default)
+    pub(crate) max_single_swap_sats: u64,
+    // max_hourly_swap_sats: 0 = disabled (default)
+    pub(crate) max_hourly_swap_sats: u64,
+    // Rolling hourly swap volume tracker
+    pub(crate) hourly_swap_volume_sats: u64,
+    pub(crate) hourly_swap_window_start: u64,
+
+    // Funded channel addresses (idempotency guard for fund_channel)
+    pub(crate) funded_channels: HashSet<String>,
+
+    // Two-phase channel funding: reservations pending confirmation
+    // Keyed by funding address. Tracks amount reserved until channel_funded or cancel.
+    pub(crate) channel_funding_reservations: HashMap<String, ChannelFundingReservation>,
+
+    // ==========================================================================
+    // WS6 Optimizations: Active request tracking
+    // ==========================================================================
+
+    // Active (non-terminal) onramp/offramp request IDs for O(1) heartbeat filtering
+    pub(crate) active_onramp_ids: HashSet<String>,
+    pub(crate) active_offramp_ids: HashSet<String>,
+
+    // Running counter of ckBTC sats reserved for pending onramp requests
+    // (avoids full iteration in withdraw_ckbtc_impl)
+    pub(crate) reserved_ckbtc_sats: u64,
+}
+
+/// Tracks a pending channel funding between fund_channel (TX signed) and
+/// channel_funded (TX confirmed). LP balances are only deducted on confirmation.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ChannelFundingReservation {
+    pub amount_sat: u64,
+    pub created_at: u64,
+    pub funding_address: String,
 }
 
 /// Internal representation of channel secrets (not exposed via Candid)
@@ -254,10 +330,10 @@ pub struct HtlcTxDetails {
 pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressResponse, BtcError> {
     let depositor = msg_caller(); // IC principal of the caller
 
-    // First check state
+    // First check state (personal depositor addresses)
     {
-        let state = STATE.read().unwrap();
-        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+        let state = STATE.read().expect("STATE lock: set_btc_liquidity_address read");
+        if let Some(addr) = state.btc_depositor_addresses.get(&depositor) {
             return Ok(SetLiquidityBtcAddressResponse {
                 address: addr.clone(),
                 already_existed: true,
@@ -265,15 +341,15 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
         }
     }
 
-    // Derive new SegWit address for this depositor
+    // Derive new SegWit address for this depositor (personal address)
     let purpose = BtcPurpose::LiquidityDepositor(depositor);
     let address = get_segwit_address(purpose).await?;
 
-    // Store in state
+    // Store in state (personal depositor addresses)
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: set_btc_liquidity_address write");
         state
-            .btc_liquidity_addresses
+            .btc_depositor_addresses
             .insert(depositor, address.clone());
     }
 
@@ -283,19 +359,22 @@ pub async fn set_btc_liquidity_address_impl() -> Result<SetLiquidityBtcAddressRe
     })
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn set_btc_address_impl(
     set_btc_address_args: SetBtcAddressArgs,
 ) -> Result<SetBtcAddressResponse, BtcError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: set_btc_address");
     let address_type = set_btc_address_args.address_type;
     let principal = msg_caller();
 
-    assert!(principal == set_btc_address_args.principal.unwrap());
+    match set_btc_address_args.principal {
+        Some(p) if p == principal => {}
+        Some(_) => return Err(BtcError::Other("Principal mismatch: caller does not match request principal".into())),
+        None => return Err(BtcError::Other("Principal is required".into())),
+    }
 
-    assert!(!state.btc_liquidity_addresses.contains_key(&principal));
-
-    // Check if address for this type exists
-    if let Some(address) = state.btc_liquidity_addresses.get(&principal) {
+    // Check if address for this type exists (personal depositor addresses)
+    if let Some(address) = state.btc_depositor_addresses.get(&principal) {
         return Ok(SetBtcAddressResponse {
             address: address.clone(),
             msg: SetBtcAddressMsg::BtcAddressAlreadySetSingle(address_type),
@@ -309,10 +388,10 @@ pub async fn set_btc_address_impl(
         BtcAddressType::P2TR => get_p2tr_key_path_only_address().await?,
     };
 
-    // Store in the map
+    // Store in the map (personal depositor addresses)
     state
-        .btc_liquidity_addresses
-        .insert(principal.clone(), address.clone());
+        .btc_depositor_addresses
+        .insert(principal, address.clone());
 
     Ok(SetBtcAddressResponse {
         address,
@@ -320,15 +399,16 @@ pub async fn set_btc_address_impl(
     })
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn get_btc_balances_impl(
     confirmations: Option<u64>,
 ) -> Result<GetBtcBalancesResponse, BtcError> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_btc_balances");
 
     let mut balances: HashMap<Principal, Option<u64>> = HashMap::new();
     let mut any_address_set = false;
 
-    for (address_type, address) in &state.btc_liquidity_addresses {
+    for (address_type, address) in &state.btc_depositor_addresses {
         any_address_set = true;
 
         // Construct GetBtcBalanceArgs with actual address string, not address_type
@@ -338,10 +418,7 @@ pub async fn get_btc_balances_impl(
         };
 
         // Query balance asynchronously, handle errors gracefully
-        let balance = match get_balance(args).await {
-            Ok(bal) => Some(bal),
-            Err(_) => None, // optionally log or process error
-        };
+        let balance = get_balance(args).await.ok();
 
         balances.insert(*address_type, balance);
     }
@@ -358,7 +435,7 @@ pub async fn get_btc_balances_impl(
 pub async fn get_ln_address_impl() -> Result<String, BtcError> {
     // Check global cache first
     {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: get_ln_address read");
         if let Some(addr) = state.btc_invoice_address.as_ref() {
             return Ok(addr.clone());
         }
@@ -370,7 +447,7 @@ pub async fn get_ln_address_impl() -> Result<String, BtcError> {
 
     // Store globally
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_ln_address write");
         state.btc_invoice_address = Some(address.clone());
     }
 
@@ -380,33 +457,34 @@ pub async fn get_ln_address_impl() -> Result<String, BtcError> {
 pub async fn get_btc_liquidity_address_for_caller_impl() -> std::result::Result<String, BtcError> {
     let depositor = msg_caller();
 
-    // 1. Fast path: return existing address if present
+    // 1. Fast path: return existing personal address if present
     {
-        let state = STATE.read().unwrap();
-        if let Some(addr) = state.btc_liquidity_addresses.get(&depositor) {
+        let state = STATE.read().expect("STATE lock: get_btc_liquidity_address_for_caller read");
+        if let Some(addr) = state.btc_depositor_addresses.get(&depositor) {
             return Ok(addr.clone());
         }
     }
 
-    // 2. Derive new SegWit address for this depositor
+    // 2. Derive new SegWit address for this depositor (personal address)
     let purpose = BtcPurpose::LiquidityDepositor(depositor);
     let address = get_segwit_address(purpose).await?;
 
-    // 3. Store in state and return
+    // 3. Store in state and return (personal depositor addresses)
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: get_btc_liquidity_address_for_caller write");
         state
-            .btc_liquidity_addresses
+            .btc_depositor_addresses
             .insert(depositor, address.clone());
     }
 
     Ok(address)
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn transaction_notification_impl(
     notify_args: NotifyArgs,
 ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: transaction_notification");
     state
         .process_icrc_tx(
             notify_args.block_height,
@@ -419,15 +497,16 @@ pub async fn transaction_notification_impl(
 pub fn query_user_lp_holdings_impl(
     funding: FundingLPQueryArgs,
 ) -> std::result::Result<HoldingsResponse, CklError> {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: query_user_lp_holdings");
     state.query_holdings(funding)
 }
 
+#[allow(clippy::await_holding_lock)] // IC canisters are single-threaded; no deadlock risk
 pub async fn withdraw_lp_impl(
     withdrawal: WithdrawalLPArgs,
     sig_withdrawal: Vec<u8>,
 ) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: withdraw_lp");
     let pr_caller = msg_caller();
     let receiver = withdrawal.pool_withdrawal.depositor.0;
 
@@ -443,53 +522,32 @@ pub async fn withdraw_lp_impl(
         .await
 }
 
-pub async fn trigger_withdraw_impl(req: WithdrawalReq) -> std::result::Result<Nat, CklError> {
-    let mut state = STATE.write().unwrap();
-    state.withdraw_from_liq_pool(req).await
-}
-
-pub fn deposit_channel_impl(
-    funding: ChannelFunding,
-    signature_bytes: &[u8],
-) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
-    state.deposit_icrc(blocktime(), Funding::Channel(funding), signature_bytes)
-}
-
 pub fn deposit_lp_impl(
     funding: FundingLPArgs,
     signature_bytes: &[u8],
 ) -> std::result::Result<(), CklError> {
-    let mut state = STATE.write().unwrap();
+    let mut state = STATE.write().expect("STATE lock: deposit_lp");
 
     let pool_funding = funding.pool_funding;
 
-    state.deposit_icrc(blocktime(), Funding::Pool(pool_funding), signature_bytes)
-}
-
-pub fn query_state_impl(id: ChannelId) -> Option<RegisteredState> {
-    let state = STATE.read().unwrap();
-    state.state(&id)
+    state.deposit_icrc(blocktime(), pool_funding, signature_bytes)
 }
 
 impl<Q> CanisterState<Q>
 where
     Q: receiver::TXQuerier,
 {
-    /// Test-only constructor that doesn't call canister_self() (which panics outside IC runtime).
-    #[cfg(test)]
-    pub fn new_for_test(q: Q) -> Self {
-        let dummy_principal = Principal::anonymous();
+    /// Common initializer for all fields given a principal and querier.
+    fn init(q: Q, principal: Principal) -> Self {
         Self {
-            principal: dummy_principal,
+            principal,
             btc_liquidity_addresses: HashMap::new(),
+            btc_depositor_addresses: HashMap::new(),
             btc_invoice_address: None,
             lp_btc_address: None,
             pending_btc_deposits: HashMap::new(),
             processed_utxos: HashMap::new(),
-            icrc_receiver: receiver::Receiver::new(q, dummy_principal),
-            user_holdings: Default::default(),
-            channels: Default::default(),
+            icrc_receiver: receiver::Receiver::new(q, principal),
             liq_pool: LiquidityPool::new(),
             swaps: HashMap::new(),
             ln_channels: HashMap::new(),
@@ -519,69 +577,28 @@ where
             },
             protocol_fees_ckbtc: 0,
             admin: None,
-            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
+            icp_ddos_fee_e8s: 100_000_000,
+            max_single_swap_sats: 0,
+            max_hourly_swap_sats: 0,
+            hourly_swap_volume_sats: 0,
+            hourly_swap_window_start: 0,
+            funded_channels: HashSet::new(),
+            channel_funding_reservations: HashMap::new(),
+            active_onramp_ids: HashSet::new(),
+            active_offramp_ids: HashSet::new(),
+            reserved_ckbtc_sats: 0,
         }
+    }
+
+    /// Test-only constructor that doesn't call canister_self() (which panics outside IC runtime).
+    #[cfg(test)]
+    pub fn new_for_test(q: Q) -> Self {
+        Self::init(q, Principal::anonymous())
     }
 
     pub fn new(q: Q, my_principal: Principal) -> Self {
         assert!(my_principal == canister_self());
-
-        Self {
-            principal: canister_self(),
-            btc_liquidity_addresses: HashMap::new(), // multiple per depositor
-            btc_invoice_address: None,               // single global invoice address
-            lp_btc_address: None,                    // single shared LP BTC address
-            pending_btc_deposits: HashMap::new(),    // pending BTC deposits
-            processed_utxos: HashMap::new(),         // processed UTXOs to avoid double-crediting
-            icrc_receiver: receiver::Receiver::new(q, my_principal),
-            user_holdings: Default::default(),
-            channels: Default::default(),
-            liq_pool: LiquidityPool::new(),
-            swaps: HashMap::new(),           // Lightning → ckBTC swaps
-            ln_channels: HashMap::new(),     // Lightning channel funding verification
-            onramp_requests: HashMap::new(), // Onramp invoice requests
-            offramp_requests: HashMap::new(), // Offramp requests (ckBTC → Lightning)
-            // LP Liquidity tracking
-            channel_balances: HashMap::new(),
-            total_btc_deposited: 0,
-            total_btc_in_channels: 0,
-            reserved_utxos: HashMap::new(),
-            // HTLC state management
-            htlc_manager: HtlcManager::new(),
-            // Channel secrets (Phase 2)
-            channel_secrets: HashMap::new(),
-            channel_counterparty_pubkeys: HashMap::new(),
-            htlc_tx_details: HashMap::new(),
-            // Test configuration
-            test_onramp_timeout_ns: None,
-            test_offramp_timeout_ns: None,
-            // Relay registration
-            registered_relay: None,
-            // Rate limiting
-            onramp_rate_limits: HashMap::new(),
-            offramp_rate_limits: HashMap::new(),
-            // StableSwap AMM
-            stableswap_config: crate::stableswap::StableSwapConfig {
-                amplification: 200,
-                fee_bps: 10,
-                protocol_fee_share_bps: 5000,
-                max_slippage_bps: 500,    // 5% — reject swaps with extreme price impact
-                imbalance_fee_bps: 100,   // 1% at full imbalance (10x base fee)
-                rebate_bps: 0,            // disabled by default
-                max_swap_pct_bps: 0,      // disabled by default
-            },
-            protocol_fees_ckbtc: 0,
-            admin: None,
-            icp_ddos_fee_e8s: 100_000_000, // 1 ICP default
-        }
-    }
-
-    pub fn deposit_channel(&mut self, funding: Funding, amount: Amount) -> ResultCkl<()> {
-        *self
-            .user_holdings
-            .entry(funding)
-            .or_insert(Default::default()) += amount;
-        Ok(())
+        Self::init(q, canister_self())
     }
 
     pub async fn withdraw_icrc(
@@ -606,31 +623,15 @@ where
 
         // Send funds back to L1 address
         let _ = self
-            .send_funds_to_l1(receiver, &pubkey_l1, amount.clone(), &asset)
+            .send_funds_to_l1(receiver, pubkey_l1, amount.clone(), asset)
             .await;
 
         Ok(())
     }
-    async fn get_btc_address(&self, address_type: BtcAddressType) -> ResultBtc<String> {
-        let result = match address_type {
-            BtcAddressType::P2PKH => get_p2pkh_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2PKH error: {}", e))),
-            BtcAddressType::P2WPKH => get_p2wpkh_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2WPKH error: {}", e))),
-            BtcAddressType::P2TR => get_p2tr_key_path_only_address()
-                .await
-                .map_err(|e| BtcError::BtcAddressFetchError(format!("P2TR error: {}", e))),
-        };
-
-        result
-    }
-
     async fn send_funds_to_l1(
         &self,
         receiver: Principal,
-        _pubkey: &Vec<u8>,
+        _pubkey: &[u8],
         amount: Amount,
         _asset: &PoolAsset,
     ) -> ResultCkl<()> {
@@ -642,30 +643,24 @@ where
             },
             amount: Nat(amount.clone().0),
             fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-            memo: None,
-            created_at_time: None,
+            memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:l1_transfer".to_vec())),
+            created_at_time: Some(ic_cdk::api::time()),
         };
 
-        let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+        let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
-        let call_result: CallResult<(
-            std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-        )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-        match call_result {
+        match Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+            .with_args(&(transfer_arg,))
+            .await
+            .map_err(ic_cdk::call::Error::from)
+            .and_then(|r| r.candid_tuple::<(std::result::Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+        {
             Ok((inner_result,)) => match inner_result {
                 Ok(_block_height) => Ok(()),
                 Err(_e) => Err(CklError::LedgerError),
             },
-            Err((_code, _msg)) => Err(CklError::LedgerError),
+            Err(_e) => Err(CklError::LedgerError),
         }
-    }
-
-    // Correct usage:
-    pub fn withdraw_channel(&mut self, _funding: Funding, _amount: Amount) -> ResultCkl<()> {
-        // TODO: withdrawal logic as part of the L2 Lightning protocol
-
-        return Ok(());
     }
 
     pub fn deposit_liq_pool(
@@ -673,9 +668,6 @@ where
         amount: Amount,
         asset: PoolAsset,
         depositor: L1Account,
-        _pubkey_bytes: Vec<u8>,
-        _funding: &Funding,
-        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         // Extract Principal from L1Account and use simplified LP deposit
         let depositor_principal = depositor.0;
@@ -685,33 +677,17 @@ where
     pub fn deposit_icrc(
         &mut self,
         _time: Timestamp,
-        funding: Funding,
-        signature_bytes: &[u8], // added signature argument
+        funding: PoolFunding,
+        _signature_bytes: &[u8],
     ) -> ResultCkl<()> {
         let memo = funding.memo();
         // Drain the receiver for the amount associated with this memo.
         let amount = self.icrc_receiver.drain(memo);
 
-        match &funding {
-            Funding::Channel(_) => {
-                self.deposit_channel(funding.clone(), amount)?;
-            }
-            Funding::Pool(_) => {
-                let depositor = funding.get_depositor().unwrap().clone();
-                let pool_asset = funding.get_asset().unwrap().clone();
-                let pubkey = funding.get_pubkey().unwrap().clone();
+        let depositor = funding.get_depositor().clone();
+        let pool_asset = funding.get_asset().clone();
 
-                // New call, now passing funding reference and signature bytes
-                self.deposit_liq_pool(
-                    amount,
-                    pool_asset,
-                    depositor,
-                    pubkey,
-                    &funding,        // pass reference for verification
-                    signature_bytes, // pass signature bytes for verification
-                )?;
-            }
-        }
+        self.deposit_liq_pool(amount, pool_asset, depositor)?;
         Ok(())
     }
 
@@ -720,7 +696,7 @@ where
         &mut self,
         tx: receiver::BlockHeight,
         amount: u64,
-        funding: Funding,
+        funding: PoolFunding,
     ) -> std::result::Result<TransactionICRCNotification, ICPReceiverError> {
         self.icrc_receiver.verify_icrc(tx, amount, funding).await
     }
@@ -755,175 +731,92 @@ where
         self.liq_pool.holdings_total.get(&asset).cloned()
     }
 
-    /// Queries a registered state.
-    pub fn state(&self, id: &ChannelId) -> Option<RegisteredState> {
-        self.channels.get(&id).cloned()
-    }
-
-    /// Updates the holdings associated with a channel to the outcome of the
-    /// supplied state, then registers the state. If the state is the channel's
-    /// initial state, the holdings are not updated, as initial states are
-    /// allowed to be under-funded and are otherwise expected to match the
-    /// deposit distribution exactly if fully funded.
-    fn register_channel(&mut self, params: &Params, state: RegisteredState) -> ResultCkl<()> {
-        let total = &self.holdings_total(&params);
-        if total < &state.state.total() {
-            require!(
-                state.state.may_be_underfunded(),
-                CklError::InsufficientFunding
-            );
-        } else {
-            self.update_channel_holdings(&params, &state.state);
-        }
-
-        self.channels.insert(state.state.channel.clone(), state);
-        Ok(())
-    }
-
-    /// Pushes a state's funding allocation into the channel's holdings mapping
-    /// in the canister.
-    fn update_channel_holdings(&mut self, params: &Params, state: &State) {
-        for (i, outcome) in state.allocation.iter().enumerate() {
-            self.user_holdings.insert(
-                Funding::new_channel(state.channel.clone(), params.participants[i].clone()),
-                outcome.clone(),
-            );
-        }
-    }
-
-    /// Calculates the total funds held in a channel. If the channel is unknown
-    /// and there are no deposited funds for the channel, returns 0.
-    pub fn holdings_total(&self, params: &Params) -> Amount {
-        let mut acc = Amount::default();
-        for pk in params.participants.iter() {
-            let funding = Funding::new_channel(params.id(), pk.clone());
-            acc += self
-                .user_holdings
-                .get(&funding)
-                .unwrap_or(&Amount::default())
-                .clone();
-        }
-        acc
-    }
-
-    pub async fn withdraw_from_liq_pool(
-        &mut self,
-        req: WithdrawalReq,
-    ) -> std::result::Result<Nat, CklError> {
-        let amount = req.amount.clone();
-
-        let (total_deducted, to_deduct) = match self.calculate_required_deductions(&amount) {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(CklError::InsufficientLiquidity);
-            }
-        };
-
-        let transfer_result = execute_ledger_transfer(&req, total_deducted).await;
-
-        match transfer_result {
-            Ok(block_height) => {
-                self.apply_deductions(to_deduct);
-                Ok(block_height)
-            }
-            Err(error_msg) => Err(error_msg),
-        }
-    }
-
-    fn calculate_required_deductions(
-        &self,
-        amount: &Nat,
-    ) -> std::result::Result<(u64, Vec<(Funding, Nat)>), CklError> {
-        let mut needed = amount.clone();
-        let mut to_deduct = Vec::new();
-        let zero = Nat::from(0u32);
-
-        for (acc, available) in &self.user_holdings {
-            if needed == zero {
-                break;
-            }
-
-            let take = available.min(&needed);
-            if *take > zero {
-                to_deduct.push((acc.clone(), take.clone()));
-                needed -= take.clone();
-            }
-        }
-
-        if needed > zero {
-            return Err(CklError::InsufficientLiquidity);
-        }
-
-        let total = amount.clone() - needed;
-        let total_u64 = total.0.to_u64_digits()[0];
-        Ok((total_u64, to_deduct))
-    }
-
-    pub fn finalize_withdrawal(&mut self, to_deduct: Vec<(Funding, Nat)>) {
-        self.apply_deductions(to_deduct);
-    }
-
-    fn apply_deductions(&mut self, to_deduct: Vec<(Funding, Nat)>) {
-        let zero = Nat(0u64.into());
-
-        for (acc, take) in to_deduct {
-            if let Some(entry) = self.user_holdings.get_mut(&acc) {
-                *entry -= take;
-                if *entry == zero {
-                    self.user_holdings.remove(&acc);
-                }
-            }
-        }
-    }
-
     /// Serialize all persistable state into a snapshot for stable memory.
     pub fn to_snapshot(&self) -> CanisterStateSnapshot {
+        // Collect HashMap entries into sorted Vecs for deterministic serialization.
+        // Identical state must produce identical snapshot bytes regardless of iteration order.
+        macro_rules! sorted_map {
+            ($map:expr) => {{
+                let mut v: Vec<_> = $map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                v
+            }};
+        }
+
+        let btc_liquidity_addresses = sorted_map!(self.btc_liquidity_addresses);
+        let btc_depositor_addresses = sorted_map!(self.btc_depositor_addresses);
+        let pending_btc_deposits = sorted_map!(self.pending_btc_deposits);
+        let swaps = sorted_map!(self.swaps);
+        let ln_channels = sorted_map!(self.ln_channels);
+        let onramp_requests = sorted_map!(self.onramp_requests);
+        let offramp_requests = sorted_map!(self.offramp_requests);
+        let channel_balances = sorted_map!(self.channel_balances);
+        let channel_secrets = sorted_map!(self.channel_secrets);
+        let channel_counterparty_pubkeys = sorted_map!(self.channel_counterparty_pubkeys);
+        let htlc_tx_details = sorted_map!(self.htlc_tx_details);
+        let onramp_rate_limits = sorted_map!(self.onramp_rate_limits);
+        let offramp_rate_limits = sorted_map!(self.offramp_rate_limits);
+        let channel_funding_reservations = sorted_map!(self.channel_funding_reservations);
+
+        let mut processed_utxos: Vec<_> = self.processed_utxos.iter()
+            .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect();
+        processed_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+
+        let mut reserved_utxos: Vec<_> = self.reserved_utxos.iter()
+            .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect();
+        reserved_utxos.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+
+        let mut funded_channels: Vec<String> = self.funded_channels.iter().cloned().collect();
+        funded_channels.sort();
+
+        // known_txs from Receiver (already sorted since BTreeSet)
+        let known_txs: Vec<u64> = self.icrc_receiver.get_known_txs().into_iter().collect();
+
         CanisterStateSnapshot {
             version: 1,
             principal: self.principal,
-            btc_liquidity_addresses: self.btc_liquidity_addresses.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            btc_liquidity_addresses,
+            btc_depositor_addresses: Some(btc_depositor_addresses),
             btc_invoice_address: self.btc_invoice_address.clone(),
             lp_btc_address: self.lp_btc_address.clone(),
-            pending_btc_deposits: self.pending_btc_deposits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            processed_utxos: self.processed_utxos.iter()
-                .map(|((txid, vout), p)| (txid.clone(), *vout, *p)).collect(),
-            user_holdings: self.user_holdings.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            channels: self.channels.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            pending_btc_deposits,
+            processed_utxos,
             liq_pool: self.liq_pool.clone(),
-            swaps: self.swaps.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            ln_channels: self.ln_channels.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            onramp_requests: self.onramp_requests.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            offramp_requests: self.offramp_requests.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect(),
-            channel_balances: self.channel_balances.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            swaps,
+            ln_channels,
+            onramp_requests,
+            offramp_requests,
+            channel_balances,
             total_btc_deposited: self.total_btc_deposited,
             total_btc_in_channels: self.total_btc_in_channels,
-            reserved_utxos: self.reserved_utxos.iter()
-                .map(|((txid, vout), ch)| (txid.clone(), *vout, *ch)).collect(),
+            reserved_utxos,
             htlc_manager: self.htlc_manager.clone(),
-            channel_secrets: self.channel_secrets.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            channel_counterparty_pubkeys: self.channel_counterparty_pubkeys.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            htlc_tx_details: self.htlc_tx_details.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            channel_secrets,
+            channel_counterparty_pubkeys,
+            htlc_tx_details,
             registered_relay: self.registered_relay.clone(),
-            onramp_rate_limits: self.onramp_rate_limits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
-            offramp_rate_limits: self.offramp_rate_limits.iter()
-                .map(|(k, v)| (*k, v.clone())).collect(),
+            onramp_rate_limits,
+            offramp_rate_limits,
             stableswap_config: self.stableswap_config.clone(),
             protocol_fees_ckbtc: self.protocol_fees_ckbtc,
             admin: self.admin,
             icp_ddos_fee_e8s: self.icp_ddos_fee_e8s,
+            max_single_swap_sats: self.max_single_swap_sats,
+            max_hourly_swap_sats: self.max_hourly_swap_sats,
+            funded_channels,
+            channel_funding_reservations,
+            known_txs,
+            active_onramp_ids: {
+                let mut ids: Vec<String> = self.active_onramp_ids.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+            active_offramp_ids: {
+                let mut ids: Vec<String> = self.active_offramp_ids.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+            reserved_ckbtc_sats: self.reserved_ckbtc_sats,
         }
     }
 
@@ -932,15 +825,20 @@ where
     /// Note: `icrc_receiver` is NOT restored (it's rebuilt from constructor).
     /// Any in-flight ICRC deposits must be re-submitted after upgrade.
     pub fn restore_from_snapshot(&mut self, snap: CanisterStateSnapshot) {
+        if snap.version != 1 {
+            ic_cdk::trap(format!(
+                "Unsupported snapshot version: {} (expected 1)",
+                snap.version
+            ));
+        }
         self.principal = snap.principal;
         self.btc_liquidity_addresses = snap.btc_liquidity_addresses.into_iter().collect();
+        self.btc_depositor_addresses = snap.btc_depositor_addresses.unwrap_or_default().into_iter().collect();
         self.btc_invoice_address = snap.btc_invoice_address;
         self.lp_btc_address = snap.lp_btc_address;
         self.pending_btc_deposits = snap.pending_btc_deposits.into_iter().collect();
         self.processed_utxos = snap.processed_utxos.into_iter()
             .map(|(txid, vout, p)| ((txid, vout), p)).collect();
-        self.user_holdings = snap.user_holdings.into_iter().collect();
-        self.channels = snap.channels.into_iter().collect();
         self.liq_pool = snap.liq_pool;
         self.swaps = snap.swaps.into_iter().collect();
         self.ln_channels = snap.ln_channels.into_iter().collect();
@@ -962,6 +860,15 @@ where
         self.protocol_fees_ckbtc = snap.protocol_fees_ckbtc;
         self.admin = snap.admin;
         self.icp_ddos_fee_e8s = snap.icp_ddos_fee_e8s;
+        self.max_single_swap_sats = snap.max_single_swap_sats;
+        self.max_hourly_swap_sats = snap.max_hourly_swap_sats;
+        self.funded_channels = snap.funded_channels.into_iter().collect();
+        self.channel_funding_reservations = snap.channel_funding_reservations.into_iter().collect();
+        // Restore known_txs into icrc_receiver to prevent double-crediting after upgrade
+        self.icrc_receiver.set_known_txs(snap.known_txs.into_iter().collect());
+        self.active_onramp_ids = snap.active_onramp_ids.into_iter().collect();
+        self.active_offramp_ids = snap.active_offramp_ids.into_iter().collect();
+        self.reserved_ckbtc_sats = snap.reserved_ckbtc_sats;
     }
 }
 
@@ -981,13 +888,12 @@ pub struct CanisterStateSnapshot {
     pub version: u8,
     pub principal: Principal,
     pub btc_liquidity_addresses: Vec<(Principal, String)>,
+    pub btc_depositor_addresses: Option<Vec<(Principal, String)>>,
     pub btc_invoice_address: Option<String>,
     pub lp_btc_address: Option<String>,
     pub pending_btc_deposits: Vec<([u8; 32], PendingBtcDeposit)>,
     /// Flattened from HashMap<(Vec<u8>, u32), Principal>
     pub processed_utxos: Vec<(Vec<u8>, u32, Principal)>,
-    pub user_holdings: Vec<(Funding, Amount)>,
-    pub channels: Vec<(ChannelId, RegisteredState)>,
     pub liq_pool: LiquidityPool,
     pub swaps: Vec<([u8; 32], SwapInfo)>,
     pub ln_channels: Vec<([u8; 32], LnChannelInfo)>,
@@ -1009,6 +915,25 @@ pub struct CanisterStateSnapshot {
     pub protocol_fees_ckbtc: u64,
     pub admin: Option<Principal>,
     pub icp_ddos_fee_e8s: u64,
+    #[serde(default)]
+    pub max_single_swap_sats: u64,
+    #[serde(default)]
+    pub max_hourly_swap_sats: u64,
+    pub funded_channels: Vec<String>,
+    #[serde(default)]
+    pub channel_funding_reservations: Vec<(String, ChannelFundingReservation)>,
+    /// Known ICRC block heights already processed (prevents double-crediting after upgrade)
+    #[serde(default)]
+    pub known_txs: Vec<u64>,
+    /// Active (non-terminal) onramp request IDs
+    #[serde(default)]
+    pub active_onramp_ids: Vec<String>,
+    /// Active (non-terminal) offramp request IDs
+    #[serde(default)]
+    pub active_offramp_ids: Vec<String>,
+    /// Running counter of ckBTC sats reserved for pending onramp requests
+    #[serde(default)]
+    pub reserved_ckbtc_sats: u64,
 }
 
 #[cfg(test)]
@@ -1143,6 +1068,7 @@ mod snapshot_tests {
         state.protocol_fees_ckbtc = 12345;
         state.admin = Some(test_principal_2);
         state.icp_ddos_fee_e8s = 200_000_000; // 2 ICP
+        state.funded_channels.insert("bcrt1qfunding".to_string());
 
         // Create snapshot
         let snapshot = state.to_snapshot();
@@ -1176,6 +1102,7 @@ mod snapshot_tests {
         assert_eq!(decoded.protocol_fees_ckbtc, 12345);
         assert_eq!(decoded.admin, Some(test_principal_2));
         assert_eq!(decoded.icp_ddos_fee_e8s, 200_000_000);
+        assert_eq!(decoded.funded_channels.len(), 1);
 
         // Restore from decoded snapshot into a fresh state
         let mut restored = make_test_state();
@@ -1206,6 +1133,7 @@ mod snapshot_tests {
         assert_eq!(restored.protocol_fees_ckbtc, 12345);
         assert_eq!(restored.admin, Some(test_principal_2));
         assert_eq!(restored.icp_ddos_fee_e8s, 200_000_000);
+        assert!(restored.funded_channels.contains("bcrt1qfunding"));
 
         // Verify LP pool survived round-trip
         assert_eq!(restored.liq_pool.get_balance(&test_principal, &PoolAsset::CkBTC), Nat::from(100_000u64));

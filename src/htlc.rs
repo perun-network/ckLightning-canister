@@ -147,14 +147,14 @@ pub fn build_htlc_witness_script(
         .push_opcode(OP_SHA256)
         .push_slice(payment_hash)
         .push_opcode(OP_EQUALVERIFY)
-        .push_slice(&receiver_pubkey.serialize())
+        .push_slice(receiver_pubkey.serialize())
         .push_opcode(OP_CHECKSIG)
         .push_opcode(OP_ELSE)
         // Timeout path: sender after CLTV
         .push_int(cltv_expiry as i64)
         .push_opcode(OP_CLTV)
         .push_opcode(OP_DROP)
-        .push_slice(&sender_pubkey.serialize())
+        .push_slice(sender_pubkey.serialize())
         .push_opcode(OP_CHECKSIG)
         .push_opcode(OP_ENDIF)
         .into_script()
@@ -234,7 +234,8 @@ pub fn build_htlc_timeout_tx(
 ) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
-        lock_time: LockTime::from_height(cltv_expiry).expect("valid locktime"),
+        lock_time: LockTime::from_height(cltv_expiry.min(499_999_999))
+            .expect("clamped locktime is always valid"),
         input: vec![TxIn {
             previous_output: htlc_outpoint,
             script_sig: ScriptBuf::new(),
@@ -267,7 +268,7 @@ pub fn compute_htlc_sighash(
             Amount::from_sat(amount_sat),
             EcdsaSighashType::All,
         )
-        .map_err(|e| format!("Failed to compute sighash: {:?}", e))?;
+        .map_err(|e| format!("Failed to compute sighash: {e:?}"))?;
 
     Ok(sighash.to_byte_array())
 }
@@ -308,7 +309,7 @@ pub fn apply_htlc_success_witness(
     let mut witness = Witness::new();
     witness.push(&signature);
     witness.push(&preimage);
-    witness.push(&[0x01]); // OP_TRUE to take the IF branch
+    witness.push([0x01]); // OP_TRUE to take the IF branch
     witness.push(witness_script.as_bytes());
 
     tx.input[input_index].witness = witness;
@@ -325,7 +326,7 @@ pub fn apply_htlc_timeout_witness(
 ) {
     let mut witness = Witness::new();
     witness.push(&signature);
-    witness.push(&[]); // OP_FALSE (empty) to take the ELSE branch
+    witness.push([]); // OP_FALSE (empty) to take the ELSE branch
     witness.push(witness_script.as_bytes());
 
     tx.input[input_index].witness = witness;
@@ -399,7 +400,7 @@ impl HtlcManager {
             }
             HtlcState::Fulfilled { .. } => Err("HTLC already fulfilled".to_string()),
             HtlcState::TimedOut => Err("HTLC already timed out".to_string()),
-            HtlcState::Failed { reason } => Err(format!("HTLC failed: {}", reason)),
+            HtlcState::Failed { reason } => Err(format!("HTLC failed: {reason}")),
         }
     }
 

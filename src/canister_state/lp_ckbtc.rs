@@ -5,13 +5,12 @@
 use super::STATE;
 use crate::ic_types::PoolAsset;
 use crate::ic_types::{
-    DEVNET_CKBTC_LEDGER, DEFAULT_CKBTC_FEE,
+    CKBTC_LEDGER_PRINCIPAL, DEFAULT_CKBTC_FEE,
     LpBalanceResponse, LpDepositResponse, LpWithdrawResponse, TotalLpBalanceResponse,
-    OnrampRequestState,
 };
 
-use candid::{Nat, Principal};
-use ic_cdk::api::call::CallResult;
+use candid::Nat;
+use ic_cdk::call::Call;
 use ic_cdk::api::msg_caller;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::TransferArg;
@@ -24,7 +23,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
     let caller = msg_caller();
     let canister_id = ic_cdk::api::canister_self();
 
-    if amount == Nat::from(0u64) {
+    if amount == 0u64 {
         return LpDepositResponse {
             success: false,
             new_balance: Nat::from(0u64),
@@ -33,7 +32,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
     }
 
     // Pull ckBTC from caller using ICRC-2 transfer_from
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_from_args = icrc_ledger_types::icrc2::transfer_from::TransferFromArgs {
         spender_subaccount: None,
@@ -47,19 +46,20 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
         },
         amount: amount.clone(),
         fee: None, // Use default fee
-        memo: None,
-        created_at_time: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_deposit".to_vec())),
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc2_transfer_from", (transfer_from_args,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(ckbtc_ledger_id, "icrc2_transfer_from")
+        .with_args(&(transfer_from_args,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc2::transfer_from::TransferFromError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(_block_index) => {
                 // Credit the caller's LP balance
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: deposit_ckbtc write");
                 state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
 
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
@@ -73,13 +73,13 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
             Err(e) => LpDepositResponse {
                 success: false,
                 new_balance: Nat::from(0u64),
-                error: Some(format!("ICRC-2 transfer_from failed: {:?}", e)),
+                error: Some(format!("ICRC-2 transfer_from failed: {e:?}")),
             },
         },
-        Err((code, msg)) => LpDepositResponse {
+        Err(e) => LpDepositResponse {
             success: false,
             new_balance: Nat::from(0u64),
-            error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+            error: Some(format!("Canister call failed: {e}")),
         },
     }
 }
@@ -92,7 +92,7 @@ pub async fn deposit_ckbtc_impl(amount: Nat) -> LpDepositResponse {
 pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
     let caller = msg_caller();
 
-    if amount == Nat::from(0u64) {
+    if amount == 0u64 {
         return LpWithdrawResponse {
             success: false,
             amount_withdrawn: Nat::from(0u64),
@@ -104,16 +104,10 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
 
     // Check available ckBTC (not reserved for pending swaps) and deduct from LP balance
     {
-        let mut state = STATE.write().unwrap();
+        let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write");
 
-        // Calculate ckBTC reserved for pending onramp requests
-        // These are requests where invoice is created but payment not yet completed
-        let reserved_for_onramps: u64 = state.onramp_requests
-            .values()
-            .filter(|req| matches!(req.state,
-                OnrampRequestState::Pending | OnrampRequestState::Ready))
-            .map(|req| req.amount_sats)
-            .sum();
+        // Use running counter for reserved ckBTC (maintained on request create/complete/expire)
+        let reserved_for_onramps = state.reserved_ckbtc_sats;
 
         // Calculate available ckBTC = total LP ckBTC - reserved for pending swaps
         let total_lp_ckbtc: u64 = state.liq_pool.get_total(&PoolAsset::CkBTC)
@@ -129,8 +123,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 new_balance: current_balance,
                 block_index: None,
                 error: Some(format!(
-                    "Insufficient available ckBTC: {} sats requested but only {} sats available (total {} sats, {} sats reserved for pending swaps)",
-                    amount_u64, available_ckbtc, total_lp_ckbtc, reserved_for_onramps
+                    "Insufficient available ckBTC: {amount_u64} sats requested but only {available_ckbtc} sats available (total {total_lp_ckbtc} sats, {reserved_for_onramps} sats reserved for pending swaps)"
                 )),
             };
         }
@@ -142,13 +135,13 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 amount_withdrawn: Nat::from(0u64),
                 new_balance: current_balance,
                 block_index: None,
-                error: Some(format!("Insufficient balance: {:?}", e)),
+                error: Some(format!("Insufficient balance: {e:?}")),
             };
         }
     }
 
     // Transfer ckBTC to caller
-    let ckbtc_ledger_id = Principal::from_text(DEVNET_CKBTC_LEDGER).expect("parsing principal");
+    let ckbtc_ledger_id = *CKBTC_LEDGER_PRINCIPAL;
 
     let transfer_arg = TransferArg {
         from_subaccount: None,
@@ -158,18 +151,19 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
         },
         amount: amount.clone(),
         fee: Some(Nat(DEFAULT_CKBTC_FEE.into())),
-        memo: None,
-        created_at_time: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"ckl:lp_withdraw".to_vec())),
+        created_at_time: Some(ic_cdk::api::time()),
     };
 
-    let call_result: CallResult<(
-        Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,
-    )> = ic_cdk::call(ckbtc_ledger_id, "icrc1_transfer", (transfer_arg,)).await;
-
-    match call_result {
+    match Call::unbounded_wait(ckbtc_ledger_id, "icrc1_transfer")
+        .with_args(&(transfer_arg,))
+        .await
+        .map_err(ic_cdk::call::Error::from)
+        .and_then(|r| r.candid_tuple::<(Result<Nat, icrc_ledger_types::icrc1::transfer::TransferError>,)>().map_err(Into::into))
+    {
         Ok((inner_result,)) => match inner_result {
             Ok(block_index) => {
-                let state = STATE.read().unwrap();
+                let state = STATE.read().expect("STATE lock: withdraw_ckbtc read");
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
                 LpWithdrawResponse {
@@ -182,7 +176,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
             }
             Err(e) => {
                 // Transfer failed - restore the LP balance
-                let mut state = STATE.write().unwrap();
+                let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write 2");
                 state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
                 let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
@@ -191,13 +185,13 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                     amount_withdrawn: Nat::from(0u64),
                     new_balance,
                     block_index: None,
-                    error: Some(format!("ckBTC transfer failed: {:?}", e)),
+                    error: Some(format!("ckBTC transfer failed: {e:?}")),
                 }
             }
         },
-        Err((code, msg)) => {
+        Err(e) => {
             // Call failed - restore the LP balance
-            let mut state = STATE.write().unwrap();
+            let mut state = STATE.write().expect("STATE lock: withdraw_ckbtc write 3");
             state.liq_pool.deposit(caller, PoolAsset::CkBTC, amount.clone());
             let new_balance = state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC);
 
@@ -206,7 +200,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
                 amount_withdrawn: Nat::from(0u64),
                 new_balance,
                 block_index: None,
-                error: Some(format!("Canister call failed: {:?} - {}", code, msg)),
+                error: Some(format!("Canister call failed: {e}")),
             }
         }
     }
@@ -215,7 +209,7 @@ pub async fn withdraw_ckbtc_impl(amount: Nat) -> LpWithdrawResponse {
 /// Get the caller's LP balance
 pub fn get_my_lp_balance_impl() -> LpBalanceResponse {
     let caller = msg_caller();
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_my_lp_balance");
 
     LpBalanceResponse {
         ckbtc_balance: state.liq_pool.get_balance(&caller, &PoolAsset::CkBTC),
@@ -225,7 +219,7 @@ pub fn get_my_lp_balance_impl() -> LpBalanceResponse {
 
 /// Get the total LP balance across all depositors
 pub fn get_total_lp_balance_impl() -> TotalLpBalanceResponse {
-    let state = STATE.read().unwrap();
+    let state = STATE.read().expect("STATE lock: get_total_lp_balance");
 
     TotalLpBalanceResponse {
         total_ckbtc: state.liq_pool.get_total(&PoolAsset::CkBTC),

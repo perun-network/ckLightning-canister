@@ -1,3 +1,4 @@
+#[allow(dead_code)] // shared helpers used across separate test binaries
 pub mod agent;
-pub mod btc_commands;
+#[allow(dead_code)]
 pub mod id;

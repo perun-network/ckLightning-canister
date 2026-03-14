@@ -3,23 +3,25 @@
 // =============================================================================
 
 use super::STATE;
-use ic_cdk::api::management_canister::http_request::{
-    http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod, HttpResponse, TransformArgs,
-    TransformContext,
+use ic_cdk::management_canister::{
+    http_request, transform_context_from_query,
+    HttpHeader, HttpMethod, HttpRequestArgs, HttpRequestResult, TransformArgs,
 };
-
-/// Cycles budget per outcall (~49M cycles, conservative estimate)
-const OUTCALL_CYCLES: u128 = 49_000_000;
 
 /// Notify the relay via HTTPS outcall (fire-and-forget).
 ///
 /// Sends a POST to the relay's webhook endpoint to wake it immediately.
 /// Errors are logged but never propagated — the 30s fallback polling
 /// catches anything missed.
+///
+/// NOTE: On local development with dfx 0.29.2 (PocketIC), this outcall
+/// silently fails because PocketIC does not run the ic-https-outcalls-adapter.
+/// The relay's 30s fallback polling ensures tests still pass.
+/// On staging/mainnet with a real IC replica, outcalls work as expected.
 pub fn notify_relay_webhook(path: &str) {
     // Read relay URL + token from state
     let (url, token) = {
-        let state = STATE.read().unwrap();
+        let state = STATE.read().expect("STATE lock: notify_relay_webhook");
         match &state.registered_relay {
             Some(relay) => {
                 match (&relay.relay_http_url, &relay.relay_auth_token) {
@@ -31,11 +33,11 @@ pub fn notify_relay_webhook(path: &str) {
         }
     };
 
-    let full_url = format!("{}{}", url, path);
+    let full_url = format!("{url}{path}");
 
     // Fire-and-forget: spawn the outcall, don't block the update call
-    ic_cdk::spawn(async move {
-        let request = CanisterHttpRequestArgument {
+    ic_cdk::futures::spawn(async move {
+        let request = HttpRequestArgs {
             url: full_url.clone(),
             method: HttpMethod::POST,
             headers: vec![
@@ -45,25 +47,25 @@ pub fn notify_relay_webhook(path: &str) {
                 },
                 HttpHeader {
                     name: "Authorization".to_string(),
-                    value: format!("Bearer {}", token),
+                    value: format!("Bearer {token}"),
                 },
             ],
             body: Some(br#"{"request_id":null}"#.to_vec()),
             max_response_bytes: Some(256),
-            transform: Some(TransformContext::from_name(
+            transform: Some(transform_context_from_query(
                 "transform_webhook_response".to_string(),
                 vec![],
             )),
         };
 
-        match http_request(request, OUTCALL_CYCLES).await {
-            Ok((_response,)) => {
+        match http_request(&request).await {
+            Ok(_response) => {
                 ic_cdk::println!("Webhook outcall to {} succeeded", full_url);
             }
-            Err((code, msg)) => {
+            Err(e) => {
                 ic_cdk::println!(
-                    "Webhook outcall to {} failed: {:?} - {}",
-                    full_url, code, msg
+                    "Webhook outcall to {} failed: {:?}",
+                    full_url, e
                 );
             }
         }
@@ -74,8 +76,8 @@ pub fn notify_relay_webhook(path: &str) {
 ///
 /// All replicas must produce the same response. We extract just the status code
 /// and discard the body, ensuring deterministic consensus across replicas.
-pub fn transform_webhook_response(args: TransformArgs) -> HttpResponse {
-    HttpResponse {
+pub fn transform_webhook_response(args: TransformArgs) -> HttpRequestResult {
+    HttpRequestResult {
         status: args.response.status,
         headers: vec![],
         body: vec![],

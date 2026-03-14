@@ -14,16 +14,17 @@
 use crate::canister_state::assert_relay_caller;
 use crate::canister_state::set_btc_liquidity_address_impl;
 use crate::canister_state::{
-    complete_swap_impl, deposit_channel_impl, deposit_lp_impl, get_btc_balances_impl,
+    complete_swap_impl, deposit_lp_impl, get_btc_balances_impl,
     get_btc_liquidity_address_for_caller_impl, get_ln_address_impl,
-    query_ln_channel_impl, query_ln_channels_impl, query_state_impl,
+    query_ln_channel_impl, query_ln_channels_impl,
     query_user_lp_holdings_impl, register_ln_channel_impl, register_swap_impl,
     set_btc_address_impl, transaction_notification_impl,
-    trigger_withdraw_impl, verify_ln_channel_impl, withdraw_lp_impl,
+    verify_ln_channel_impl, withdraw_lp_impl,
     // Simplified LP functions
     deposit_ckbtc_impl, withdraw_ckbtc_impl, get_my_lp_balance_impl, get_total_lp_balance_impl,
     // BTC LP functions
-    get_lp_btc_address_impl, deposit_btc_impl, withdraw_btc_impl,
+    withdraw_btc_impl,
+    get_lp_btc_user_address_impl, deposit_btc_user_impl,
     // User BTC operations (from depositor address)
     get_depositor_btc_balance_impl, send_btc_from_depositor_address_impl,
     // Onramp invoice request functions
@@ -31,10 +32,11 @@ use crate::canister_state::{
     get_invoice_by_request_impl,
     // Offramp functions (ckBTC → Lightning)
     request_offramp_impl, get_pending_offramp_requests_impl, mark_offramp_in_progress_impl,
-    complete_offramp_impl, fail_offramp_impl, get_offramp_status_impl,
+    complete_offramp_impl, fail_offramp_impl, retry_offramp_refund_impl, get_offramp_status_impl,
     // LP Liquidity management functions
     get_funding_utxos_impl, update_channel_balance_impl, get_lp_liquidity_status_impl,
-    channel_funded_impl, channel_closed_impl,
+    channel_funded_impl, channel_closed_impl, cancel_channel_funding_impl,
+    expire_channel_funding_reservations,
     // Channel funding from LP BTC
     fund_channel_impl,
     // HTLC functions
@@ -61,7 +63,9 @@ use crate::canister_state::{
     get_swap_quote_impl, get_stableswap_config_impl,
     update_stableswap_config_impl, withdraw_protocol_fees_impl,
     set_icp_ddos_fee_impl, get_icp_ddos_fee_impl, withdraw_icp_fees_impl, redistribute_fees_impl,
-    set_admin_impl,
+    set_admin_impl, set_swap_caps_impl,
+    // State pruning & monitoring
+    prune_state_impl, get_state_stats_impl,
     // HTTPS outcall helpers
     transform_webhook_response,
 };
@@ -101,13 +105,13 @@ use crate::ic_types::LnInvoiceRequest;
 use crate::ic_types::SetLiquidityBtcAddressResponse;
 use crate::ic_types::SignedCandidInvoice;
 use crate::ic_types::{
-    ChannelFunding, ChannelId, CompleteSwapRequest, CompleteSwapResponse,
+    CompleteSwapRequest, CompleteSwapResponse,
     FundingLPArgs, FundingLPQueryArgs, GetBtcBalancesResponse,
     HoldingsResponse, LnChannelInfo, LnFundingPubkeyResponse, LnSignRequest, LnSignResponse,
     NotifyArgs, QueryLnChannelRequest, QueryLnChannelsResponse,
     RegisterLnChannelRequest, RegisterLnChannelResponse, RegisterSwapRequest, RegisterSwapResponse,
-    RegisteredState, SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
-    VerifyLnChannelResponse, WithdrawalLPArgs, WithdrawalReq,
+    SendBtcTxArgs, SendBtcTxMsg, SetBtcAddressArgs, SetBtcAddressResponse,
+    VerifyLnChannelResponse, WithdrawalLPArgs,
     // Onramp invoice request types
     OnrampInvoiceRequest, OnrampInvoiceResponse, PendingInvoiceRequest,
     SubmitInvoiceRequest, SubmitInvoiceResponse, GetInvoiceResponse,
@@ -127,6 +131,7 @@ use crate::ic_types::{
     UpdateStableSwapConfigRequest, UpdateStableSwapConfigResponse,
     WithdrawProtocolFeesResponse,
     SetIcpDdosFeeResponse, WithdrawIcpFeesResponse, RedistributeFeesResponse,
+    PruneResult, StateStats,
 };
 use crate::receiver::{ICPReceiverError, TransactionICRCNotification};
 use candid::{Nat, Principal, candid_method};
@@ -208,12 +213,6 @@ fn query_user_lp_holdings(
 
 #[update]
 #[candid_method(update)]
-fn deposit_channel(funding: ChannelFunding, signature_bytes: Vec<u8>) -> Result<(), CklError> {
-    deposit_channel_impl(funding, &signature_bytes)
-}
-
-#[update]
-#[candid_method(update)]
 async fn withdraw_lp(withdrawal: WithdrawalLPArgs) -> Result<(), CklError> {
     let sig_withdrawal = withdrawal.signature.clone();
 
@@ -226,19 +225,6 @@ fn deposit_lp(funding: FundingLPArgs) -> Result<(), CklError> {
     let signature_bytes = funding.signature.clone();
 
     deposit_lp_impl(funding, &signature_bytes)
-}
-
-#[query]
-#[candid_method(query)]
-fn query_state(id: ChannelId) -> Option<RegisteredState> {
-    query_state_impl(id)
-}
-
-#[update]
-#[candid::candid_method]
-async fn trigger_withdraw(req: WithdrawalReq) -> Result<Nat, CklError> {
-    assert_relay_caller().map_err(|_| CklError::UnauthorizedCaller)?;
-    trigger_withdraw_impl(req).await
 }
 
 // =============================================================================
@@ -393,6 +379,29 @@ async fn fail_offramp(request: FailOfframpRequest) -> FailOfframpResponse {
     fail_offramp_impl(request).await
 }
 
+/// Retry a failed offramp ckBTC refund
+///
+/// Called by admin/relay to retry refund for requests stuck in FailedPendingRefund.
+#[update]
+#[candid_method(update)]
+async fn retry_offramp_refund(request_id: String) -> FailOfframpResponse {
+    // Allow both relay and admin to retry
+    let caller = ic_cdk::api::msg_caller();
+    let relay_ok = assert_relay_caller().is_ok();
+    let admin_ok = {
+        let state = crate::canister_state::STATE.read().expect("STATE lock: mark_offramp_in_progress");
+        state.admin == Some(caller)
+    };
+    if !relay_ok && !admin_ok {
+        return FailOfframpResponse {
+            success: false,
+            refund_block_index: None,
+            error: Some("Only relay or admin can retry refunds".to_string()),
+        };
+    }
+    retry_offramp_refund_impl(request_id).await
+}
+
 /// Get the status of an offramp request
 ///
 /// Called by users to check the status of their offramp.
@@ -426,6 +435,9 @@ fn register_ln_channel(request: RegisterLnChannelRequest) -> RegisterLnChannelRe
 #[update]
 #[candid_method(update)]
 async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelResponse {
+    if let Err(e) = assert_relay_caller() {
+        return VerifyLnChannelResponse { verified: false, confirmations: None, utxo_value_sats: None, error: Some(e) };
+    }
     verify_ln_channel_impl(request).await
 }
 
@@ -433,6 +445,7 @@ async fn verify_ln_channel(request: QueryLnChannelRequest) -> VerifyLnChannelRes
 #[update]
 #[candid_method(update)]
 async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canister::GetUtxosResponse, String> {
+    assert_relay_caller()?;
     use ic_cdk::bitcoin_canister::{GetUtxosRequest, bitcoin_get_utxos};
     use crate::BTC_CONTEXT;
 
@@ -444,7 +457,7 @@ async fn get_utxos_for_address(address: String) -> Result<ic_cdk::bitcoin_canist
         filter: None,
     })
     .await
-    .map_err(|e| format!("Failed to get UTXOs: {:?}", e))
+    .map_err(|e| format!("Failed to get UTXOs: {e:?}"))
 }
 
 /// Query a specific Lightning channel by ID
@@ -538,30 +551,29 @@ fn get_total_lp_balance() -> TotalLpBalanceResponse {
 // BTC Liquidity Pool Endpoints (Shared LP Address)
 // =============================================================================
 
-/// Get the shared LP BTC address
+/// Get the caller's per-user LP BTC deposit address
 ///
-/// Returns the single shared Bitcoin address for LP BTC deposits.
-/// All users deposit to this address, then call deposit_btc() to claim.
+/// Each LP depositor gets a unique address derived from their principal.
+/// This prevents the first-claimer-wins issue of the shared address.
 #[update]
 #[candid_method(update)]
-async fn get_lp_btc_address() -> Result<LpBtcAddressResponse, BtcError> {
-    get_lp_btc_address_impl().await
+async fn get_lp_btc_user_address() -> Result<LpBtcAddressResponse, BtcError> {
+    get_lp_btc_user_address_impl().await
 }
 
-/// Deposit BTC to the liquidity pool
+/// Deposit BTC to the liquidity pool using per-user address
 ///
 /// Flow:
-/// 1. Call get_lp_btc_address() to get the deposit address
+/// 1. Call get_lp_btc_user_address() to get your unique deposit address
 /// 2. Send BTC to that address (off-chain, via wallet)
 /// 3. Wait for 6 confirmations
 /// 4. Call this function to claim your deposit
 ///
-/// The canister will scan UTXOs at the LP address and credit new deposits
-/// to the caller's LP balance.
+/// Only UTXOs at the caller's own address are credited.
 #[update]
 #[candid_method(update)]
-async fn deposit_btc(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
-    deposit_btc_impl(request).await
+async fn deposit_btc_user(request: LpBtcDepositRequest) -> LpBtcDepositResponse {
+    deposit_btc_user_impl(request).await
 }
 
 /// Withdraw BTC from the liquidity pool
@@ -681,6 +693,17 @@ fn channel_closed(channel_id: Vec<u8>) -> Result<(), String> {
         .map_err(|_| "Invalid channel_id length")?;
     channel_closed_impl(channel_id);
     Ok(())
+}
+
+/// Cancel a pending channel funding (TX never broadcast or relay aborted).
+///
+/// Releases the idempotency guard and reservation so funding can be re-attempted.
+/// No LP balance changes occur since deduction hasn't happened yet (two-phase model).
+#[update]
+#[candid_method(update)]
+fn cancel_channel_funding(funding_address: String) -> Result<(), String> {
+    assert_relay_caller()?;
+    cancel_channel_funding_impl(funding_address)
 }
 
 // =============================================================================
@@ -824,12 +847,102 @@ fn sign_htlc_timeout(request: SignHtlcTimeoutRequest) -> SignHtlcResponse {
 /// - Onramp: Marks expired requests, ICP fee NOT refunded (anti-DDoS)
 /// - Offramp: Marks expired requests, refunds ckBTC to user (not LP)
 ///
+// =============================================================================
+// Ingress Message Filtering
+// =============================================================================
+/// Pre-execution filter for update calls.
+///
+/// Rejects unauthorized callers BEFORE decoding arguments, saving cycles.
+/// Queries are not subject to inspect_message (they go through query handlers).
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    use crate::canister_state::STATE;
+
+    let method = ic_cdk::api::msg_method_name();
+    let caller = ic_cdk::api::msg_caller();
+
+    let allowed = match method.as_str() {
+        // Controller-only
+        "set_admin" => ic_cdk::api::is_controller(&caller),
+
+        // Admin-only
+        "update_stableswap_config" | "withdraw_protocol_fees" | "set_icp_ddos_fee"
+        | "withdraw_icp_fees" | "redistribute_fees" | "prune_state"
+        | "set_test_timeouts" | "set_swap_caps" => {
+            let state = STATE.read().expect("STATE lock: inspect_message");
+            state.admin == Some(caller)
+        }
+
+        // Relay or admin
+        "retry_offramp_refund" => {
+            let state = STATE.read().expect("STATE lock: inspect_message");
+            let is_admin = state.admin == Some(caller);
+            let is_relay = match &state.registered_relay {
+                Some(relay) => relay.principal == caller,
+                None => false,
+            };
+            is_admin || is_relay
+        }
+
+        // Relay registration — admin, controller, or existing relay (endpoint does its own auth)
+        "register_relay" => {
+            let state = STATE.read().expect("STATE lock: inspect_message");
+            let is_admin = state.admin == Some(caller);
+            let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
+            is_admin || is_relay || ic_cdk::api::is_controller(&caller)
+        }
+
+        // Public canister key — needed by relay at startup before registration
+        "get_ln_funding_pubkey" => true,
+
+        // Relay-only
+        "send_btc_tx" | "register_swap" | "complete_swap" | "submit_invoice"
+        | "mark_offramp_in_progress" | "complete_offramp" | "fail_offramp"
+        | "register_ln_channel" | "verify_ln_channel" | "get_utxos_for_address"
+        | "sign_ln_message"
+        | "fund_channel" | "get_funding_utxos" | "update_channel_balance"
+        | "get_lp_liquidity_status" | "channel_funded" | "channel_closed" | "cancel_channel_funding"
+        | "create_htlc" | "fulfill_htlc" | "timeout_htlc"
+        | "create_htlc_with_tx_details" | "sign_htlc_success" | "sign_htlc_timeout"
+        | "generate_channel_secrets" | "sign_counterparty_commitment"
+        | "sign_holder_commitment_v2" | "sign_closing_tx"
+        | "sign_justice_tx" | "sign_htlc_tx" | "register_channel_info"
+        | "check_expired_swaps" => {
+            let state = STATE.read().expect("STATE lock: inspect_message");
+            match &state.registered_relay {
+                Some(relay) => relay.principal == caller,
+                None => false,
+            }
+        }
+
+        // User methods — anyone can call (they are self-scoped by msg_caller)
+        "get_ln_address" | "query_ln_invoice" | "get_btc_liquidity_address_for_caller"
+        | "set_btc_liquidity_address" | "get_btc_balance" | "set_btc_address"
+        | "transaction_notification" | "withdraw_lp" | "deposit_lp"
+        | "request_onramp_invoice" | "request_offramp"
+        | "deposit_ckbtc" | "withdraw_ckbtc"
+        | "withdraw_btc" | "get_depositor_btc_balance"
+        | "send_btc_from_depositor_address"
+        | "get_lp_btc_user_address" | "deposit_btc_user" => true,
+
+        // Unknown method — reject
+        _ => false,
+    };
+
+    if allowed {
+        ic_cdk::api::accept_message();
+    }
+    // Otherwise: message silently rejected, no cycles spent on arg decoding
+}
+
+///
 /// Timeout periods:
 /// - Onramp: 30 minutes
 /// - Offramp: 10 minutes
 #[heartbeat]
 async fn heartbeat() {
     check_expired_swaps_impl().await;
+    expire_channel_funding_reservations();
 }
 
 /// Get count of expired swaps for monitoring
@@ -847,10 +960,11 @@ fn get_expired_swap_counts_query() -> (u64, u64) {
 /// In production, the heartbeat handles this automatically.
 #[update]
 #[candid_method(update)]
+#[allow(clippy::await_holding_lock)] // lock is dropped before await
 async fn check_expired_swaps() {
     // Admin or relay only for manual trigger
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: get_expired_swap_counts_query");
     let is_admin = matches!(state.admin, Some(admin) if admin == caller);
     let is_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
     drop(state);
@@ -870,7 +984,7 @@ async fn check_expired_swaps() {
 fn set_test_timeouts(onramp_timeout_ns: u64, offramp_timeout_ns: u64) {
     // Admin-only: test timeouts should not be callable by anyone
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: set_test_timeouts");
     match state.admin {
         Some(admin) if admin == caller => {},
         _ => { ic_cdk::trap("Unauthorized: only admin can set test timeouts"); }
@@ -910,7 +1024,7 @@ fn get_timeout_values() -> (u64, u64) {
 fn register_relay(request: RegisterRelayRequest) -> RegisterRelayResponse {
     // Admin or controller only (first relay registration requires controller)
     let caller = ic_cdk::api::msg_caller();
-    let state = crate::canister_state::STATE.read().unwrap();
+    let state = crate::canister_state::STATE.read().expect("STATE lock: register_relay");
     let is_admin = matches!(state.admin, Some(admin) if admin == caller);
     let is_existing_relay = matches!(&state.registered_relay, Some(r) if r.principal == caller);
     drop(state);
@@ -943,8 +1057,8 @@ fn get_relay_info() -> GetRelayInfoResponse {
 #[query(name = "transform_webhook_response")]
 #[candid_method(query, rename = "transform_webhook_response")]
 fn transform_webhook_response_query(
-    args: ic_cdk::api::management_canister::http_request::TransformArgs,
-) -> ic_cdk::api::management_canister::http_request::HttpResponse {
+    args: ic_cdk::management_canister::TransformArgs,
+) -> ic_cdk::management_canister::HttpRequestResult {
     transform_webhook_response(args)
 }
 
@@ -1020,6 +1134,16 @@ fn set_icp_ddos_fee(fee_e8s: u64) -> SetIcpDdosFeeResponse {
 #[candid_method(query)]
 fn get_icp_ddos_fee() -> u64 {
     get_icp_ddos_fee_impl()
+}
+
+/// Set withdrawal / swap amount caps (admin-only).
+///
+/// max_single_swap_sats: max satoshis per individual swap (0 = disabled).
+/// max_hourly_swap_sats: max aggregate satoshis per rolling hour (0 = disabled).
+#[update]
+#[candid_method(update)]
+fn set_swap_caps(max_single_swap_sats: u64, max_hourly_swap_sats: u64) -> Result<(), String> {
+    set_swap_caps_impl(max_single_swap_sats, max_hourly_swap_sats)
 }
 
 /// Withdraw accumulated ICP fees from the canister (admin-only).
@@ -1192,3 +1316,21 @@ fn sign_htlc_tx(request: SignHtlcTxRequest) -> LnSignResponse {
 fn set_admin(principal: Principal) {
     set_admin_impl(principal)
 }
+
+/// Prune terminal-state entries older than cutoff (admin-only).
+///
+/// Pass a nanosecond timestamp; entries with `created_at < older_than_ns` in
+/// terminal states (Completed, Expired, Failed, Refunded) will be removed.
+#[update]
+#[candid_method(update)]
+fn prune_state(older_than_ns: u64) -> PruneResult {
+    prune_state_impl(older_than_ns)
+}
+
+/// Get statistics about canister state collection sizes.
+#[query]
+#[candid_method(query)]
+fn get_state_stats() -> StateStats {
+    get_state_stats_impl()
+}
+

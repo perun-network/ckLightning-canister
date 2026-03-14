@@ -18,8 +18,7 @@ pub use candid::{
 use serde::Serialize;
 
 #[derive(PartialEq, Eq, CandidType, Deserialize, Debug)]
-/// Contains all errors that can occur during an operation on the Perun
-/// canister.
+/// Contains all errors that can occur during canister operations.
 pub enum CklError {
     NoHoldingsFound,
     SignatureVerificationFailed,
@@ -85,8 +84,8 @@ pub enum BtcError {
 impl std::fmt::Display for BtcError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            BtcError::BtcAddressFetchError(msg) => write!(f, "BTC address fetch error: {}", msg),
-            BtcError::Other(msg) => write!(f, "Other BTC error: {}", msg),
+            BtcError::BtcAddressFetchError(msg) => write!(f, "BTC address fetch error: {msg}"),
+            BtcError::Other(msg) => write!(f, "Other BTC error: {msg}"),
             BtcError::BtcCouldNotFetchBalance => {
                 write!(f, "Could not fetch BTC balance for the given address")
             }
