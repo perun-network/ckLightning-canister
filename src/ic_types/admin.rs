@@ -52,6 +52,8 @@ pub struct GetRelayInfoResponse {
     pub principal: Option<Principal>,
     pub node_pubkey: Option<Vec<u8>>,
     pub is_active: Option<bool>,
+    pub relay_http_url: Option<String>,
+    pub has_auth_token: Option<bool>,
 }
 
 // =============================================================================

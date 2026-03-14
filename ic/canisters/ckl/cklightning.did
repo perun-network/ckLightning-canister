@@ -154,7 +154,9 @@ type GetPerCommitmentPointResponse = record {
   point : opt blob;
 };
 type GetRelayInfoResponse = record {
+  has_auth_token : opt bool;
   "principal" : opt principal;
+  relay_http_url : opt text;
   node_pubkey : opt blob;
   is_active : opt bool;
   registered : bool;

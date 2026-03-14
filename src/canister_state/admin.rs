@@ -304,12 +304,16 @@ pub fn get_relay_info_impl() -> GetRelayInfoResponse {
             principal: Some(relay.principal),
             node_pubkey: Some(relay.node_pubkey.clone()),
             is_active: Some(relay.is_active),
+            relay_http_url: relay.relay_http_url.clone(),
+            has_auth_token: Some(relay.relay_auth_token.is_some()),
         },
         None => GetRelayInfoResponse {
             registered: false,
             principal: None,
             node_pubkey: None,
             is_active: None,
+            relay_http_url: None,
+            has_auth_token: None,
         },
     }
 }
