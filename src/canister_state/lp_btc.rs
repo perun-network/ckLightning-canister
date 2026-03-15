@@ -45,48 +45,10 @@ fn parse_btc_address(
         .map_err(|e| format!("Address network mismatch: {e:?}"))
 }
 
-/// Collect UTXOs, build, sign, and broadcast a multi-address BTC transaction.
+/// Core multi-address tx pipeline: collect UTXOs, build, and sign.
 ///
-/// Returns `(txid, tx_bytes)` on success.
-async fn build_sign_broadcast_multi_addr_tx(
-    ctx: &crate::BitcoinContext,
-    destination: &Address,
-    amount_sat: u64,
-    fee_margin: u64,
-) -> Result<(String, Vec<u8>), String> {
-    let (all_sourced_utxos, change_address) = collect_all_lp_sourced_utxos(ctx)
-        .await
-        .map_err(|e| format!("Failed to collect LP UTXOs: {e:?}"))?;
-
-    let total_available: u64 = all_sourced_utxos.iter().map(|su| su.utxo.value).sum();
-    if total_available < amount_sat.saturating_add(fee_margin) {
-        return Err(format!(
-            "Insufficient BTC across all LP addresses: available {total_available} sats, requested {amount_sat} sats (+ ~{fee_margin} fees)"
-        ));
-    }
-
-    let fee_per_byte = get_fee_per_byte(ctx).await;
-
-    let (transaction, prevouts, selected_indices) =
-        p2wpkh::build_multi_address_transaction(
-            ctx, &all_sourced_utxos, &change_address,
-            destination, amount_sat, fee_per_byte,
-        ).await;
-
-    let signed_tx = p2wpkh::sign_multi_address_transaction(
-        ctx, &all_sourced_utxos, &selected_indices,
-        transaction, &prevouts, sign_with_ecdsa,
-    ).await;
-
-    let tx_bytes = serialize(&signed_tx);
-    let txid = signed_tx.compute_txid().to_string();
-
-    Ok((txid, tx_bytes))
-}
-
-/// Variant of the multi-address tx pipeline that does NOT broadcast,
-/// and returns the selected UTXO indices (for channel funding reservation).
-async fn build_sign_multi_addr_tx_no_broadcast(
+/// Returns `(txid, tx_bytes, all_sourced_utxos, selected_indices)`.
+async fn build_sign_multi_addr_tx(
     ctx: &crate::BitcoinContext,
     destination: &Address,
     amount_sat: u64,
@@ -316,7 +278,7 @@ pub async fn withdraw_btc_impl(request: LpBtcWithdrawRequest) -> LpBtcWithdrawRe
     };
 
     // Build, sign, and broadcast
-    let (txid, tx_bytes) = match build_sign_broadcast_multi_addr_tx(
+    let (txid, tx_bytes, _, _) = match build_sign_multi_addr_tx(
         &ctx, &dst_address, request.amount_sat, 0,
     ).await {
         Ok(result) => result,
@@ -681,7 +643,7 @@ pub async fn fund_channel_impl(request: FundChannelRequest) -> FundChannelRespon
     // Build and sign (without broadcast — relay passes to LDK)
     let fee_margin = 5000u64;
     let (txid, tx_bytes, all_sourced_utxos, selected_indices) =
-        match build_sign_multi_addr_tx_no_broadcast(
+        match build_sign_multi_addr_tx(
             &ctx, &funding_address, request.amount_sat, fee_margin,
         ).await {
             Ok(result) => result,

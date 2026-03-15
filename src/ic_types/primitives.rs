@@ -3,7 +3,7 @@ use sha2::Sha512 as Hasher;
 
 use candid::CandidType;
 pub use candid::{
-    Deserialize, Int, Nat,
+    Deserialize, Nat,
     types::{Serializer, Type},
     types::{TypeInner, TypeInner::Nat8},
 };

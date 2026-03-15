@@ -1,4 +1,4 @@
-//  Copyright 2025 PolyCrypt GmbH
+//  Copyright 2026 PolyCrypt GmbH
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 pub use candid::{
-    CandidType, Deserialize, Int, Nat,
+    CandidType, Deserialize, Nat,
     types::{Serializer, Type},
 };
 use serde::Serialize;
@@ -21,36 +21,11 @@ use serde::Serialize;
 /// Contains all errors that can occur during canister operations.
 pub enum CklError {
     NoHoldingsFound,
-    SignatureVerificationFailed,
-    InvalidSignature,
-    InvalidPubKey,
     UnauthorizedCaller,
-    SerializationError,
-
-    ///// The provided public key does not match the expected one.
-    PubKeyMismatch,
-    /// Any kind of signature mismatch.    
-    Authentication,
-    /// A non-finalized state was registered when a finalized state was
-    /// expected.
-    NotFinalized,
-    /// A deposit or withdrawal has been disputed after conclusion.
-    AlreadyConcluded,
-    /// In some way, the input was invalid.
-    InvalidInput,
-    /// When trying get more funds out of a pool than have been put into it.
-    InsufficientFunding,
     /// When there is not enough liquidity in the pool to perform a withdrawal of ckBTC
     InsufficientLiquidity,
-    /// When a state that is registered for dispute is older than the previously
-    /// registered state.
-    OutdatedState,
     /// Error while interaction with the ledger.
     LedgerError,
-    /// Error receiving ICP tokens.
-    ReceiverError(crate::receiver::ICPReceiverError),
-    /// Error confirming tx
-    ConfirmationError,
     Other(String),
 }
 impl std::fmt::Display for CklError {

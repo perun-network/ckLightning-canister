@@ -19,24 +19,11 @@ type ChannelSecretsInfo = record {
   delayed_payment_basepoint : blob;
 };
 type CklError = variant {
-  InvalidInput;
-  InsufficientFunding;
-  NotFinalized;
-  InvalidSignature;
-  OutdatedState;
-  PubKeyMismatch;
   UnauthorizedCaller;
   LedgerError;
-  Authentication;
-  InvalidPubKey;
-  AlreadyConcluded;
   InsufficientLiquidity;
-  SignatureVerificationFailed;
   Other : text;
   NoHoldingsFound;
-  ReceiverError : ICPReceiverError;
-  ConfirmationError;
-  SerializationError;
 };
 type CompleteOfframpRequest = record {
   request_id : text;
@@ -154,7 +141,9 @@ type GetPerCommitmentPointResponse = record {
   point : opt blob;
 };
 type GetRelayInfoResponse = record {
+  has_auth_token : opt bool;
   "principal" : opt principal;
+  relay_http_url : opt text;
   node_pubkey : opt blob;
   is_active : opt bool;
   registered : bool;

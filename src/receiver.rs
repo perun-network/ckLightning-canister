@@ -14,7 +14,7 @@
 use crate::ic_types::{Amount, PoolFunding};
 use async_trait::async_trait;
 pub use candid::{
-    CandidType, Deserialize, Int, Nat, Principal,
+    CandidType, Deserialize, Nat, Principal,
     types::{Serializer, Type},
 };
 use ic_cdk::call::Call;

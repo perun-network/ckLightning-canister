@@ -14,10 +14,8 @@ use ic_cdk::management_canister::{
 /// Errors are logged but never propagated — the 30s fallback polling
 /// catches anything missed.
 ///
-/// NOTE: On local development with dfx 0.29.2 (PocketIC), this outcall
-/// silently fails because PocketIC does not run the ic-https-outcalls-adapter.
-/// The relay's 30s fallback polling ensures tests still pass.
-/// On staging/mainnet with a real IC replica, outcalls work as expected.
+/// Works on both local development (dfx 0.29.2 with built-in outcall adapter)
+/// and staging/mainnet (IC consensus).
 pub fn notify_relay_webhook(path: &str) {
     // Read relay URL + token from state
     let (url, token) = {
