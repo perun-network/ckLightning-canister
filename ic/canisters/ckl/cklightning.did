@@ -837,7 +837,7 @@ service : (Network) -> {
   __candid_method_query_ln_channels : () -> (QueryLnChannelsResponse) query;
   __candid_method_query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
   // Returns the funds deposited for a channel's specified participant, if any.
-  // this function should be used to check whether all participants have
+  // This function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   __candid_method_query_user_lp_holdings : (FundingLPQueryArgs) -> (
       Result_9,
@@ -1285,7 +1285,7 @@ service : (Network) -> {
   query_ln_channels : () -> (QueryLnChannelsResponse) query;
   query_ln_invoice : (LnInvoiceRequest) -> (Result_8);
   // Returns the funds deposited for a channel's specified participant, if any.
-  // this function should be used to check whether all participants have
+  // This function should be used to check whether all participants have
   // deposited their owed funds into a channel to ensure it is fully funded.
   query_user_lp_holdings : (FundingLPQueryArgs) -> (Result_9) query;
   // Redistribute accumulated ckBTC protocol fees to LPs (admin-only).
