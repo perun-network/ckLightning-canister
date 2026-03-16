@@ -137,7 +137,7 @@ per_lp_amount = total_amount × (lp_balance / total_pool_balance)
 
 ### BTC Pool
 
-Single shared P2WPKH address derived via chainkey ECDSA. The canister tracks which UTXOs belong to which LP via `processed_utxos`. Deposits require 6 confirmations.
+Per-user P2WPKH addresses derived via chainkey ECDSA from each depositor's principal. The canister tracks which UTXOs belong to which LP via `processed_utxos`. Deposits require 6 confirmations.
 
 ## StableSwap AMM (stableswap.rs)
 
@@ -197,7 +197,7 @@ Fire-and-forget HTTPS outcalls to relay webhook on new swap requests:
 | Onramp | `request_onramp_invoice`, `get_pending_invoice_requests`, `submit_invoice`, `complete_swap` |
 | Offramp | `request_offramp`, `get_pending_offramp_requests`, `complete_offramp`, `fail_offramp` |
 | LP (ckBTC) | `deposit_ckbtc`, `withdraw_ckbtc`, `get_my_lp_balance`, `get_total_lp_balance` |
-| LP (BTC) | `get_lp_btc_address`, `deposit_btc`, `withdraw_btc` |
+| LP (BTC) | `get_lp_btc_user_address`, `deposit_btc_user`, `withdraw_btc` |
 | Channels | `register_ln_channel`, `verify_ln_channel`, `fund_channel` |
 | Signing | `generate_channel_secrets`, `sign_counterparty_commitment`, `sign_holder_commitment`, `sign_closing_tx`, `sign_justice_tx`, `sign_htlc_tx` |
 | HTLC | `create_htlc_with_tx_details`, `sign_htlc_success`, `sign_htlc_timeout` |
