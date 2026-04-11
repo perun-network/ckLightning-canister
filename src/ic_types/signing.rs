@@ -366,11 +366,20 @@ pub struct SignHtlcTxRequest {
 /// Request to register counterparty channel info for a channel.
 ///
 /// Stores the counterparty's funding pubkey so the canister can reconstruct
-/// the funding redeemscript for sighash computation.
+/// the funding redeemscript for sighash computation. Also stores the
+/// counterparty's payment basepoint and channel direction for BOLT-3
+/// commitment number extraction (old-state attack prevention).
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct RegisterChannelInfoRequest {
     /// Channel identifier (32 bytes)
     pub channel_keys_id: Vec<u8>,
     /// Counterparty's funding public key (33 bytes compressed)
     pub counterparty_funding_pubkey: Vec<u8>,
+    /// Counterparty's payment basepoint (33 bytes compressed).
+    /// Used with our payment basepoint to compute the BOLT-3 commitment
+    /// number obscuring factor.
+    pub counterparty_payment_basepoint: Vec<u8>,
+    /// Whether we opened the channel (true) or the peer did (false).
+    /// Determines the ordering of payment basepoints in the obscuring factor.
+    pub is_outbound: bool,
 }

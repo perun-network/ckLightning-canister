@@ -245,6 +245,28 @@ pub async fn sign_counterparty_commitment_impl(
         htlc_sigs.push(sig);
     }
 
+    // Track commitment number progression (old-state attack prevention).
+    // Extract the commitment number from the transaction and update the counter.
+    if let Ok(tx) = deserialize::<Transaction>(&request.commitment_tx_bytes) {
+        let state = STATE.read().expect("STATE lock: sign_counterparty_commitment read");
+        if let Some(commit_state) = state.channel_commitment_state.get(&channel_keys_id) {
+            let obscure_factor = commit_state.obscure_factor;
+            drop(state);
+            if let Ok(commitment_number) = bolt3_keys::extract_commitment_number(&tx, obscure_factor) {
+                let mut state = STATE.write().expect("STATE lock: sign_counterparty_commitment write");
+                if let Some(commit_state) = state.channel_commitment_state.get_mut(&channel_keys_id) {
+                    let should_update = match commit_state.highest_counterparty_commitment {
+                        Some(prev) => commitment_number > prev,
+                        None => true,
+                    };
+                    if should_update {
+                        commit_state.highest_counterparty_commitment = Some(commitment_number);
+                    }
+                }
+            }
+        }
+    }
+
     SignCounterpartyCommitmentResponse {
         success: true,
         commitment_sig: Some(commitment_sig),
@@ -256,6 +278,10 @@ pub async fn sign_counterparty_commitment_impl(
 /// Sign a holder commitment transaction.
 ///
 /// Only needs the commitment signature (chainkey ECDSA). No HTLC sigs needed.
+///
+/// Enforces commitment number monotonicity: rejects signing if the commitment
+/// number extracted from the transaction is behind the highest counterparty
+/// commitment number seen. This prevents the old-state channel close attack.
 pub async fn sign_holder_commitment_impl(
     request: SignHolderCommitmentRequest,
 ) -> SignHolderCommitmentResponse {
@@ -263,6 +289,46 @@ pub async fn sign_holder_commitment_impl(
         Ok(id) => id,
         Err(e) => return SignHolderCommitmentResponse { success: false, commitment_sig: None, error: Some(e) },
     };
+
+    // Check commitment number against the counter (old-state attack prevention).
+    // If we have a ChannelCommitmentState for this channel, extract the commitment
+    // number from the transaction and reject if it's stale.
+    {
+        let state = STATE.read().expect("STATE lock: sign_holder_commitment read");
+        if let Some(commit_state) = state.channel_commitment_state.get(&channel_keys_id) {
+            if let Some(highest) = commit_state.highest_counterparty_commitment {
+                let tx: Transaction = match deserialize(&request.commitment_tx_bytes) {
+                    Ok(tx) => tx,
+                    Err(e) => return SignHolderCommitmentResponse {
+                        success: false, commitment_sig: None,
+                        error: Some(format!("Failed to deserialize tx for commitment check: {e:?}")),
+                    },
+                };
+                match bolt3_keys::extract_commitment_number(&tx, commit_state.obscure_factor) {
+                    Ok(commitment_number) => {
+                        // Allow current state and off-by-one during handshake
+                        if highest > 0 && commitment_number < highest - 1 {
+                            return SignHolderCommitmentResponse {
+                                success: false, commitment_sig: None,
+                                error: Some(format!(
+                                    "Stale commitment rejected: number {} is behind counter {}",
+                                    commitment_number, highest
+                                )),
+                            };
+                        }
+                    }
+                    Err(e) => {
+                        return SignHolderCommitmentResponse {
+                            success: false, commitment_sig: None,
+                            error: Some(format!("Failed to extract commitment number: {e}")),
+                        };
+                    }
+                }
+            }
+            // If highest_counterparty_commitment is None, this is the first signing — allow
+        }
+        // If no ChannelCommitmentState, channel was registered before the fix — allow
+    }
 
     match sign_funding_output_tx(&channel_keys_id, &request.commitment_tx_bytes, request.funding_amount_sat).await {
         Ok(sig) => SignHolderCommitmentResponse { success: true, commitment_sig: Some(sig), error: None },

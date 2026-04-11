@@ -108,6 +108,54 @@ pub fn derive_private_revocation_key(
         .map_err(|e| format!("Failed to combine revocation key parts: {e:?}"))
 }
 
+/// Compute the BOLT-3 commitment number obscuring factor from both sides'
+/// payment basepoints and the channel direction.
+///
+/// Per BOLT-3: `SHA256(opener_payment_basepoint || accepter_payment_basepoint)`
+/// The last 6 bytes of the hash form the obscuring factor.
+pub fn compute_obscure_factor(
+    our_payment_basepoint: &PublicKey,
+    counterparty_payment_basepoint: &PublicKey,
+    is_outbound: bool,
+) -> u64 {
+    let mut engine = sha256::Hash::engine();
+    if is_outbound {
+        engine.input(&our_payment_basepoint.serialize());
+        engine.input(&counterparty_payment_basepoint.serialize());
+    } else {
+        engine.input(&counterparty_payment_basepoint.serialize());
+        engine.input(&our_payment_basepoint.serialize());
+    }
+    let res = sha256::Hash::from_engine(engine);
+    let bytes: &[u8] = res.as_ref();
+    ((bytes[26] as u64) << 40)
+        | ((bytes[27] as u64) << 32)
+        | ((bytes[28] as u64) << 24)
+        | ((bytes[29] as u64) << 16)
+        | ((bytes[30] as u64) << 8)
+        | (bytes[31] as u64)
+}
+
+/// Extract the real commitment number from a commitment transaction.
+///
+/// Per BOLT-3, the commitment number is encoded in:
+/// - `lock_time` field: bits 0-23 of the obscured commitment number
+/// - `sequence` field of input 0: bits 24-47 of the obscured commitment number
+///
+/// The real number is recovered by XOR with the obscuring factor.
+pub fn extract_commitment_number(
+    tx: &bitcoin::Transaction,
+    obscure_factor: u64,
+) -> Result<u64, String> {
+    if tx.input.is_empty() {
+        return Err("Transaction has no inputs".into());
+    }
+    let lock_time_bits = (tx.lock_time.to_consensus_u32() & 0x00FFFFFF) as u64;
+    let sequence_bits = (tx.input[0].sequence.0 & 0x00FFFFFF) as u64;
+    let obscured = lock_time_bits | (sequence_bits << 24);
+    Ok(obscured ^ obscure_factor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

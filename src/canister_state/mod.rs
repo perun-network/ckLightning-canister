@@ -222,6 +222,9 @@ where
     // Counterparty funding pubkey per channel (channel_keys_id -> 33-byte pubkey)
     pub(crate) channel_counterparty_pubkeys: HashMap<[u8; 32], Vec<u8>>,
 
+    // Commitment number tracking per channel (old-state attack prevention)
+    pub(crate) channel_commitment_state: HashMap<[u8; 32], ChannelCommitmentState>,
+
     // HTLC transaction details for signing (payment_hash -> details)
     pub(crate) htlc_tx_details: HashMap<[u8; 32], HtlcTxDetails>,
 
@@ -312,6 +315,18 @@ pub struct ChannelSecretsInternal {
     pub delayed_payment_base_secret: [u8; 32],
     pub payment_secret: [u8; 32],
     pub commitment_seed: [u8; 32],
+}
+
+/// Tracks commitment number progression per channel.
+/// Used to prevent old-state attacks: the canister rejects signing
+/// holder commitments with a number below the highest counterparty
+/// commitment it has seen.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct ChannelCommitmentState {
+    /// BOLT-3 obscuring factor, precomputed from both sides' payment basepoints.
+    pub obscure_factor: u64,
+    /// Highest counterparty commitment number signed via sign_counterparty_commitment.
+    pub highest_counterparty_commitment: Option<u64>,
 }
 
 /// Transaction details needed to sign an HTLC
@@ -560,6 +575,7 @@ where
             htlc_manager: HtlcManager::new(),
             channel_secrets: HashMap::new(),
             channel_counterparty_pubkeys: HashMap::new(),
+            channel_commitment_state: HashMap::new(),
             htlc_tx_details: HashMap::new(),
             test_onramp_timeout_ns: None,
             test_offramp_timeout_ns: None,
@@ -753,6 +769,7 @@ where
         let channel_balances = sorted_map!(self.channel_balances);
         let channel_secrets = sorted_map!(self.channel_secrets);
         let channel_counterparty_pubkeys = sorted_map!(self.channel_counterparty_pubkeys);
+        let channel_commitment_state = sorted_map!(self.channel_commitment_state);
         let htlc_tx_details = sorted_map!(self.htlc_tx_details);
         let onramp_rate_limits = sorted_map!(self.onramp_rate_limits);
         let offramp_rate_limits = sorted_map!(self.offramp_rate_limits);
@@ -793,6 +810,7 @@ where
             htlc_manager: self.htlc_manager.clone(),
             channel_secrets,
             channel_counterparty_pubkeys,
+            channel_commitment_state,
             htlc_tx_details,
             registered_relay: self.registered_relay.clone(),
             onramp_rate_limits,
@@ -852,6 +870,7 @@ where
         self.htlc_manager = snap.htlc_manager;
         self.channel_secrets = snap.channel_secrets.into_iter().collect();
         self.channel_counterparty_pubkeys = snap.channel_counterparty_pubkeys.into_iter().collect();
+        self.channel_commitment_state = snap.channel_commitment_state.into_iter().collect();
         self.htlc_tx_details = snap.htlc_tx_details.into_iter().collect();
         self.registered_relay = snap.registered_relay;
         self.onramp_rate_limits = snap.onramp_rate_limits.into_iter().collect();
@@ -907,6 +926,8 @@ pub struct CanisterStateSnapshot {
     pub htlc_manager: HtlcManager,
     pub channel_secrets: Vec<([u8; 32], ChannelSecretsInternal)>,
     pub channel_counterparty_pubkeys: Vec<([u8; 32], Vec<u8>)>,
+    #[serde(default)]
+    pub channel_commitment_state: Vec<([u8; 32], ChannelCommitmentState)>,
     pub htlc_tx_details: Vec<([u8; 32], HtlcTxDetails)>,
     pub registered_relay: Option<RelayRegistration>,
     pub onramp_rate_limits: Vec<(Principal, RateLimitInfo)>,
