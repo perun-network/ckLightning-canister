@@ -293,6 +293,11 @@ pub struct SignCounterpartyCommitmentResponse {
 }
 
 /// Request to sign a holder commitment transaction.
+///
+/// If `counterparty_sig` is provided, the canister will also build the
+/// complete witness and broadcast the fully signed transaction via
+/// `bitcoin_send_transaction`. This ensures the relay never holds the
+/// fully signed commitment transaction.
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct SignHolderCommitmentRequest {
     /// Channel identifier (32 bytes)
@@ -301,6 +306,10 @@ pub struct SignHolderCommitmentRequest {
     pub commitment_tx_bytes: Vec<u8>,
     /// Channel capacity for funding sighash (in satoshis)
     pub funding_amount_sat: u64,
+    /// Counterparty's signature on this commitment (64-byte compact ECDSA).
+    /// If provided, the canister builds the full witness and broadcasts.
+    #[serde(default)]
+    pub counterparty_sig: Option<Vec<u8>>,
 }
 
 /// Response from signing a holder commitment.
