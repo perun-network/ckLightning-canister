@@ -142,7 +142,10 @@ pub fn compute_obscure_factor(
 /// - `lock_time` field: bits 0-23 of the obscured commitment number
 /// - `sequence` field of input 0: bits 24-47 of the obscured commitment number
 ///
-/// The real number is recovered by XOR with the obscuring factor.
+/// LDK encodes: `obscured = obscure_factor XOR (INITIAL_COMMITMENT_NUMBER - commitment_number)`
+/// where `INITIAL_COMMITMENT_NUMBER = 0xFFFFFFFFFFFF` (2^48 - 1).
+///
+/// To recover: `commitment_number = INITIAL_COMMITMENT_NUMBER - (obscured XOR obscure_factor)`
 pub fn extract_commitment_number(
     tx: &bitcoin::Transaction,
     obscure_factor: u64,
@@ -153,7 +156,9 @@ pub fn extract_commitment_number(
     let lock_time_bits = (tx.lock_time.to_consensus_u32() & 0x00FFFFFF) as u64;
     let sequence_bits = (tx.input[0].sequence.0 & 0x00FFFFFF) as u64;
     let obscured = lock_time_bits | (sequence_bits << 24);
-    Ok(obscured ^ obscure_factor)
+    // INITIAL_COMMITMENT_NUMBER = (1 << 48) - 1 = 0xFFFFFFFFFFFF
+    let initial_commitment_number: u64 = (1u64 << 48) - 1;
+    Ok(initial_commitment_number - (obscured ^ obscure_factor))
 }
 
 #[cfg(test)]
