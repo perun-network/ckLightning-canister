@@ -350,8 +350,10 @@ type RedistributeFeesResponse = record {
   amount_distributed : nat64;
 };
 type RegisterChannelInfoRequest = record {
+  is_outbound : bool;
   channel_keys_id : blob;
   counterparty_funding_pubkey : blob;
+  counterparty_payment_basepoint : blob;
 };
 type RegisterLnChannelRequest = record {
   channel_id : blob;
@@ -464,6 +466,7 @@ type SignHolderCommitmentRequest = record {
   commitment_tx_bytes : blob;
   funding_amount_sat : nat64;
   channel_keys_id : blob;
+  counterparty_sig : opt blob;
 };
 type SignHolderCommitmentResponse = record {
   error : opt text;

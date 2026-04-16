@@ -603,10 +603,15 @@ pub fn release_commitment_secret_impl(
     }
 }
 
-/// Register counterparty channel info (funding pubkey) for a channel.
+/// Register counterparty channel info (funding pubkey + payment basepoint) for a channel.
 ///
-/// This is needed so the canister can reconstruct the funding redeemscript
-/// when computing sighashes for commitment/closing transactions.
+/// This is needed so the canister can:
+/// 1. Reconstruct the funding redeemscript for sighash computation
+/// 2. Compute the BOLT-3 obscuring factor for commitment number extraction
+///    (old-state attack prevention)
+///
+/// Registration is immutable per channel — re-registration is rejected to prevent
+/// an attacker from corrupting the obscuring factor.
 pub fn register_channel_info_impl(request: RegisterChannelInfoRequest) -> bool {
     let channel_keys_id: [u8; 32] = match request.channel_keys_id.try_into() {
         Ok(id) => id,
@@ -617,16 +622,69 @@ pub fn register_channel_info_impl(request: RegisterChannelInfoRequest) -> bool {
         return false;
     }
 
-    // Validate it's a valid pubkey
+    // Validate counterparty funding pubkey
     if bitcoin::secp256k1::PublicKey::from_slice(&request.counterparty_funding_pubkey).is_err() {
         return false;
     }
 
+    // Validate counterparty payment basepoint
+    let counterparty_payment_basepoint = match bitcoin::secp256k1::PublicKey::from_slice(
+        &request.counterparty_payment_basepoint,
+    ) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+
     let mut state = STATE.write().expect("STATE lock: register_channel_info");
+
+    // Reject re-registration — immutable once set (prevents obscure factor corruption)
+    if state.channel_counterparty_pubkeys.contains_key(&channel_keys_id) {
+        ic_cdk::println!(
+            "register_channel_info: rejected re-registration for channel {}",
+            hex::encode(channel_keys_id)
+        );
+        return false;
+    }
+
+    // Compute the BOLT-3 obscuring factor for commitment number extraction.
+    // Requires our payment basepoint (from channel secrets) and the counterparty's.
+    let obscure_factor = if let Some(secrets) = state.channel_secrets.get(&channel_keys_id) {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let our_payment_secret = match bitcoin::secp256k1::SecretKey::from_slice(&secrets.payment_secret) {
+            Ok(sk) => sk,
+            Err(_) => return false,
+        };
+        let our_payment_basepoint = our_payment_secret.public_key(&secp);
+        bolt3_keys::compute_obscure_factor(
+            &our_payment_basepoint,
+            &counterparty_payment_basepoint,
+            request.is_outbound,
+        )
+    } else {
+        // Channel secrets not yet generated — can't compute obscure factor
+        ic_cdk::println!(
+            "register_channel_info: no channel secrets for {}, skipping commitment state",
+            hex::encode(channel_keys_id)
+        );
+        0
+    };
+
     state.channel_counterparty_pubkeys.insert(
         channel_keys_id,
         request.counterparty_funding_pubkey,
     );
+
+    // Initialize commitment state tracking
+    if obscure_factor != 0 {
+        state.channel_commitment_state.insert(
+            channel_keys_id,
+            super::ChannelCommitmentState {
+                obscure_factor,
+                highest_counterparty_commitment: None,
+            },
+        );
+    }
+
     true
 }
 
@@ -785,10 +843,14 @@ mod tests {
         let channel_keys_id = [0xD1; 32];
         let counterparty_key = SecretKey::from_slice(&[50u8; 32]).unwrap();
         let counterparty_pubkey = counterparty_key.public_key(&secp).serialize().to_vec();
+        let payment_key = SecretKey::from_slice(&[51u8; 32]).unwrap();
+        let payment_basepoint = payment_key.public_key(&secp).serialize().to_vec();
 
         let request = RegisterChannelInfoRequest {
             channel_keys_id: channel_keys_id.to_vec(),
             counterparty_funding_pubkey: counterparty_pubkey.clone(),
+            counterparty_payment_basepoint: payment_basepoint,
+            is_outbound: true,
         };
 
         let result = register_channel_info_impl(request);
@@ -806,13 +868,52 @@ mod tests {
 
         // 33 bytes but not a valid secp256k1 point
         let invalid_pubkey = vec![0x04; 33]; // 0x04 prefix is for uncompressed, but only 33 bytes
+        let secp = Secp256k1::new();
+        let payment_key = SecretKey::from_slice(&[52u8; 32]).unwrap();
+        let payment_basepoint = payment_key.public_key(&secp).serialize().to_vec();
 
         let request = RegisterChannelInfoRequest {
             channel_keys_id: channel_keys_id.to_vec(),
             counterparty_funding_pubkey: invalid_pubkey,
+            counterparty_payment_basepoint: payment_basepoint,
+            is_outbound: true,
         };
 
         let result = register_channel_info_impl(request);
         assert!(!result, "Should fail with invalid pubkey bytes");
+    }
+
+    #[test]
+    fn test_register_channel_info_rejects_reregistration() {
+        let secp = Secp256k1::new();
+        let channel_keys_id = [0xD3; 32];
+        let key1 = SecretKey::from_slice(&[53u8; 32]).unwrap();
+        let pubkey1 = key1.public_key(&secp).serialize().to_vec();
+        let payment_key = SecretKey::from_slice(&[54u8; 32]).unwrap();
+        let payment_basepoint = payment_key.public_key(&secp).serialize().to_vec();
+
+        let request1 = RegisterChannelInfoRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            counterparty_funding_pubkey: pubkey1.clone(),
+            counterparty_payment_basepoint: payment_basepoint.clone(),
+            is_outbound: true,
+        };
+        assert!(register_channel_info_impl(request1), "First registration should succeed");
+
+        // Second registration with same channel_keys_id should fail
+        let key2 = SecretKey::from_slice(&[55u8; 32]).unwrap();
+        let pubkey2 = key2.public_key(&secp).serialize().to_vec();
+        let request2 = RegisterChannelInfoRequest {
+            channel_keys_id: channel_keys_id.to_vec(),
+            counterparty_funding_pubkey: pubkey2,
+            counterparty_payment_basepoint: payment_basepoint,
+            is_outbound: false,
+        };
+        assert!(!register_channel_info_impl(request2), "Re-registration should be rejected");
+
+        // Verify original pubkey is still stored
+        let state = STATE.read().expect("STATE lock");
+        let stored = state.channel_counterparty_pubkeys.get(&channel_keys_id).unwrap();
+        assert_eq!(stored, &pubkey1, "Original pubkey must be preserved");
     }
 }

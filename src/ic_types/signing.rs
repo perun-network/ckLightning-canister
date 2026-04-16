@@ -293,6 +293,11 @@ pub struct SignCounterpartyCommitmentResponse {
 }
 
 /// Request to sign a holder commitment transaction.
+///
+/// If `counterparty_sig` is provided, the canister will also build the
+/// complete witness and broadcast the fully signed transaction via
+/// `bitcoin_send_transaction`. This ensures the relay never holds the
+/// fully signed commitment transaction.
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct SignHolderCommitmentRequest {
     /// Channel identifier (32 bytes)
@@ -301,6 +306,10 @@ pub struct SignHolderCommitmentRequest {
     pub commitment_tx_bytes: Vec<u8>,
     /// Channel capacity for funding sighash (in satoshis)
     pub funding_amount_sat: u64,
+    /// Counterparty's signature on this commitment (64-byte compact ECDSA).
+    /// If provided, the canister builds the full witness and broadcasts.
+    #[serde(default)]
+    pub counterparty_sig: Option<Vec<u8>>,
 }
 
 /// Response from signing a holder commitment.
@@ -366,11 +375,20 @@ pub struct SignHtlcTxRequest {
 /// Request to register counterparty channel info for a channel.
 ///
 /// Stores the counterparty's funding pubkey so the canister can reconstruct
-/// the funding redeemscript for sighash computation.
+/// the funding redeemscript for sighash computation. Also stores the
+/// counterparty's payment basepoint and channel direction for BOLT-3
+/// commitment number extraction (old-state attack prevention).
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct RegisterChannelInfoRequest {
     /// Channel identifier (32 bytes)
     pub channel_keys_id: Vec<u8>,
     /// Counterparty's funding public key (33 bytes compressed)
     pub counterparty_funding_pubkey: Vec<u8>,
+    /// Counterparty's payment basepoint (33 bytes compressed).
+    /// Used with our payment basepoint to compute the BOLT-3 commitment
+    /// number obscuring factor.
+    pub counterparty_payment_basepoint: Vec<u8>,
+    /// Whether we opened the channel (true) or the peer did (false).
+    /// Determines the ordering of payment basepoints in the obscuring factor.
+    pub is_outbound: bool,
 }
