@@ -15,11 +15,11 @@
 use candid::Principal;
 use lazy_static::lazy_static;
 
-pub const MAINNET_ICP_LEDGER: &str = "bkyz2-fmaaa-aaaaa-qaaaq-cai";
-pub const DEVNET_ICP_LEDGER: &str = "ufxgi-4p777-77774-qaadq-cai";
-pub const DEVNET_CKBTC_LEDGER: &str = "u6s2n-gx777-77774-qaaba-cai";
-pub const DEVNET_CKBTC_MINTER: &str = "be2us-64aaa-aaaaa-qaabq-cai";
-pub const DEVNET_BASIC_BITCOIN: &str = "vpyes-67777-77774-qaaeq-cai";
+pub const MAINNET_ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+pub const DEVNET_ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+pub const DEVNET_CKBTC_LEDGER: &str = "mc6ru-gyaaa-aaaar-qaaaq-cai";
+pub const DEVNET_CKBTC_MINTER: &str = "ml52i-qqaaa-aaaar-qaaba-cai";
+pub const DEVNET_BASIC_BITCOIN: &str = "g4xu7-jiaaa-aaaan-aaaaq-cai";
 pub const DEFAULT_CKBTC_FEE: u64 = 1000;
 
 lazy_static! {
