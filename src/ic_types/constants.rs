@@ -20,7 +20,7 @@ pub const DEVNET_ICP_LEDGER: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 pub const DEVNET_CKBTC_LEDGER: &str = "mc6ru-gyaaa-aaaar-qaaaq-cai";
 pub const DEVNET_CKBTC_MINTER: &str = "ml52i-qqaaa-aaaar-qaaba-cai";
 pub const DEVNET_BASIC_BITCOIN: &str = "g4xu7-jiaaa-aaaan-aaaaq-cai";
-pub const DEFAULT_CKBTC_FEE: u64 = 1000;
+pub const DEFAULT_CKBTC_FEE: u64 = 10;
 
 lazy_static! {
     pub static ref CKBTC_LEDGER_PRINCIPAL: Principal =

@@ -28,7 +28,7 @@ use ic_cdk::bitcoin_canister::{
 };
 use std::str::FromStr;
 
-const REQUIRED_BTC_CONFIRMATIONS: u32 = 6;
+const REQUIRED_BTC_CONFIRMATIONS: u32 = 1;
 
 // =============================================================================
 // Shared Helpers
