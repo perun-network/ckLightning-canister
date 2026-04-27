@@ -136,16 +136,22 @@ pub fn compute_obscure_factor(
         | (bytes[31] as u64)
 }
 
-/// Extract the real commitment number from a commitment transaction.
+/// Extract the forward-counting commitment number from a commitment transaction.
 ///
-/// Per BOLT-3, the commitment number is encoded in:
+/// Per BOLT-3, the obscured commitment number is encoded in:
 /// - `lock_time` field: bits 0-23 of the obscured commitment number
 /// - `sequence` field of input 0: bits 24-47 of the obscured commitment number
 ///
-/// LDK encodes: `obscured = obscure_factor XOR (INITIAL_COMMITMENT_NUMBER - commitment_number)`
-/// where `INITIAL_COMMITMENT_NUMBER = 0xFFFFFFFFFFFF` (2^48 - 1).
+/// On the wire, `obscured = obscure_factor XOR commitment_number`, where
+/// `commitment_number` counts forward (state 0 → 0, state N → N).
+/// To recover: `commitment_number = obscured XOR obscure_factor`.
 ///
-/// To recover: `commitment_number = INITIAL_COMMITMENT_NUMBER - (obscured XOR obscure_factor)`
+/// Note: LDK's internal API exposes a "backwards-counting commitment number"
+/// (state 0 → INITIAL_COMMITMENT_NUMBER = 2^48 - 1, state N → INITIAL - N) and
+/// encodes via `factor XOR (INITIAL - backwards_number)`. The two formulations
+/// are equivalent on the wire; this function returns the forward form so that
+/// downstream monotonicity checks ("newer commitments have larger numbers")
+/// read naturally.
 pub fn extract_commitment_number(
     tx: &bitcoin::Transaction,
     obscure_factor: u64,
@@ -156,9 +162,7 @@ pub fn extract_commitment_number(
     let lock_time_bits = (tx.lock_time.to_consensus_u32() & 0x00FFFFFF) as u64;
     let sequence_bits = (tx.input[0].sequence.0 & 0x00FFFFFF) as u64;
     let obscured = lock_time_bits | (sequence_bits << 24);
-    // INITIAL_COMMITMENT_NUMBER = (1 << 48) - 1 = 0xFFFFFFFFFFFF
-    let initial_commitment_number: u64 = (1u64 << 48) - 1;
-    Ok(initial_commitment_number - (obscured ^ obscure_factor))
+    Ok(obscured ^ obscure_factor)
 }
 
 #[cfg(test)]
@@ -343,5 +347,73 @@ mod tests {
 
         assert_eq!(rev_pubkey, expected_pubkey,
             "Derived revocation private key's pubkey must match BOLT-3 public revocation formula");
+    }
+
+    /// Build a minimal commitment-style transaction whose locktime+sequence
+    /// encode the given obscured number per BOLT-3 (LDK 0.1.x convention:
+    /// locktime high byte 0x20, sequence high byte 0x80).
+    fn make_obscured_tx(obscured: u64) -> bitcoin::Transaction {
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        let lock_time = LockTime::from_consensus(((0x20u32) << 24) | ((obscured & 0x00FFFFFF) as u32));
+        let sequence = Sequence(((0x80u32) << 24) | ((obscured >> 24) as u32));
+        Transaction {
+            version: Version::TWO,
+            lock_time,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut { value: Amount::from_sat(0), script_pubkey: ScriptBuf::new() }],
+        }
+    }
+
+    #[test]
+    fn test_extract_commitment_number_state_zero() {
+        let factor: u64 = 0x123456789ABC;
+        let tx = make_obscured_tx(factor ^ 0);
+        assert_eq!(extract_commitment_number(&tx, factor).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_extract_commitment_number_small_states() {
+        let factor: u64 = 0x0F0E0D0C0B0A;
+        for state in [1u64, 2, 3, 7, 100, 1_000_000] {
+            let tx = make_obscured_tx(factor ^ state);
+            let got = extract_commitment_number(&tx, factor).unwrap();
+            assert_eq!(got, state, "state {state} must round-trip");
+        }
+    }
+
+    #[test]
+    fn test_extract_commitment_number_zero_factor() {
+        // Degenerate factor=0: extracted equals the obscured value directly.
+        let factor: u64 = 0;
+        for state in [0u64, 1, 5, 42] {
+            let tx = make_obscured_tx(state);
+            assert_eq!(extract_commitment_number(&tx, factor).unwrap(), state);
+        }
+    }
+
+    #[test]
+    fn test_extract_commitment_number_high_state() {
+        // A state number that occupies all 48 bits of the obscured field.
+        let factor: u64 = 0xAABBCCDDEEFF;
+        let state: u64 = (1u64 << 48) - 1;
+        let tx = make_obscured_tx(factor ^ state);
+        assert_eq!(extract_commitment_number(&tx, factor).unwrap(), state);
+    }
+
+    #[test]
+    fn test_extract_commitment_number_empty_inputs_errs() {
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, ScriptBuf, Transaction, TxOut};
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut { value: Amount::from_sat(0), script_pubkey: ScriptBuf::new() }],
+        };
+        assert!(extract_commitment_number(&tx, 0).is_err());
     }
 }

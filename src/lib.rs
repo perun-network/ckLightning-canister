@@ -195,6 +195,22 @@ fn upgrade(network: Network) {
 
             let mut state = canister_state::STATE.write().expect("STATE lock: post_upgrade");
             state.restore_from_snapshot(snapshot);
+
+            // Migration: clear stale `highest_counterparty_commitment` values that were
+            // recorded before extract_commitment_number was changed to return a forward-
+            // counting state number. Pre-fix values are LDK backwards-counting numbers
+            // (always close to 2^48 = INITIAL_COMMITMENT_NUMBER); legitimate forward
+            // values are bounded well below 1B. Resetting to None lets the next
+            // counterparty signing re-bootstrap monotonicity tracking; subsequent
+            // holder-commitment signing then works as intended. Idempotent on re-run.
+            const MAX_PLAUSIBLE_FORWARD_COMMITMENT: u64 = 1_000_000_000;
+            for entry in state.channel_commitment_state.values_mut() {
+                if let Some(h) = entry.highest_counterparty_commitment {
+                    if h > MAX_PLAUSIBLE_FORWARD_COMMITMENT {
+                        entry.highest_counterparty_commitment = None;
+                    }
+                }
+            }
         }
     }
 }
