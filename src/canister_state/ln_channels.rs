@@ -174,7 +174,7 @@ fn update_channel_verification(
         Some((value, confirmations)) => {
             let value_matches = value == channel_info.capacity_sats;
 
-            channel.status = if value_matches && confirmations >= 3 {
+            channel.status = if value_matches && confirmations >= 2 {
                 LnChannelStatus::Verified { confirmations }
             } else if !value_matches {
                 LnChannelStatus::Failed {
@@ -188,14 +188,14 @@ fn update_channel_verification(
             let error = if !value_matches {
                 Some(format!("Value mismatch: expected {} sats, found {} sats",
                     channel_info.capacity_sats, value))
-            } else if confirmations < 3 {
-                Some(format!("Insufficient confirmations: {confirmations} (need at least 3)"))
+            } else if confirmations < 2 {
+                Some(format!("Insufficient confirmations: {confirmations} (need at least 2)"))
             } else {
                 None
             };
 
             VerifyLnChannelResponse {
-                verified: value_matches && confirmations >= 3,
+                verified: value_matches && confirmations >= 2,
                 confirmations: Some(confirmations),
                 utxo_value_sats: Some(value),
                 error,
