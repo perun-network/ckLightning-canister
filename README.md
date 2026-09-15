@@ -109,7 +109,7 @@ dfx canister install <canister-id> --mode install --wasm cklightning-with-did.wa
 
 | Setting | Location | Notes |
 |---|---|---|
-| ckBTC ledger, minter, ICP ledger, Bitcoin canister IDs | `src/ic_types/constants.rs` | differ per branch |
+| ckBTC ledger and ICP ledger IDs | `src/ic_types/constants.rs` | differ per branch; the minter, Bitcoin-canister and `MAINNET_ICP_LEDGER` constants are unused (Bitcoin access goes through the management canister, selected by the init `Network`) |
 | `DEFAULT_CKBTC_FEE` | `src/ic_types/constants.rs:23` | must equal the target ledger's `icrc1_fee`: 1000 for the devnet ckBTC ledger (`ic/deploy_contracts_devnet.sh:116`), 10 for ckTESTBTC; a mismatch makes every transfer fail with `BadFee` |
 | Initial anti-DDoS fee `ICP_DDOS_FEE_E8S` | `src/ic_types/constants.rs:33` | 1 ICP; admin can change it with `set_icp_ddos_fee` |
 | Onramp / offramp timeouts | `src/ic_types/constants.rs:37-38` | 30 / 10 minutes |
