@@ -1,71 +1,179 @@
 # ckLightning-canister
 
-IC canister for the ckLightning bridge. Manages liquidity pools, atomic BTC/ckBTC swaps, channel signing, and fee collection.
+Internet Computer canister for the ckLightning bridge (Lightning BTC ↔ ckBTC). Manages the two-asset
+liquidity pool (BTC + ckBTC), prices swaps with a StableSwap AMM, keeps swap state, moves ckBTC/ICP via
+ICRC-1/2, controls threshold-ECDSA Bitcoin addresses and produces every Lightning channel signature for
+the relay node.
 
-## Related Components
+> **Status (September 2026):** research prototype, tested on a local replica and on IC mainnet with
+> **ckTESTBTC / Bitcoin testnet4** only. Not audited or configured for real ckBTC. The staging canister
+> `5iwit-tiaaa-aaaau-aelaa-cai` is currently not running (out of cycles, uninstalled).
+
+## Related components
 
 | Component | Repo | Role |
 |-----------|------|------|
-| **ic-lightning-relay** | [perun-network/ic-lightning-relay](https://github.com/perun-network/ic-lightning-relay) | LDK Lightning node — swap execution, invoice creation, channel management |
-| **ckLightning-client** | [perun-network/ck-lightning-client](https://github.com/perun-network/ck-lightning-client) | CLI — user-facing swap requests, LP operations, admin |
+| **ic-lightning-relay** | [perun-network/ic-lightning-relay](https://github.com/perun-network/ic-lightning-relay) | LDK Lightning node — invoices, payments, channels; calls this canister for all channel signatures. Links this crate as a library. |
+| **ckLightning-client** | [perun-network/ck-lightning-client](https://github.com/perun-network/ck-lightning-client) | CLI — swap requests, LP operations, admin |
+
+Maintainers: project handover notes, staging runbook and known issues are kept in the relay repository.
+
+## Branches
+
+| Branch | Purpose |
+|---|---|
+| `main` | Local-replica ledger/minter IDs, `DEFAULT_CKBTC_FEE = 1000`, LP BTC confirmations 6, channel verification confirmations 3. Use for local development. |
+| `staging-april-deployment` | IC mainnet ckTESTBTC/ICP IDs, `DEFAULT_CKBTC_FEE = 10`, confirmations lowered to 1 / 2 for testnet4 testing, plus the commitment-number direction fix `96d0fda` (not yet on `main`). |
+
+Switching environments means editing constants and rebuilding (see [Configuration](#configuration)).
 
 ## Prerequisites
 
-- Rust toolchain (stable, with `wasm32-unknown-unknown` target)
-- `dfx` (version 0.29.2, set via `dfxvm default 0.29.2`)
-- `candid-extractor` (`cargo install candid-extractor`)
-- Bitcoin Core (`bitcoind`) for regtest
+Verified from a clean checkout on 2026-09-14:
 
-## Architecture
-
-- **Liquidity pools**: Dual-asset LP (ckBTC + BTC) with proportional share tracking
-- **StableSwap AMM**: Curve-style pricing for BTC ↔ ckBTC swaps with configurable amplification, fees, and slippage limits
-- **Channel signing**: Canister holds all channel secrets, signs commitment/HTLC transactions via local ECDSA and chainkey ECDSA
-- **Webhook outcalls**: HTTPS outcalls notify the relay on new swap requests
-- **Anti-DDoS**: Configurable ICP security deposit on swap requests (refunded on success)
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed component design, swap flows, and signing mechanics.
-
-## Key Files
-
-```
-src/
-├── canister.rs                  # #[update]/#[query] endpoints
-├── ic_types.rs                  # Candid types (requests, responses, state enums)
-├── canister_state/
-│   ├── mod.rs                   # CanisterState + access control
-│   ├── swap_onramp.rs           # Lightning → ckBTC swap logic
-│   ├── swap_offramp.rs          # ckBTC → Lightning swap logic
-│   ├── lp_ckbtc.rs              # ckBTC LP operations (deposit/withdraw)
-│   ├── lp_btc.rs                # BTC LP operations (deposit/withdraw)
-│   ├── ln_channels.rs           # Channel registration and balance tracking
-│   ├── channel_funding.rs       # Funding transaction signing
-│   ├── commitment_signing.rs    # Commitment transaction signing
-│   ├── htlc_signing.rs          # HTLC success/timeout signing
-│   ├── htlc_ops.rs              # HTLC state management
-│   ├── bolt3_keys.rs            # Channel key derivation
-│   ├── admin.rs                 # Admin/fee operations
-│   └── http_outcall.rs          # Relay webhook notifications
-├── stableswap.rs                # StableSwap AMM implementation
-├── liquidity_pool.rs            # LP share accounting
-├── htlc.rs                      # HTLC structs and Bitcoin scripts
-├── btc/                         # Bitcoin address derivation (P2TR, P2WSH)
-└── helpers.rs                   # Shared utilities
-```
+- Rust 1.88.0 (edition 2024 requires ≥ 1.85; no `rust-toolchain` file) with target `wasm32-unknown-unknown`
+- `dfx` 0.29.2 via dfxvm (`dfxvm default 0.29.2`)
+- `candid-extractor` 0.1.6 (`cargo install candid-extractor --version 0.1.6 --locked`)
+- `ic-wasm` 0.6.0 for mainnet installs (`cargo install ic-wasm --version 0.6.0 --locked`)
+- Bitcoin Core 25.0 for the local regtest devnet
 
 ## Build
 
 ```bash
-cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/cklightning.wasm ic/canisters/ckl/
+cargo build --locked --release --target wasm32-unknown-unknown -p cklightning   # ~1.5 min cold
+candid-extractor target/wasm32-unknown-unknown/release/cklightning.wasm > cklightning.did
 ```
 
-## Deploy (local)
+The Candid interface is generated by `ic_cdk::export_candid!()`; the extracted file matches the tracked
+`ic/canisters/ckl/cklightning.did` on `main`.
+
+## Tests
 
 ```bash
-cd ic
-./setup_all.sh  # Starts bitcoind + dfx, creates identities, deploys all canisters
+cargo test --lib                                                           # 87 unit tests
+cargo test --test btc_tx_tests --test htlc_tests --test canister_state_tests   # 10 tests, no replica
 ```
+
+`tests/agent_btc_tests.rs` and `tests/agent_ckl_tests.rs` talk to a running local replica with PEM
+identities. End-to-end tests (Lightning nodes + replica) are expect scripts outside this repo; see the
+relay repository.
+
+## Local devnet (regtest)
+
+The scripts in `ic/` start Bitcoin Core regtest and a local replica with Bitcoin integration, create
+identities and install nine canisters:
+
+```bash
+dfxvm default 0.29.2                       # start_dfx.sh calls `dfx stop` before setting a default
+export BITCOIN_DIR=/path/to/bitcoin-25.0   # must contain bin/ and bitcoin.conf (default: a developer path)
+cp target/wasm32-unknown-unknown/release/cklightning.wasm ic/canisters/ckl/
+cp cklightning.did ic/canisters/ckl/
+cd ic && ./setup_all.sh                    # start_dfx.sh → create_identities.sh → deploy_contracts_devnet.sh
+```
+
+> **Warning:** `ic/start_dfx.sh` runs `rm -rf ~/.config/dfx/` and `rm -rf ~/.cache/dfinity/`. It deletes
+> **all dfx identities of the current user**. Use a separate OS user or a throwaway `HOME` on any machine
+> that holds real identities. `setup_all.sh` hides the output of this step.
+
+- `setup_all.sh` deploys `ic/canisters/ckl/cklightning.wasm`, not your build output — copy it first.
+- The regtest `bitcoin.conf` (DFINITY example credentials) is listed in the relay repo README.
+- Canister IDs are deterministic because the creation order is fixed; the relay and client compile
+  them in: `cklightning` `vizcg-th777-77774-qaaea-cai`, ckBTC ledger `u6s2n-gx777-77774-qaaba-cai`,
+  ICP ledger `ufxgi-4p777-77774-qaadq-cai`, minter `uzt4z-lp777-77774-qaabq-cai`,
+  `basic_bitcoin` `vpyes-67777-77774-qaaeq-cai`.
+- Vendored canisters in `ic/canisters/`: the ICP ledger is downloaded by `ic/dfx.json` from a pinned
+  DFINITY release (`aba60ffb`). The ckBTC ledger/index/archive, minter, checker, KYT, mock and
+  `basic_bitcoin` Wasm files are committed without a recorded source version.
+- `ic/kill_all.sh` stops leftover relay / ldk-sample / client processes.
+
+## Deploy to IC mainnet
+
+```bash
+ic-wasm target/wasm32-unknown-unknown/release/cklightning.wasm -o cklightning-with-did.wasm \
+  metadata candid:service -f cklightning.did -v public
+dfx canister install <canister-id> --mode install --wasm cklightning-with-did.wasm \
+  --argument '(variant { testnet })' --network ic          # init arg: mainnet | testnet | regtest
+```
+
+- **Upgrade:** stop → `dfx canister snapshot create` → start → `--mode upgrade`. Restart the relay after
+  every upgrade (the funding-pubkey cache used by the signing endpoints is not persisted).
+- **Never `--mode reinstall`** a canister with open channels: channel secrets are generated with
+  `raw_rand` and cannot be recreated.
+- **Cycles:** the `#[heartbeat]` runs every consensus round and each threshold-ECDSA signature costs
+  ~26 B cycles. Set a high freezing threshold (`dfx canister update-settings --freezing-threshold`) and
+  monitor the balance; a canister that reaches zero is uninstalled and loses its state.
+- Threshold-ECDSA addresses depend only on canister ID, key name and fixed derivation paths, so
+  reinstalling the same code on the same canister ID regains control of its Bitcoin addresses.
+
+## Configuration
+
+| Setting | Location | Notes |
+|---|---|---|
+| ckBTC ledger, minter, ICP ledger, Bitcoin canister IDs | `src/ic_types/constants.rs` | differ per branch |
+| `DEFAULT_CKBTC_FEE` | `src/ic_types/constants.rs:23` | must equal the target ledger's `icrc1_fee`: 1000 for the devnet ckBTC ledger (`ic/deploy_contracts_devnet.sh:116`), 10 for ckTESTBTC; a mismatch makes every transfer fail with `BadFee` |
+| Initial anti-DDoS fee `ICP_DDOS_FEE_E8S` | `src/ic_types/constants.rs:33` | 1 ICP; admin can change it with `set_icp_ddos_fee` |
+| Onramp / offramp timeouts | `src/ic_types/constants.rs:37-38` | 30 / 10 minutes |
+| ECDSA key name | `src/lib.rs:122-126` | `dfx_test_key` for regtest, `test_key_1` for testnet and mainnet |
+| LP BTC deposit confirmations | `src/canister_state/lp_btc.rs:31` | |
+| Channel verification confirmations | `src/canister_state/ln_channels.rs:177,198` | |
+| Swap caps, StableSwap parameters, anti-DDoS fee | runtime, admin calls | swap caps are disabled (0) by default |
+
+## Roles and endpoints
+
+91 endpoints (67 update, 23 query, 1 heartbeat). `inspect_message` (`src/canister.rs:857-936`) filters
+ingress update calls by role before arguments are decoded:
+
+| Role | Examples |
+|---|---|
+| Controller | `set_admin` |
+| Admin | `update_stableswap_config`, `withdraw_protocol_fees`, `set_icp_ddos_fee`, `withdraw_icp_fees`, `redistribute_fees`, `prune_state`, `set_test_timeouts`, `set_swap_caps` |
+| Admin, controller or registered relay | `register_relay` (the caller becomes the relay principal), `retry_offramp_refund` |
+| Registered relay | `submit_invoice`, `complete_swap`, `mark_offramp_in_progress`, `complete_offramp`, `fail_offramp`, `fund_channel`, `channel_funded`, `channel_closed`, `generate_channel_secrets`, `register_channel_info`, `sign_counterparty_commitment`, `sign_holder_commitment_v2`, `sign_closing_tx`, `sign_justice_tx`, `sign_htlc_tx`, … |
+| Any caller (self-scoped) | `request_onramp_invoice`, `request_offramp`, `deposit_ckbtc`, `withdraw_ckbtc`, `get_lp_btc_user_address`, `deposit_btc_user`, `withdraw_btc`, `send_btc_from_depositor_address`, … |
+| Public | `get_ln_funding_pubkey`; all queries |
+
+Methods not listed in `inspect_message` (including the example address endpoints in `src/btc/address.rs`)
+are rejected for ingress calls.
+
+## State and upgrades
+
+State is an in-memory `CanisterState` behind a lock (`src/canister_state/mod.rs`). `pre_upgrade`
+Candid-encodes a full `CanisterStateSnapshot` into stable memory; `post_upgrade` restores it and runs
+migrations (`src/lib.rs:152-216`). Terminal swap records are only removed by the admin call
+`prune_state`; keep state small, because the whole snapshot must fit into one upgrade message.
+
+## Key files
+
+```
+src/
+├── lib.rs                       # init / pre_upgrade / post_upgrade, BitcoinContext (network, key name)
+├── canister.rs                  # all #[update]/#[query] endpoints, inspect_message, heartbeat
+├── canister_state/
+│   ├── mod.rs                   # CanisterState, snapshot, swap caps, relay-caller check
+│   ├── swap_onramp.rs           # onramp requests, invoice submission
+│   ├── swaps.rs                 # complete_swap (onramp settlement), ICP fee collect/refund
+│   ├── swap_offramp.rs          # offramp requests, completion, refunds
+│   ├── lp_ckbtc.rs, lp_btc.rs   # ckBTC / BTC liquidity pool operations
+│   ├── channel_funding.rs       # fund_channel reservations, channel_funded / channel_closed accounting
+│   ├── ln_channels.rs           # channel registration and on-chain verification
+│   ├── htlc_ops.rs              # HTLC state
+│   ├── htlc_signing.rs          # channel secret generation, per-commitment points, channel info
+│   ├── bolt3_keys.rs            # BOLT-3 key derivation, obscure factor, commitment numbers
+│   ├── commitment_signing.rs    # commitment / closing / justice / HTLC signing, holder broadcast
+│   ├── admin.rs                 # relay registration, config, fees, rate limits, pruning
+│   └── http_outcall.rs          # webhook outcall to the relay
+├── ic_types/                    # Candid types: constants, primitives, btc, channel, swap, lp, signing, admin
+├── btc/                         # address, btc_tx, common, ecdsa, schnorr, p2pkh, p2wpkh
+├── stableswap.rs                # StableSwap AMM
+├── liquidity_pool.rs            # proportional LP accounting
+├── htlc.rs                      # HTLC structs and scripts
+├── receiver.rs                  # ICRC transaction notifications
+├── helpers.rs, error.rs
+ic/                              # local devnet: dfx.json, setup/start/deploy/identity/kill scripts, vendored canisters
+tests/                           # unit-style integration tests and replica-backed agent tests
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for swap flows and signing details.
 
 ## License
 
