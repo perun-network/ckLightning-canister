@@ -149,10 +149,10 @@ All pool operations distribute costs/returns proportionally across LPs:
 per_lp_amount = total_amount × (lp_balance / total_pool_balance)
 ```
 
-- **Channel funding**: `deduct_proportional(BTC)` — all LPs share the cost
-- **Channel closure**: `credit_proportional(BTC)` — returned BTC shared among LPs
-- **Offramp completion**: `credit_proportional(CkBTC)` — LPs receive ckBTC from user
-- **Fee redistribution**: `credit_proportional(CkBTC)` — protocol fees shared among LPs
+- Channel funding: `deduct_proportional(BTC)` — all LPs share the cost
+- Channel closure: `credit_proportional(BTC)` — returned BTC shared among LPs
+- Offramp completion: `credit_proportional(CkBTC)` — LPs receive ckBTC from user
+- Fee redistribution: `credit_proportional(CkBTC)` — protocol fees shared among LPs
 
 ### BTC Pool
 
@@ -196,10 +196,10 @@ Two layers: `inspect_message` (`src/canister.rs:857-936`) rejects ingress update
 
 ## Anti-DDoS Protections
 
-- **ICP fee**: collected upfront on swap requests (initial value 1 ICP, admin-configurable), refunded only on success
-- **Rate limiting**: 10 requests per hour per principal per direction
-- **Swap timeouts**: 30 min (onramp), 10 min (offramp) — checked by the `#[heartbeat]`, which runs every consensus round and therefore burns cycles continuously
-- **Swap caps**: per-swap and hourly volume limits, disabled (0) until an admin sets them
+- ICP fee: collected upfront on swap requests (initial value 1 ICP, admin-configurable), refunded only on success
+- Rate limiting: 10 requests per hour per principal per direction
+- Swap timeouts: 30 min (onramp), 10 min (offramp) — checked by the `#[heartbeat]`, which runs every consensus round and therefore burns cycles continuously
+- Swap caps: per-swap and hourly volume limits, disabled (0) until an admin sets them
 
 ## HTTP Outcalls (http_outcall.rs)
 
