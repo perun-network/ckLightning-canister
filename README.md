@@ -16,7 +16,9 @@ the relay node.
 | **ic-lightning-relay** | [perun-network/ic-lightning-relay](https://github.com/perun-network/ic-lightning-relay) | LDK Lightning node — invoices, payments, channels; calls this canister for all channel signatures. Links this crate as a library. |
 | **ckLightning-client** | [perun-network/ck-lightning-client](https://github.com/perun-network/ck-lightning-client) | CLI — swap requests, LP operations, admin |
 
-Maintainers: project handover notes, staging runbook and known issues are kept in the relay repository.
+Running the canister day to day — install and upgrade, configuration, monitoring, funds, recovery:
+[OPERATIONS.md](OPERATIONS.md). Using the bridge as a user or liquidity provider: `USAGE.md` in the client
+repository. Handover notes, staging runbook and known issues are kept in the relay repository.
 
 ## Branches
 
