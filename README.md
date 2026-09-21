@@ -97,8 +97,9 @@ dfx canister install <canister-id> --mode install --wasm cklightning-with-did.wa
   --argument '(variant { testnet })' --network ic          # init arg: mainnet | testnet | regtest
 ```
 
-- **Upgrade:** stop → `dfx canister snapshot create` → start → `--mode upgrade`. Restart the relay after
-  every upgrade (the funding-pubkey cache used by the signing endpoints is not persisted).
+- **Upgrade:** see [OPERATIONS.md §2](OPERATIONS.md#2-install-and-upgrade) (snapshot first, same network
+  argument). Restart the relay after every upgrade (the funding-pubkey cache used by the signing endpoints
+  is not persisted).
 - **Never `--mode reinstall`** a canister with open channels: channel secrets are generated with
   `raw_rand` and cannot be recreated.
 - **Cycles:** the `#[heartbeat]` runs every consensus round and each threshold-ECDSA signature costs
@@ -129,7 +130,8 @@ ingress update calls by role before arguments are decoded:
 |---|---|
 | Controller | `set_admin` |
 | Admin | `update_stableswap_config`, `withdraw_protocol_fees`, `set_icp_ddos_fee`, `withdraw_icp_fees`, `redistribute_fees`, `prune_state`, `set_test_timeouts`, `set_swap_caps` |
-| Admin, controller or registered relay | `register_relay` (the caller becomes the relay principal), `retry_offramp_refund` |
+| Admin, controller or registered relay | `register_relay` (the caller becomes the relay principal) |
+| Admin or registered relay | `retry_offramp_refund` |
 | Registered relay | `submit_invoice`, `complete_swap`, `mark_offramp_in_progress`, `complete_offramp`, `fail_offramp`, `fund_channel`, `channel_funded`, `channel_closed`, `generate_channel_secrets`, `register_channel_info`, `sign_counterparty_commitment`, `sign_holder_commitment_v2`, `sign_closing_tx`, `sign_justice_tx`, `sign_htlc_tx`, … |
 | Any caller (self-scoped) | `request_onramp_invoice`, `request_offramp`, `deposit_ckbtc`, `withdraw_ckbtc`, `get_lp_btc_user_address`, `deposit_btc_user`, `withdraw_btc`, `send_btc_from_depositor_address`, … |
 | Public | `get_ln_funding_pubkey`; all queries |

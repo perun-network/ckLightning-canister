@@ -18,8 +18,8 @@ has no operator UI — everything below is `dfx` against the canister, or the cl
 | Registered relay | `register_relay` records the caller | signing, swap completion, channel bookkeeping |
 | User | any principal | own swaps, own LP positions, own addresses |
 
-Keep these apart if you can. On the April staging build one identity was all three at once, which means a
-compromise of the relay host is a compromise of the controller.
+Keep the three roles on separate identities. The relay runs on a networked host, so its key should be
+neither the controller nor the admin key.
 
 ## 2. Install and upgrade
 
@@ -110,10 +110,8 @@ records are only removed when an admin calls `prune_state(<nanosecond cutoff>)`.
 `withdraw_icp_fees` sends the **entire** ICP balance, which includes fees still owed back to users with
 pending swaps. Only use it when nothing is in flight.
 
-Do not use the legacy address endpoints (`set_btc_address`, `get_p2pkh_address`, `get_p2wpkh_address`,
-`get_p2tr_key_path_only_address`, `send_from_p2pkh_address`). They derive a fixed address that is not
-bound to the caller's principal, unlike the per-principal endpoints, so different users can end up sharing
-one address. They are leftovers from the DFINITY Bitcoin example and should be removed.
+`set_btc_address` is a deprecated leftover from the DFINITY Bitcoin example and will be removed; do not
+use it. Use the per-principal address endpoints instead (client `btc-address`, `lp-btc-address`).
 
 ## 6. Recovery
 
@@ -130,6 +128,18 @@ only a cooperative close remains possible, because the funding key is determinis
 Take a snapshot before every upgrade (`dfx canister snapshot create`, canister stopped) and keep the
 relay's `monitors/` backed up on its side. A snapshot restores canister state; it does nothing for the
 relay's channel state.
+
+To roll back to a snapshot:
+
+```bash
+dfx canister stop <id> --network ic --identity <controller>
+dfx canister snapshot list <id> --network ic --identity <controller>
+dfx canister snapshot load <id> <snapshot-id> --network ic --identity <controller>
+dfx canister start <id> --network ic --identity <controller>
+```
+
+Then restart the relay. A rollback loses every state change since the snapshot, including completed
+swaps, LP deposits and channel registrations, so use it only as a last resort.
 
 ## 7. Health checks you can run
 

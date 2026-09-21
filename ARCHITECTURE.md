@@ -188,8 +188,8 @@ Defaults from `CanisterState` initialisation (`src/canister_state/mod.rs`); chan
 | Caller | Can Do |
 |--------|--------|
 | **Controller** (deployer) | `set_admin`, `register_relay` |
-| **Admin** | `update_stableswap_config`, `withdraw_protocol_fees`, `redistribute_fees`, `set_icp_ddos_fee`, `withdraw_icp_fees`, `set_swap_caps`, `prune_state`, `set_test_timeouts`, `register_relay` |
-| **Relay** (registered) | `submit_invoice`, `complete_swap`, `mark_offramp_in_progress`, `complete_offramp`, `fail_offramp`, `fund_channel`, `channel_funded`, `channel_closed`, all channel signing endpoints, `get_pending_*` queries |
+| **Admin** | `update_stableswap_config`, `withdraw_protocol_fees`, `redistribute_fees`, `set_icp_ddos_fee`, `withdraw_icp_fees`, `set_swap_caps`, `prune_state`, `set_test_timeouts`, `register_relay`, `retry_offramp_refund` |
+| **Relay** (registered) | `register_relay` (re-register), `retry_offramp_refund`, `submit_invoice`, `complete_swap`, `mark_offramp_in_progress`, `complete_offramp`, `fail_offramp`, `fund_channel`, `channel_funded`, `channel_closed`, all channel signing endpoints, `get_pending_*` queries |
 | **Any user** | `request_onramp_invoice`, `request_offramp`, LP operations, user BTC operations, balance queries |
 
 Two layers: `inspect_message` (`src/canister.rs:857-936`) rejects ingress update calls from the wrong role before arguments are decoded (unknown methods are rejected), and the relay-only endpoints and sensitive queries additionally call `assert_relay_caller()`. `register_relay` stores the **caller** as the relay principal; a different principal cannot replace an existing registration.
